@@ -18,6 +18,15 @@ usgp-cache.workspace = true
 usgp-proto.workspace = true
 usgp-crypto.workspace = true
 usgp-common.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
+socket2.workspace = true
+libc.workspace = true
+tracing.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

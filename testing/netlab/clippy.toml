@@ -1,0 +1,6 @@
+# Same settings as the repository root clippy.toml, plus indexing in tests
+# (the crate denies clippy::indexing_slicing for its parsers).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

@@ -1,0 +1,43 @@
+# Test-only lab network tools for the M1 boot smoke (plan WU-10): a site DHCP
+# server emulator, an RFC 1542 relay agent, and a probe. Separate workspace,
+# excluded from the product workspace (root Cargo.toml `exclude =
+# ["testing"]`). Never a dependency of a product crate, never shipped.
+#
+# Independence rule (plan section 1.2): this workspace has its own small DHCP
+# and TFTP codecs and must not depend on usgp-dhcp or usgp-tftp, so a bug in
+# the product codec cannot be hidden by the same bug in the test tools.
+[workspace]
+resolver = "3"
+
+[package]
+name = "usgp-netlab"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+description = "Test-only lab DHCP server, DHCP relay agent and probe for the boot smoke"
+# license: pending owner decision (ROADMAP D-10)
+
+[dependencies]
+# Pure Rust (plan section 4). Linux socket code only; see src/net.rs.
+tokio = { version = "1.54", default-features = false, features = ["rt", "net", "time", "macros"] }
+socket2 = { version = "0.6", features = ["all"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+undocumented_unsafe_blocks = "deny"
+indexing_slicing = "deny"
+as_conversions = "deny"
+
+[profile.release]
+overflow-checks = true

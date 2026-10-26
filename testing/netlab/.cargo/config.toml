@@ -1,0 +1,4 @@
+[build]
+# Build output goes under the repository's top-level target/ directory, which
+# the clean-room name gate (scripts/check-names.sh) excludes as build output.
+target-dir = "../../target/testing/netlab"

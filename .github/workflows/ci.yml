@@ -1,5 +1,10 @@
 # CI gates (see .claude/skills/provision-workflow/references/quality-gates.md).
 # Third-party actions are pinned by full commit SHA (supply chain, SR-4).
+#
+# Result rule (all jobs): a gate that did not run is never reported as PASS.
+# The boot smoke harness exits 77 for NOT RUN; the boot-smoke job turns that
+# into a failed job with a "NOT RUN" annotation, because GitHub Actions has no
+# neutral job state and a green job reads as PASS.
 name: ci
 
 on:
@@ -8,13 +13,15 @@ on:
   pull_request:
   schedule:
     # Weekly re-run so new RustSec advisories surface without a code change.
+    # Also the trigger for the 10-minute fuzz-smoke job.
     - cron: "17 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -31,54 +38,13 @@ jobs:
   gates:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      # Pinned FIPS module toolchain (docs/BUILDING.md section 3, REL-002).
-      # Use these exact binaries, not the runner image's own CMake/Go.
-      CMAKE: /usr/bin/cmake
-      CC: /usr/bin/clang-18
-      CXX: /usr/bin/clang++-18
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
-      GOTOOLCHAIN: local
-      GOPROXY: "off"
-      EXPECT_GO: "1.22"
-      EXPECT_CMAKE: "3.28"
-      EXPECT_CLANG: "18.1"
-      EXPECT_PERL: "5.38"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install FIPS module build tools (decision 0001, docs/BUILDING.md)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake golang-1.22-go clang-18 libclang-18-dev perl ripgrep
-          echo "/usr/lib/go-1.22/bin" >> "$GITHUB_PATH"
-      - name: Verify and record FIPS build toolchain (REL-002)
-        run: |
-          set -euo pipefail
-          check() {
-            case "$3" in
-              "$2" | "$2".*) echo "ok: $1 $3" ;;
-              *) echo "::error::$1 is $3, expected $2.x (docs/BUILDING.md)"; exit 1 ;;
-            esac
-          }
-          [ "$(command -v go)" = /usr/lib/go-1.22/bin/go ] || { echo "::error::go is $(command -v go)"; exit 1; }
-          check go "$EXPECT_GO" "$(go env GOVERSION | sed 's/^go//')"
-          check cmake "$EXPECT_CMAKE" "$("$CMAKE" --version | head -n 1 | cut -d ' ' -f 3)"
-          check clang "$EXPECT_CLANG" "$("$CC" -dumpversion)"
-          check perl "$EXPECT_PERL" "$(perl -v | sed -n 's/.*(v\([0-9.]*\)).*/\1/p')"
-          {
-            echo '### FIPS build toolchain (docs/BUILDING.md)'
-            echo '```text'
-            go version
-            "$CMAKE" --version | head -n 1
-            "$CC" --version | head -n 1
-            perl -v | sed -n 2p
-            rustup --version 2> /dev/null
-            dpkg-query -W cmake golang-1.22-go clang-18 libclang-18-dev perl
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/fips-toolchain
+        with:
+          extra-packages: ripgrep
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install && rustup show
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -96,79 +62,167 @@ jobs:
       - run: scripts/check-names.sh
       - run: NAMES_FORCE_GREP=1 scripts/check-names.sh
       - run: scripts/test-check-names.sh
-      - name: Binaries start in FIPS mode (fail closed, SC-13)
+      - name: Binaries start in FIPS mode (fail closed, SC-13; start-up contract, plan section 3.6)
         run: |
+          set -euo pipefail
           cargo build --workspace --bins --locked
           # Run the artifacts directly (not via cargo run) so a missing
           # runtime library fails here.
-          for b in usgp-server usgp-relay usgp-preboot-agent usgp-cli; do
+          for b in usgp-server usgp-preboot-agent usgp-cli; do
             "target/debug/$b"
           done
+          # The relay's FIPS-check-only mode; with no arguments it prints
+          # usage and exits 2, which must not be mistaken for a pass.
+          target/debug/usgp-relay --self-check
+          status=0
+          target/debug/usgp-relay 2> /dev/null || status=$?
+          if [ "$status" -ne 2 ]; then
+            echo "::error::usgp-relay with no arguments exited $status, expected 2 (usage)"
+            exit 1
+          fi
 
   fips-linkage:
     # Decision 0001 Amendment 1: shipped binaries link the FIPS module, do not
     # link the non-FIPS AWS-LC library, and report FIPS mode active.
+    # Also the release-artifact name scan (CR-303, decision 0005).
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      # Pinned FIPS module toolchain (docs/BUILDING.md section 3, REL-002).
-      # Use these exact binaries, not the runner image's own CMake/Go.
-      CMAKE: /usr/bin/cmake
-      CC: /usr/bin/clang-18
-      CXX: /usr/bin/clang++-18
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
-      GOTOOLCHAIN: local
-      GOPROXY: "off"
-      EXPECT_GO: "1.22"
-      EXPECT_CMAKE: "3.28"
-      EXPECT_CLANG: "18.1"
-      EXPECT_PERL: "5.38"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install FIPS module build tools (decision 0001, docs/BUILDING.md)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake golang-1.22-go clang-18 libclang-18-dev perl
-          echo "/usr/lib/go-1.22/bin" >> "$GITHUB_PATH"
-      - name: Verify and record FIPS build toolchain (REL-002)
+      - uses: ./.github/actions/fips-toolchain
+      - name: Install Rust (product and testing toolchain files)
         run: |
           set -euo pipefail
-          check() {
-            case "$3" in
-              "$2" | "$2".*) echo "ok: $1 $3" ;;
-              *) echo "::error::$1 is $3, expected $2.x (docs/BUILDING.md)"; exit 1 ;;
-            esac
-          }
-          [ "$(command -v go)" = /usr/lib/go-1.22/bin/go ] || { echo "::error::go is $(command -v go)"; exit 1; }
-          check go "$EXPECT_GO" "$(go env GOVERSION | sed 's/^go//')"
-          check cmake "$EXPECT_CMAKE" "$("$CMAKE" --version | head -n 1 | cut -d ' ' -f 3)"
-          check clang "$EXPECT_CLANG" "$("$CC" -dumpversion)"
-          check perl "$EXPECT_PERL" "$(perl -v | sed -n 's/.*(v\([0-9.]*\)).*/\1/p')"
-          {
-            echo '### FIPS build toolchain (docs/BUILDING.md)'
-            echo '```text'
-            go version
-            "$CMAKE" --version | head -n 1
-            "$CC" --version | head -n 1
-            perl -v | sed -n 2p
-            rustup --version 2> /dev/null
-            dpkg-query -W cmake golang-1.22-go clang-18 libclang-18-dev perl
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Install Rust from rust-toolchain.toml
-        run: rustup toolchain install && rustup show
+          rustup toolchain install && rustup show
+          (cd testing/uefi-payload && rustup toolchain install)
+          (cd testing/netlab && rustup toolchain install)
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: release-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: release-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'testing/*/Cargo.lock', 'testing/*/rust-toolchain.toml') }}
+      - name: Stage the UEFI payloads (as the runner user)
+        # Stages the two .efi files the artifact scan requires. It also
+        # builds the relay and cli with -p; the workspace build below runs
+        # after it, so the linkage check and the name scan both see the
+        # workspace release binaries.
+        run: scripts/boot-smoke.sh build
       - run: cargo build --workspace --bins --release --locked
+      # Runs usgp-relay with --self-check (bin_args in the script).
       - run: scripts/check-fips-linkage.sh release
+      - name: Name scan of the release binaries and staged payloads (CR-303)
+        # No exclusions; exit 1 on a hit, exit 2 if an artifact is missing.
+        run: scripts/check-artifact-names.sh
+
+  testing-workspaces:
+    # Test-only workspaces (plan WU-9, WU-10): excluded from the product
+    # workspace, never shipped, held to the same lint, test and pure-Rust
+    # rules. They do not use usgp-crypto, so no FIPS toolchain is needed.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust from the testing/*/rust-toolchain.toml files
+        run: |
+          set -euo pipefail
+          (cd testing/uefi-payload && rustup toolchain install && rustup show)
+          (cd testing/netlab && rustup toolchain install && rustup show)
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/testing
+          key: testing-${{ runner.os }}-${{ hashFiles('testing/*/Cargo.lock', 'testing/*/rust-toolchain.toml', 'testing/*/.cargo/config.toml') }}
+      - name: uefi-payload format
+        working-directory: testing/uefi-payload
+        run: cargo fmt --all --check
+      - name: uefi-payload clippy (x86_64-unknown-uefi, dev and release)
+        working-directory: testing/uefi-payload
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --release -- -D warnings
+      - name: uefi-payload library tests on the host
+        working-directory: testing/uefi-payload
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          cargo clippy --locked --target "$host" --lib --tests -- -D warnings
+          cargo test --locked --target "$host" --lib
+      - name: uefi-payload build (x86_64-unknown-uefi) and record digests
+        working-directory: testing/uefi-payload
+        run: |
+          set -euo pipefail
+          out=../../target/testing/uefi-payload/x86_64-unknown-uefi/release/usgp-test-payload.efi
+          cargo build --locked --release
+          net="$(sha256sum "$out" | cut -d ' ' -f 1)"
+          USGP_PAYLOAD_MARKER=USGP-M1-DISK-FALLBACK-OK cargo build --locked --release
+          disk="$(sha256sum "$out" | cut -d ' ' -f 1)"
+          {
+            echo '### UEFI test payload (test-only, unsigned by design)'
+            echo '```text'
+            echo "usgp-test-payload.efi (USGP-M1-PAYLOAD-OK)        sha256 $net"
+            echo "usgp-test-payload.efi (USGP-M1-DISK-FALLBACK-OK)  sha256 $disk"
+            file "$out"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: uefi-payload reproducibility (REL-M1-002; SI-7, SA-10)
+        # A clean build into a second target directory must give the same
+        # bytes for both markers, so a reviewer can rebuild the payload and
+        # match the digest recorded in boot-smoke evidence.
+        working-directory: testing/uefi-payload
+        run: |
+          set -euo pipefail
+          rel=x86_64-unknown-uefi/release/usgp-test-payload.efi
+          bad=0
+          for marker in USGP-M1-PAYLOAD-OK USGP-M1-DISK-FALLBACK-OK; do
+            if [ "$marker" = USGP-M1-PAYLOAD-OK ]; then
+              unset USGP_PAYLOAD_MARKER
+            else
+              export USGP_PAYLOAD_MARKER="$marker"
+            fi
+            cargo build --locked --release
+            a="$(sha256sum "../../target/testing/uefi-payload/$rel" | cut -d ' ' -f 1)"
+            CARGO_TARGET_DIR="$RUNNER_TEMP/repro" cargo build --locked --release
+            b="$(sha256sum "$RUNNER_TEMP/repro/$rel" | cut -d ' ' -f 1)"
+            echo "$marker: $a (repo target) $b (second target)"
+            if [ "$a" != "$b" ]; then
+              echo "::error::usgp-test-payload.efi ($marker) is not reproducible: $a != $b"
+              bad=1
+            fi
+          done
+          exit "$bad"
+      - name: netlab format, clippy, tests (Linux socket code included)
+        working-directory: testing/netlab
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Pure-Rust check for the testing workspaces
+        # Same pattern and allowlist as scripts/check-pure-rust.sh
+        # (REL-M1-003: move this into that script).
+        run: |
+          set -euo pipefail
+          pattern='^([A-Za-z0-9_-]+-sys|cc|bindgen|cmake|pkg-config|vcpkg|cxx|cxx-build|link-cplusplus|nasm-rs|openssl-src|autotools) v'
+          bad=0
+          for ws in testing/uefi-payload testing/netlab; do
+            hits="$(cd "$ws" && cargo tree --locked -e normal,build,dev --target all --prefix none \
+              | grep -E "$pattern" | awk '{print $1}' | sort -u)" || true
+            for h in $hits; do
+              if ! grep -qE "^${h}[[:space:]]*(#|$)" scripts/pure-rust-allowlist.txt; then
+                echo "::error::$ws depends on $h (pure-Rust rule)"
+                bad=1
+              fi
+            done
+          done
+          [ "$bad" -eq 0 ] && echo "pure-rust (testing): OK"
+          exit "$bad"
 
   supply-chain:
     runs-on: ubuntu-24.04
@@ -178,7 +232,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust from rust-toolchain.toml
-        run: rustup toolchain install && rustup show
+        run: |
+          set -euo pipefail
+          rustup toolchain install && rustup show
+          (cd testing/uefi-payload && rustup toolchain install)
+          (cd testing/netlab && rustup toolchain install)
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -189,7 +247,7 @@ jobs:
         run: |
           command -v cargo-deny || cargo install --locked cargo-deny@0.20.2
           command -v cargo-audit || cargo install --locked cargo-audit@0.22.2
-      - run: cargo deny check
+      - run: cargo deny --locked check
       - run: cargo audit
       - name: Audit the fuzz workspace lockfile (REL-008)
         # bans and licenses are skipped by design: the fuzz workspace uses
@@ -197,7 +255,16 @@ jobs:
         # is never shipped.
         run: |
           cargo audit --file fuzz/Cargo.lock
-          cargo deny --manifest-path fuzz/Cargo.toml check advisories sources
+          cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories sources
+      - name: Testing workspaces, full policy (plan WU-12)
+        # deny.toml is passed explicitly; cargo-deny otherwise looks for it
+        # in the current directory.
+        run: |
+          set -euo pipefail
+          for ws in testing/uefi-payload testing/netlab; do
+            cargo deny --locked --config deny.toml --manifest-path "$ws/Cargo.toml" check
+            cargo audit --file "$ws/Cargo.lock"
+          done
 
   markdown:
     runs-on: ubuntu-24.04
@@ -213,10 +280,13 @@ jobs:
         working-directory: .github/markdownlint
         run: npm ci --ignore-scripts --no-audit --no-fund
       - run: .github/markdownlint/node_modules/.bin/markdownlint --version
-      - run: .github/markdownlint/node_modules/.bin/markdownlint "docs/**/*.md" "specs/**/*.md" "fuzz/*.md" "*.md"
+      - run: >-
+          .github/markdownlint/node_modules/.bin/markdownlint "docs/**/*.md" "specs/**/*.md"
+          "fuzz/*.md" "fuzz/corpus/**/*.md" "testing/**/*.md" "*.md"
 
   ci-lint:
-    # shellcheck for scripts/, actionlint for workflows (REL-008).
+    # shellcheck for scripts/ (includes boot-smoke.sh and gates.sh),
+    # actionlint for workflows (REL-008).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -263,6 +333,199 @@ jobs:
       - name: Check fuzz/Cargo.lock is up to date (REL-008)
         working-directory: fuzz
         run: cargo fetch --locked
+      - name: Format and lint with the pinned nightly
+        working-directory: fuzz
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Build fuzz targets
         working-directory: fuzz
         run: cargo fuzz build
+      - name: Replay the committed seeds (regression, no new inputs)
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          for t in dhcp_packet tftp_packet; do
+            cargo fuzz run "$t" "corpus/$t" -- -runs=0
+          done
+
+  fuzz-smoke:
+    # M1 exit criterion 3 (plan section 10.4): each target runs 600 s with no
+    # crash. Scheduled and manual only; fuzz-build replays the seeds on every
+    # change.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # -max_len lets the DHCP fuzzer reach the over-length (> 1472 octet)
+          # path; TFTP transfer scripts need more room (impl-notes-wu8).
+          - target: dhcp_packet
+            max_len: 1600
+          - target: tftp_packet
+            max_len: 4096
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly from fuzz/rust-toolchain.toml
+        working-directory: fuzz
+        run: rustup toolchain install && rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/registry
+            fuzz/target
+          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml') }}
+      - name: Install cargo-fuzz
+        run: command -v cargo-fuzz || cargo install --locked cargo-fuzz@0.13.2
+      - name: Fuzz ${{ matrix.target }} for 600 s
+        working-directory: fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          MAX_LEN: ${{ matrix.max_len }}
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          mkdir -p "artifacts/$TARGET" "$RUNNER_TEMP/work/$TARGET"
+          # Scratch working corpus first, so new inputs (no recorded origin)
+          # never land in fuzz/corpus/ (CONTRIBUTING.md test-data rule).
+          cargo fuzz run "$TARGET" "$RUNNER_TEMP/work/$TARGET" "corpus/$TARGET" -- \
+            -max_total_time=600 -max_len="$MAX_LEN" -print_final_stats=1 \
+            2>&1 | tee "artifacts/$TARGET/fuzz.log"
+          # libFuzzer exits 0 when time runs out. Require the full 600 s, so
+          # an early stop is never reported as a pass.
+          secs="$(sed -n 's/^Done [0-9]* runs in \([0-9]*\) second.*/\1/p' "artifacts/$TARGET/fuzz.log" | tail -n 1)"
+          if [ -z "$secs" ] || [ "$secs" -lt 600 ]; then
+            echo "::error::$TARGET ran ${secs:-unknown} s, expected at least 600 s"
+            exit 1
+          fi
+          {
+            echo "### fuzz-smoke $TARGET"
+            echo '```text'
+            grep -E '^(Done|stat::)' "artifacts/$TARGET/fuzz.log" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload fuzz log and any crash, OOM or timeout inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-smoke-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+  boot-smoke:
+    # M1 exits 1, 2 (in QEMU), 4 (binding) and 5 (plan section 10.5; owner
+    # approval Q-5). Linux with root: network namespaces, bridges and taps.
+    # Exit 0 is PASS; 1 is FAIL; 77 is NOT RUN and fails this job (see the
+    # result rule at the top of this file).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/fips-toolchain
+        with:
+          extra-packages: qemu-system-x86 ovmf iproute2
+      - name: Install Rust (product and testing toolchain files)
+        run: |
+          set -euo pipefail
+          rustup toolchain install && rustup show
+          (cd testing/uefi-payload && rustup toolchain install)
+          (cd testing/netlab && rustup toolchain install)
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/testing
+          key: boot-smoke-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'testing/*/Cargo.lock', 'testing/*/rust-toolchain.toml') }}
+      - name: Enable KVM for the runner user when /dev/kvm exists
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            # Ephemeral runner VM: the QEMU user ($SUDO_USER) needs /dev/kvm.
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-usgp-kvm.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            ls -l /dev/kvm
+          else
+            echo "::warning::/dev/kvm not present; the harness falls back to TCG (longer deadlines)"
+          fi
+      - name: Record and check the lab packages and firmware files
+        # The harness defaults are the Ubuntu ovmf package paths (plan
+        # section 10.5). A missing file is configuration drift: fail here
+        # instead of letting the harness report NOT RUN.
+        run: |
+          set -euo pipefail
+          fw="/usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_CODE_4M.secboot.fd /usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+          {
+            echo '### Boot smoke environment'
+            echo '```text'
+            dpkg-query -W qemu-system-x86 ovmf iproute2
+            qemu-system-x86_64 --version | head -n 1
+            for f in $fw; do
+              if [ -f "$f" ]; then sha256sum "$f"; else echo "MISSING $f"; fi
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          for f in $fw; do
+            [ -f "$f" ] || { echo "::error::firmware file $f not installed by the ovmf package"; exit 1; }
+          done
+      - name: Build relay, cli, netlab and payloads (as the runner user)
+        run: scripts/boot-smoke.sh build
+      - name: Boot smoke (root; exit 77 is NOT RUN, never PASS)
+        timeout-minutes: 90
+        env:
+          USGP_BOOT_SMOKE_OUT: ${{ github.workspace }}/target/boot-smoke/ci-run
+        run: |
+          set -uo pipefail
+          status=0
+          # -E keeps USGP_*; sudo sets SUDO_USER, which becomes the QEMU user.
+          sudo -E scripts/boot-smoke.sh all 2>&1 | tee target/boot-smoke/console.log || status=$?
+          {
+            echo '### Boot smoke result'
+            echo '```text'
+            sed -n '/boot-smoke summary/,$p' target/boot-smoke/console.log
+            echo "exit $status"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$status" in
+            0) echo "boot-smoke: PASS (every scenario passed)" ;;
+            77)
+              echo "::error title=boot-smoke NOT RUN::exit 77: no scenario failed, but at least one was NOT RUN. This is not a PASS; see the job summary and the boot-smoke-evidence artifact."
+              exit 1
+              ;;
+            1)
+              echo "::error title=boot-smoke FAIL::at least one scenario (or preflight) failed; see the boot-smoke-evidence artifact."
+              exit 1
+              ;;
+            *)
+              echo "::error title=boot-smoke error::harness exited $status"
+              exit 1
+              ;;
+          esac
+      - name: Name scan of the release binaries, payloads and evidence (CR-303)
+        # Runs even when the boot smoke failed, so the evidence can still be
+        # uploaded. No exclusions; exit 1 on a hit, exit 2 if an artifact is
+        # missing or unreadable.
+        id: artifact-names
+        if: ${{ !cancelled() }}
+        run: scripts/check-artifact-names.sh
+      - name: Upload boot smoke evidence (serial logs, relay JSON logs, summary)
+        # Only after a clean name scan: nothing that fails the clean-room name
+        # rule leaves the runner (CR-303). The job log keeps the scan output.
+        if: ${{ !cancelled() && steps.artifact-names.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: boot-smoke-evidence
+          path: target/boot-smoke/
+          if-no-files-found: warn
+          retention-days: 30

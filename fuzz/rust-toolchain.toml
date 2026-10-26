@@ -1,5 +1,9 @@
 # Pinned independently of the main workspace (docs/decisions/0002).
 # Verified 2026-10-25: rustc 1.101.0-nightly (7189d39d9 2026-10-22).
+# rustfmt and clippy (M1 WU-12, from WU-8 notes): the fuzz-build CI job checks
+# format and lints with this same pinned nightly, not with +stable.
+# Verified 2026-10-26: both components are available for this nightly.
 [toolchain]
 channel = "nightly-2026-10-23"
+components = ["rustfmt", "clippy"]
 profile = "minimal"

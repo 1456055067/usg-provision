@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "services/*", "tools/*"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "testing"]
 
 [workspace.package]
 version = "0.0.0"
@@ -35,6 +35,16 @@ aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["fips"]
 aws-lc-fips-sys = { version = "=0.14.3" }
 rustls = { version = "0.23.46", default-features = false, features = ["fips", "std"] }
 thiserror = "2"
+# M1 (plan WU-0, section 4). All pure Rust; licences MIT or MIT OR Apache-2.0.
+# Features are chosen per member; defaults are kept off where they pull more
+# than the member needs (CM-7).
+tokio = { version = "1.54", default-features = false }
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -14,10 +14,25 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4"
+usgp-dhcp = { path = "../crates/usgp-dhcp" }
+usgp-tftp = { path = "../crates/usgp-tftp" }
 
 [[bin]]
-name = "noop"
-path = "fuzz_targets/noop.rs"
+name = "dhcp_packet"
+path = "fuzz_targets/dhcp_packet.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tftp_packet"
+path = "fuzz_targets/tftp_packet.rs"
+test = false
+doc = false
+bench = false
+
+# Seed generator for fuzz/corpus/ (see fuzz/corpus/*/SOURCE.md). Pure
+# Rust; it does not use libfuzzer-sys.
+[[example]]
+name = "gen_seeds"
+path = "examples/gen_seeds.rs"

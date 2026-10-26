@@ -183,7 +183,25 @@ transfer tuning.
   it received in sequence, and the sender restarts the window from the
   block after it. On a timeout, the sender restarts from the block after the
   last ACK it received (§4).
-- The final window is one with fewer blocks than `windowsize` (§3).
+- **End of transfer.** RFC 7440 §3 says the rules for recognising the
+  final packet are unchanged from RFC 1350 and RFC 2348. So, as in RFC
+  1350 §6 (§5 above), the transfer ends with a DATA block shorter than the
+  negotiated `blksize`, including a 0-octet block when the file is an exact
+  multiple of `blksize`. The window that contains that short block may
+  hold fewer than `windowsize` blocks (and does when the file is smaller
+  than one window, §3).
+- **[reading]** **Do not use window fill as the end test.** §3 also
+  describes the final window as one received with fewer blocks than
+  `windowsize`. Read alone, that sentence misses a final window that
+  happens to be full (the block count, including any 0-octet block, is a
+  multiple of `windowsize`), and a window can also be short mid-transfer
+  after loss (§4 figure). The short DATA block is the condition to act
+  on; window size is not.
+- **[reading]** The receiver ACKs the short final block even if the window
+  is not full, since it is the last block of the last window (§4 requires
+  an ACK for the last block of each window; RFC 7440 does not state the
+  short-window case separately). The RFC 1350 §6 dally and final
+  retransmission rules then apply.
 - `windowsize` = 1 must behave exactly like RFC 1350 lock-step (§4).
 - Choose values conservatively (§5). Follow the UDP rate guidance in RFC
   5405 §3.1, and cap retries (§6).

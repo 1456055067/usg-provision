@@ -1,0 +1,9 @@
+# Golden v1 suppression file, written by hand for tests/config.rs.
+schema_version = 1
+
+[[device]]
+mac = "52:54:00:12:34:56"
+note = "provisioned 2026-10-26"
+
+[[device]]
+guid = "00112233-4455-6677-8899-aabbccddeeff"

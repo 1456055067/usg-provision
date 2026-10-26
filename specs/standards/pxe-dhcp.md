@@ -5,8 +5,9 @@ for implementers. Field names and numeric constants are as defined in the
 standards. Source IDs (SRC-nnn) refer to the provenance log. Clean-side
 readers need only the citations shown here.
 
-Primary sources: RFC 2131 (DHCP), RFC 2132 (DHCP options), RFC 1542 (BOOTP
-relay clarifications), RFC 3046 (relay agent information), RFC 4578 (PXE
+Primary sources: RFC 2131 (DHCP), RFC 2132 (DHCP options), RFC 951
+(BOOTP, §3.2 only), RFC 1542 (BOOTP relay clarifications), RFC 3046
+(relay agent information), RFC 4578 (PXE
 options) with verified erratum 4624, the IANA Processor Architecture Types
 registry, UEFI 2.10 §24.3 and Appendix E.4.20, and the 1999 Intel PXE
 Internet-Draft `draft-henry-remote-boot-protocol-00` (expired, informational
@@ -70,6 +71,79 @@ Fixed-format header followed by options:
   overloaded, the boot file name and server name travel in options 67 and 66
   instead (RFC 2132 §9.4, §9.5).
 
+### 3.1 Server reply fields (RFC 2131 §4.3.1, Table 3)
+
+RFC 2131 §4.3.1 Table 3 lists what a DHCP server puts in each header
+field of its replies. Summary for DHCPOFFER and DHCPACK (DHCPNAK shown
+for contrast):
+
+| Field | DHCPOFFER | DHCPACK | DHCPNAK |
+|-------|-----------|---------|---------|
+| `op` | 2 (BOOTREPLY) | 2 (BOOTREPLY) | 2 (BOOTREPLY) |
+| `htype` | hardware type per the IANA assigned numbers (1 = Ethernet) | same | same |
+| `hlen` | hardware address length in octets (6 for Ethernet) | same | same |
+| `hops` | 0 | 0 | 0 |
+| `xid` | copied from the client's DHCPDISCOVER | copied from the client's DHCPREQUEST (**[reading]** or DHCPINFORM, when the ACK answers one; Table 3 names only DHCPREQUEST) | copied from the client's DHCPREQUEST |
+| `secs` | 0 | 0 | 0 |
+| `ciaddr` | 0 | copied from the client's request, or 0 | 0 |
+| `yiaddr` | address offered | address assigned | 0 |
+| `siaddr` | address of the next server in the bootstrap (see note) | same | 0 |
+| `flags` | copied from the DHCPDISCOVER | copied from the DHCPREQUEST | copied from the DHCPREQUEST |
+| `giaddr` | copied from the DHCPDISCOVER | copied from the DHCPREQUEST | copied from the DHCPREQUEST |
+| `chaddr` | copied from the DHCPDISCOVER | copied from the DHCPREQUEST | copied from the DHCPREQUEST |
+| `sname` | server host name, or options if overload (52) says so | same | unused |
+| `file` | client boot file name, or options if overload (52) says so | same | unused |
+
+Option rows of the same table, for OFFER / ACK:
+
+- Option 50 (requested IP address): must not be sent in either.
+- Option 51 (lease time): must be sent in an OFFER and in an ACK that
+  answers a DHCPREQUEST; must not be sent in an ACK that answers a
+  DHCPINFORM.
+- Option 52 (overload): may be sent.
+- Option 53 (message type): must be sent (2 for OFFER, 5 for ACK).
+- Option 54 (server identifier): must be sent.
+- Option 55 (parameter request list) and option 57 (maximum message
+  size): must not be sent.
+- Option 56 (message text): should be sent.
+- Option 61 (client identifier): must not be sent.
+- Option 60 (vendor class identifier): may be sent.
+- All other options: may be sent.
+
+Notes:
+
+- `siaddr`: RFC 2131 §2 says a server may put its own address here when
+  it supplies the next stage of the bootstrap. §4.3.1 itself adds nothing
+  more. For how PXE clients choose between `siaddr` and option 54, see §7
+  step 3a.
+- **[reading]** Table 3 describes a server that assigns addresses. It does
+  not describe a ProxyDHCP reply, which carries no address; for that see
+  `proxy-dhcp.md`. The option 61 "must not" row is a rule for the address
+  server's reply. For options 93, 94 and 97 in server packets, see §5.5 of this
+  file.
+
+### 3.2 Minimum BOOTP message size (RFC 1542 §2.1)
+
+- RFC 1542 §2.1 takes the minimum BOOTP header size from RFC 951: 300
+  octets, counted in the UDP data (that is, excluding the IP and UDP
+  headers). The 300 octets are the 236 octets of fixed fields in the table
+  above plus the original 64-octet vendor area (RFC 951 §3, where the
+  BOOTP layout ends in a 64-octet vendor-specific field and the 2 octets
+  later used for `flags` are unused).
+- The rule is written as a receiver check, not as a sender duty: a
+  receiver should check that the IP total length and UDP length are large
+  enough to hold that 300-octet header (and that `op` is 1 or 2). A
+  message that fails the checks must be silently discarded: no reply and
+  no ICMP error; the event should be logged and counted (RFC 1542 §1.2,
+  §2.1; repeated for relays in §4.1 and servers in §5.1).
+- Messages longer than 300 octets must be accepted (RFC 1542 §2.1).
+- **[reading]** A sender whose message is shorter than 300 octets of UDP
+  data risks being dropped by receivers that run this check, so replies
+  should be padded (for example with Pad options or zero octets after End)
+  to at least 300 octets. RFC 1542 §2.1 does not itself state a padding
+  rule. For the DHCP 576-octet and 312-octet-options figures, see the
+  bullets above (RFC 2131 §2).
+
 ## 4. Option encoding (RFC 2132 §2)
 
 Each option is a code octet, then a length octet, then that many data
@@ -121,9 +195,10 @@ tolerate one.
 ### 5.2 Option 93 (client system architecture)
 
 - The length must be even and non-zero. A client that supports several
-  architectures may list them, and the list may shrink in later messages
-  (RFC 4578 §2.1). The option must appear in every PXE client message, and
-  in server replies as well (RFC 4578 §2.1).
+  architectures may list them in its first DHCP and PXE boot-server
+  packets, and the list may be shortened in any later exchange with the
+  server or servers (RFC 4578 §2.1). For when the option must be present,
+  see §5.5.
 - Values (IANA registry, SRC-017; RFC 4578 §2.1 as corrected by verified
   erratum 4624):
 
@@ -149,7 +224,7 @@ Three octets: type `t`, major `M`, minor `m`. The only defined type is 1
 (UNDI). Version 3.x indicates 32/64-bit UNDI with EFI (3.00, 3.10, 3.20,
 per RFC 4578 §2.2). UEFI sends type 1, version 3.0 by default when no
 network interface identifier protocol is present (UEFI §24.3, Table 24.1).
-This option must appear in every PXE message (RFC 4578 §2.2).
+For when the option must be present, see §5.5.
 
 ### 5.4 Option 97 (client machine identifier)
 
@@ -157,7 +232,53 @@ Type 0 followed by a 16-octet GUID, length 17. The GUID format is the one in
 the EFI specification's GUID appendix (RFC 4578 §2.3). RFC 4578 §1 explains
 why it exists: a hardware address alone may not identify a machine, because
 docking stations can share an address and one machine can have several
-adapters.
+adapters. For when the option must be present, see §5.5. For the GUID's
+byte order and text form, see `uefi-guid-text.md`.
+
+### 5.5 Presence of options 93, 94 and 97 (RFC 4578 §2.1, §2.2, §2.3)
+
+What RFC 4578 states:
+
+- Each of §2.1 (option 93), §2.2 (option 94) and §2.3 (option 97) contains
+  the same MUST-level rule: the option is to be present in every DHCP
+  packet and every PXE packet sent by a client or server that complies
+  with PXE.
+- **Clients.** A compliant PXE client includes all three options in every
+  DHCP and PXE packet it sends. **[reading]** In the flow of §7 that means
+  the DISCOVER, the REQUEST and any boot-server request (steps 1, 2 and 3b).
+- **Servers.** The rule names servers as well as clients. A PXE-compliant
+  server includes all three options in every DHCP and PXE packet it sends.
+  **[reading]** In the flow of §7 that means a ProxyDHCP offer, a PXE-aware
+  DHCP server's OFFER and ACK, and a boot server's ACK (steps 2 and 3b).
+  The three sections require only that the options be present. They say
+  nothing else about what a server must do.
+- RFC 4578 is an Informational RFC (SRC-013). **[reading]** Its MUST
+  therefore states what PXE compliance involves, rather than a rule of the
+  standards-track DHCP documents.
+
+Not stated in RFC 4578 §2.1 to §2.3, marked **[reading]** where we infer:
+
+- **What value a server puts in.** None of the three sections says what
+  value a server's copy of each option should hold. They do not say
+  whether it should repeat the client's value or describe the server.
+  **[reading]** The content of a server's copy is therefore not defined
+  by these sections.
+- **What a server does with the client's values.** These sections give no
+  server handling rule. RFC 4578 §1 gives the options' general purpose
+  (helping the server hand back the right boot image), but that is a
+  statement of purpose, not a rule in these sections.
+- **Servers that are not PXE-aware.** **[reading]** The rule binds only
+  PXE-compliant servers. An ordinary site DHCP server that knows nothing
+  of PXE is not addressed by it, and its replies may lack these options.
+- **Client reaction to a missing option.** RFC 4578 does not say whether a
+  client ignores or rejects a server packet that lacks one of these
+  options.
+- **Interaction with RFC 2131.** **[reading]** RFC 2131 §4.3.1 bars a
+  server from returning a value for a parameter it has neither configured
+  nor a default for. RFC 4578 does not say how its presence rule fits
+  with that. The clean side decides how to meet both.
+- For repeated or split copies of these options, see
+  `dhcp-long-options.md` §6.
 
 ## 6. PXE vendor sub-options carried in option 43
 
@@ -175,7 +296,7 @@ sub-options. They use the encapsulated code/length/value format of RFC 2132
 | 9 | PXE_BOOT_MENU | menu entries describing server types |
 | 10 | PXE_MENU_PROMPT | prompt text and timeout (0 = choose the first item at once; 255 = wait indefinitely) |
 | 12 | PXE_CREDENTIAL_TYPES | credential types for boot integrity services |
-| 71 | PXE_BOOT_ITEM | boot-server type and layer; the layer's high bit asks for credentials |
+| 71 | PXE_BOOT_ITEM | boot-server type and layer; the layer's high bit asks for credentials. Layout in §6.1 |
 | 255 | End | end of sub-options |
 
 Which tags must be present (UEFI Appendix E.4.20.3, clarifying PXE 2.1):
@@ -194,6 +315,78 @@ broadcast and multicast discovery and use the file named in the initial
 offer. They also report that vendor PXE ROMs then boot from the `file` and
 `siaddr` of the initial DHCP or ProxyDHCP packet (SRC-034, SRC-035).
 
+### 6.1 Tag 71 (PXE_BOOT_ITEM) layout
+
+**Source strength.** The Intel PXE 2.1 specification could not be read
+(see the caveat at the top). The layout below comes from the 1999 Intel
+PXE Internet-Draft (draft-henry §3.2.3.6, repeated in §3.3.2.6), which is
+the primary text we have, but an expired draft and not the final PXE 2.1
+document. The type values and the layer mask come from UEFI 2.10 §24.3.9
+(the firmware's discovery interface, not a wire format). The default when
+the tag is absent comes from UEFI Appendix E.4.20.3. Points that are our
+inference are marked **[reading]**.
+
+Wire layout inside option 43 (draft-henry §3.2.3.6):
+
+| Octets | Field | Width | Meaning |
+|--------|-------|-------|---------|
+| 0 | code | 1 | 71 |
+| 1 | length | 1 | 4 |
+| 2–3 | boot-server type | 2 | which kind of boot server or boot image is meant |
+| 4–5 | layer | 2 | most significant bit = credentials flag; the rest = layer number |
+
+- **Length.** Always 4. The draft gives the total length as 4 and draws
+  the two fields as 2 octets each. Its text does not state the two widths
+  separately; the 2 + 2 split comes from the diagram and the total. UEFI
+  §24.3.9 independently types both the discovery type and the layer as
+  16-bit unsigned values, which agrees.
+- **Byte order. OPEN-T71-1.** No source read states it (the draft does
+  not). **[reading]** Treat both fields as network byte order (most
+  significant octet first), as RFC 2132 §2 does for multi-octet DHCP
+  option values. This is an assumption, not a sourced rule; the PXE 2.1
+  text would close it.
+- **Layer number.** Selects which image in a boot-server type's sequence
+  is meant. Layer 0 is always the first boot file for that type
+  (draft-henry §3.2.3.6). The draft gives no upper limit. UEFI §24.3.9
+  names an initial-layer value of 0x0000 and a layer mask of 0x7FFF.
+- **Credentials flag.** The most significant bit of the layer field. 0 =
+  the message is about the boot file itself; 1 = it is about the
+  credentials (integrity data) for that boot file (draft-henry §3.2.3.6).
+  The draft says only "most significant bit"; **[reading]** with the UEFI
+  0x7FFF layer mask, this is bit 15 of the 16-bit value, i.e. 0x8000. A
+  DHCPREQUEST with the flag set must also carry tag 12,
+  PXE_CREDENTIAL_TYPES (draft-henry §3.2.3.6, §3.2.3.7). Credentials
+  belong to boot integrity services.
+- **Boot-server type values** (UEFI 2.10 §24.3.9; the draft defines no
+  values):
+
+  | Value | Meaning |
+  |-------|---------|
+  | 0 | PXE bootstrap server |
+  | 1 to 16 | named vendor or product boot server types |
+  | 17 to 32767 | reserved |
+  | 32768 to 65279 | vendor use |
+  | 65280 to 65534 | reserved |
+  | 65535 | PXE test type |
+
+- **Where it is carried** (draft-henry): in the client's boot-server
+  DHCPREQUEST, layer 0 with the flag clear (§3.3.1); in the boot server's
+  DHCPACK to that request (§3.3.2); in the credentials request, layer 0
+  with the flag set (§3.5.1); and in the reply to that request (§3.5.2,
+  which includes the tag but states neither the layer nor the flag;
+  **[reading]** the flag is set there too). It also appears as an
+  optional tag in a PXE offer (§6 above).
+- **What the boot server puts in its reply. OPEN-T71-2.** The draft does
+  not say in so many words that the reply repeats the requested type and layer.
+  §3.3.2 has the server answer only for a type it serves. UEFI §24.3.9
+  says the layer value passed to discovery is updated if the boot server
+  changes it. **[reading]** A server should return the requested type and,
+  normally, the requested layer. Only the UEFI point (the layer may be
+  changed by the server) is sourced; the PXE 2.1 text would close this.
+- **When absent.** PXE 2.1 lists the tag as required in a PXE offer;
+  UEFI Appendix E.4.20.3 relaxes this: it is optional, and a client that
+  does not find it assumes type 0, layer 0.
+
 ## 7. Message sequence for a UEFI x86-64 IPv4 client
 
 The steps below follow RFC 2131 §3.1, draft-henry §3, UEFI §24.3.8 and
@@ -211,7 +404,8 @@ path a given reply triggers depends on the PXE options it carries (§6).
      address settings.
    - A ProxyDHCP service (`proxy-dhcp.md`) sends an offer with no address,
      with option 60 = `PXEClient`, option 54, and PXE information (option 43
-     and/or `siaddr` and `file`).
+     and/or `siaddr` and `file`). For options 93, 94 and 97 in PXE server
+     packets, see §5.5.
    - A DHCP server may itself be PXE-aware and put the PXE information into
      its address offer.
    The client takes its address from a DHCP offer. Offers are tried in

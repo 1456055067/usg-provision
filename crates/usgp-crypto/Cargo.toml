@@ -14,6 +14,7 @@ aws-lc-rs.workspace = true
 aws-lc-fips-sys.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
+usgp-common.workspace = true
 
 [lints]
 workspace = true

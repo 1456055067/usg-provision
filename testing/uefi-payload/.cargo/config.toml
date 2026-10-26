@@ -1,0 +1,18 @@
+# The payload is a UEFI x86-64 application (UEFI 2.10 §3.5.1.1 Table 3.2:
+# x64 removable-media name BOOTX64.EFI; RFC 4578 / IANA arch type 7).
+# Host unit tests of the library override this with `--target <host>`
+# (see README.md).
+[build]
+target = "x86_64-unknown-uefi"
+# Build output goes under the repository's top-level target/ directory, which
+# the clean-room name gate (scripts/check-names.sh) excludes as build output.
+# A local testing/uefi-payload/target/ would be scanned, and the IA-64
+# architecture name in r-efi's .rlib/.rmeta happens to contain the gate's pattern.
+target-dir = "../../target/testing/uefi-payload"
+
+# Reproducible payload (REL-M1-002; SI-7, SA-10): /Brepro makes lld-link write
+# a content hash instead of the wall-clock time into the COFF TimeDateStamp,
+# and /DEBUG:NONE drops the CodeView (RSDS) record, whose GUID depends on the
+# build path. Two clean builds in different directories give the same sha256.
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "link-arg=/Brepro", "-C", "link-arg=/DEBUG:NONE"]

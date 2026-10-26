@@ -5,7 +5,10 @@
 #   - the binary links the FIPS AWS-LC module (aws_lc_fips_* symbols present),
 #   - it does NOT link the non-FIPS AWS-LC library (no aws_lc_0_* symbols),
 #   - no non-FIPS AWS-LC shared library is among its dynamic dependencies,
-#   - running it exits 0, i.e. FIPS mode reports active at start-up.
+#   - running it exits 0, i.e. FIPS mode reports active at start-up. Each
+#     binary runs with its own FIPS-check-only arguments (bin_args below):
+#     usgp-relay needs `--self-check`, because with no arguments it prints
+#     usage and exits 2 (plan section 3.6); the others take none.
 #
 # Linux (the shipped and authoritative FIPS platform): the module must be
 # linked statically. The script fails if any libaws_lc* shared library is a
@@ -64,6 +67,14 @@ if command -v timeout > /dev/null 2>&1; then
 fi
 bins=(usgp-server usgp-relay usgp-preboot-agent usgp-cli)
 
+# Arguments that make a binary run its FIPS start-up check and exit.
+bin_args() {
+  case "$1" in
+    usgp-relay) args=(--self-check) ;;
+    *) args=() ;;
+  esac
+}
+
 # Symbol prefixes AWS-LC applies to its exported symbols. Mach-O adds a
 # leading underscore; ELF does not.
 fips_re='(^|[[:space:]])_?aws_lc_fips_[0-9]'
@@ -102,7 +113,8 @@ for b in "${bins[@]}"; do
       run=(cargo run --quiet --locked --profile "$cargo_profile" --bin "$b" --)
       ;;
   esac
-  if ! ${run_limit[@]+"${run_limit[@]}"} "${run[@]}" > /dev/null; then
+  bin_args "$b"
+  if ! ${run_limit[@]+"${run_limit[@]}"} "${run[@]}" ${args[@]+"${args[@]}"} > /dev/null; then
     failures+=("$b: exited non-zero (FIPS mode not active?)")
   fi
 done

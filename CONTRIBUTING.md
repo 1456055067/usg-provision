@@ -12,6 +12,11 @@ before contributing. In short:
   license-gated content, or confidential material. No reverse engineering.
 - No vendor product names in code, crate names, config keys, paths,
   comments, or log text. `scripts/check-names.sh` enforces this.
+- Write the processor architecture of RFC 4578 type 2 as "IA-64" or
+  "ia64" in code, comments and docs, never the processor family's full
+  name: it contains the vendor name and trips the name gate. Fix a gate
+  false positive by moving build output or renaming, never by excluding a
+  path ([decision 0005](docs/decisions/0005-names-gate-scope.md)).
 
 ### Test data and fuzz corpora
 
@@ -53,11 +58,23 @@ environment. The authoritative FIPS build is Linux CI.
 
 ## Gates
 
-Run `scripts/gates.sh` before asking for review. It runs, in order: format
-check, clippy with `-D warnings`, tests, doc tests, a binary build, the
-FIPS-linkage check, the pure-Rust check, the name check, `cargo deny check`,
-`cargo audit`, and markdownlint. It records every command's status and
-continues past failures.
+Run `scripts/gates.sh` before asking for review. For the main workspace it
+runs, in order: format check, clippy with `-D warnings`, tests, doc tests, a
+binary build, the FIPS-linkage check, the relay start-up contract, the
+pure-Rust check, the name check, `cargo deny check`, and `cargo audit`. Then
+it runs format, clippy, tests, pure-Rust, `cargo deny` and `cargo audit` for
+the `testing/` workspaces; format, clippy, build and seed replay for
+`fuzz/`; markdownlint; `scripts/boot-smoke.sh build` and `all`; and
+`scripts/check-artifact-names.sh`, the name scan of the release relay and
+cli, the staged payloads and the boot smoke evidence. It records every
+command's status and continues past failures.
+
+Each gate is PASS, FAIL, or NOT RUN. NOT RUN means exit 77 or a missing
+prerequisite, and it never counts as a PASS. `scripts/gates.sh` exits 1 if
+anything failed. Otherwise it exits 77 if anything was NOT RUN, and 0 only
+when every gate passed. On macOS the network boot smoke is always NOT RUN,
+so a clean macOS run exits 77. Set `GATES_FUZZ_SECONDS=600` to include the
+10-minute fuzz runs.
 
 ## Pure-Rust rule
 

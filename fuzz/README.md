@@ -15,10 +15,15 @@ root workspace gates do not cover `fuzz/`.
 
 ## Running
 
+Always pass a scratch working corpus first and the checked-in seeds
+second, so inputs found by the fuzzer (which have no recorded origin) never
+land in `fuzz/corpus/`:
+
 ```sh
 cd fuzz
 cargo fuzz build
-cargo fuzz run <target> -- -max_total_time=60
+mkdir -p /tmp/work/<target>
+cargo fuzz run <target> /tmp/work/<target> corpus/<target> -- -max_total_time=60
 ```
 
 ## Rules
@@ -40,5 +45,25 @@ cargo fuzz run <target> -- -max_total_time=60
   ([CONTRIBUTING.md](../CONTRIBUTING.md#test-data-and-fuzz-corpora)).
 - Every network or file parser gets a target (CLAUDE.md, Engineering Rules).
 
-The `noop` target only proves the harness builds; it is deleted when
-`dhcp_packet` lands (M1).
+## Targets
+
+| Target | Input | Invariants |
+|--------|-------|------------|
+| `dhcp_packet` | one DHCP/PXE message (`usgp-dhcp`) | no panic; every reply re-parses as a BOOTREPLY with `yiaddr` 0, none of options 1, 3, 51, 58, 59, xid and chaddr echoed, within the size limit, option 82 echoed byte-for-byte or absent |
+| `tftp_packet` | selector octet, then one packet or a transfer script (`usgp-tftp`) | no panic; parse/encode round trip; DATA blocks strictly increasing and never past the final block; no `Send` on a duplicate ACK; any opcode-5 datagram of 4 or more octets from the client TID ends the transfer (BOOT-005); retries within the cap; `Done` is final; DATA payload equals the file |
+
+## M1 run length
+
+Milestone M1 (exit criterion 3) runs each target for 10 minutes with no
+crash. Use a scratch working corpus first so that inputs found by the
+fuzzer (which have no recorded origin) do not land in `fuzz/corpus/`:
+
+```sh
+cd fuzz
+cargo fuzz build
+mkdir -p /tmp/work/dhcp_packet /tmp/work/tftp_packet
+cargo fuzz run dhcp_packet /tmp/work/dhcp_packet corpus/dhcp_packet -- -max_total_time=600 -max_len=1600
+cargo fuzz run tftp_packet /tmp/work/tftp_packet corpus/tftp_packet -- -max_total_time=600 -max_len=4096
+```
+
+Seeds are regenerated with the commands in each `corpus/<target>/SOURCE.md`.

@@ -81,6 +81,33 @@ case_ fail "vendor-named empty directory" mkdir -p "docs/$name"
 case_ fail "binary file containing the name" \
   sh -c 'printf "\000\001%s\000" "$1" > crates/a/blob.bin' sh "$name"
 
+# The gate's exclusion list must equal the allowed-location list
+# (CLAUDE.md clean-room rule 5 and the clean-room protocol, recorded in
+# docs/decisions/0005-names-gate-scope.md). Three copies are compared: the
+# list below, the decision record, and the gate's `find` expressions. A new
+# exclusion therefore needs a decision record change (CR-302).
+expected="$(printf '%s\n' /.claude /.git /CLAUDE.md /cleanroom /specs/README.md /target \
+  | LC_ALL=C sort)"
+adr="$root/docs/decisions/0005-names-gate-scope.md"
+adr_list="$(sed -n '/names-gate-exclusions:begin/,/names-gate-exclusions:end/p' "$adr" \
+  | sed -n 's|^[[:space:]]*\(/[^[:space:]]*\)[[:space:]]*$|\1|p' | LC_ALL=C sort)"
+gate_all="$(grep -v -E '^[[:space:]]*#' "$gate" | grep -o -E -- '-path \./[^ )]+' \
+  | sed 's|^-path \.||')"
+gate_list="$(printf '%s\n' "$gate_all" | LC_ALL=C sort -u)"
+if [ "$adr_list" != "$expected" ]; then
+  failures+=("exclusions in $adr differ from the expected list: $(echo $adr_list)")
+fi
+if [ "$gate_list" != "$expected" ]; then
+  failures+=("exclusions in check-names.sh differ from the expected list: $(echo $gate_list)")
+fi
+# Both find expressions (paths and files) must skip the same set.
+gate_count="$(printf '%s\n' "$gate_all" | grep -c .)"
+want_count=$(($(printf '%s\n' "$expected" | grep -c .) * 2))
+if [ "$gate_count" -ne "$want_count" ]; then
+  failures+=("check-names.sh: path and file listings skip different sets ($gate_count -path tests, want $want_count)")
+fi
+count=$((count + 1))
+
 if [ "${#failures[@]}" -gt 0 ]; then
   echo "test-check-names: FAIL"
   printf '  %s\n' "${failures[@]}"

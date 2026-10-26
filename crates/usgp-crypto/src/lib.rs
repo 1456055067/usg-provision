@@ -7,8 +7,8 @@
 //! dependencies. Every other crate reaches cryptography through the
 //! [`CryptoProvider`] trait and the functions exported here.
 //!
-//! Status: stub (M0). Only the FIPS status check exists; digest, signature,
-//! AEAD, and TLS configuration arrive in M1/M2. See docs/ARCHITECTURE.md.
+//! Status: M1. The FIPS status check and SHA-256 exist; signature, AEAD,
+//! and TLS configuration arrive in M2. See docs/ARCHITECTURE.md.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-13 (Cryptographic Protection) - FIPS 140-3 validated
@@ -17,14 +17,17 @@
 //   the only build configuration; there is no non-FIPS feature.
 // - DECISION: docs/decisions/0001-fips-validated-crypto.md (Amendment 1)
 
+pub mod digest;
 pub mod error;
 
+pub use digest::DigestAlgorithm;
 pub use error::CryptoError;
+pub use usgp_common::Sha256Digest;
 
 /// Cryptographic operations for all usg-provision crates (decision 0001).
 ///
-/// M0 exposes only the FIPS status; digest, signature, AEAD, and TLS
-/// methods are added in M1/M2.
+/// M1 exposes the FIPS status and SHA-256; signature, AEAD, and TLS
+/// methods are added in M2.
 pub trait CryptoProvider: Send + Sync + 'static {
     /// Returns `Ok(())` only if the validated module is operating in FIPS
     /// mode.
@@ -34,6 +37,12 @@ pub trait CryptoProvider: Send + Sync + 'static {
     /// [`CryptoError::FipsModeInactive`] if either the module or the TLS
     /// provider reports that FIPS mode is not active.
     fn fips_status(&self) -> Result<(), CryptoError>;
+
+    /// SHA-256 (FIPS 180-4) of `data`.
+    ///
+    /// Callers run [`CryptoProvider::fips_status`] at start-up and refuse
+    /// to run if it fails, so this method has no error path.
+    fn sha256(&self, data: &[u8]) -> Sha256Digest;
 }
 
 /// The single provider, backed by the FIPS-validated module.
@@ -53,6 +62,10 @@ impl CryptoProvider for FipsProvider {
             });
         }
         Ok(())
+    }
+
+    fn sha256(&self, data: &[u8]) -> Sha256Digest {
+        digest::sha256_fips(data)
     }
 }
 
@@ -75,6 +88,12 @@ pub fn fips_status() -> Result<(), CryptoError> {
     provider().fips_status()
 }
 
+/// SHA-256 of `data` through the process-wide provider.
+#[must_use]
+pub fn sha256(data: &[u8]) -> Sha256Digest {
+    provider().sha256(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +107,15 @@ mod tests {
     fn provider_reports_fips() {
         let p: &dyn CryptoProvider = provider();
         assert!(matches!(p.fips_status(), Ok(())));
+    }
+
+    #[test]
+    fn sha256_through_trait_and_free_fn_agree() {
+        let p: &dyn CryptoProvider = provider();
+        // FIPS 180-4 example "abc" (see digest.rs for the source).
+        let want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(p.sha256(b"abc").to_hex(), want);
+        assert_eq!(sha256(b"abc").to_hex(), want);
     }
 
     /// The refusal message the binaries print names the failing layer, so an

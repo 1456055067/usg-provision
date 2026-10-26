@@ -12,6 +12,11 @@
 # /.claude/, /cleanroom/, plus the build output /target/ and VCS metadata
 # /.git/. A file or directory with one of those names anywhere else (for
 # example crates/x/CLAUDE.md or fuzz/target/) is checked like any other.
+# Nested build output is scanned on purpose. A false positive is fixed by
+# moving build output under /target/ or by renaming, never by adding an
+# exclusion; scripts/test-check-names.sh fails if this list changes without
+# docs/decisions/0005-names-gate-scope.md. Shipped artifacts under /target/
+# are scanned by scripts/check-artifact-names.sh.
 #
 # The file list comes from `find`, not from git or ripgrep's ignore rules, so
 # the result is the same in a git checkout, an export, or a scratch copy.

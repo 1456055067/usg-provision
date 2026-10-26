@@ -1,0 +1,57 @@
+# Golden v1 relay configuration (every key set to a non-default value).
+# Written by hand for tests/config.rs::golden_v1_config_parses; paths are
+# examples and are not opened by that test.
+schema_version = 1
+
+[[interface]]
+name = "relay0"
+address = "10.20.1.2"
+
+[[interface]]
+name = "eth1.30"
+address = "10.30.0.2"
+
+[boot]
+manifest = "/etc/usgp-relay/boot-manifest.toml"
+root = "/srv/usgp-relay/boot"
+uefi_x64_program = "usgp-test-payload.efi"
+
+[limits]
+dhcp_client_burst = 9
+dhcp_client_refill_ms = 2100
+dhcp_relay_burst = 201
+dhcp_relay_per_sec = 51
+dhcp_global_per_sec = 201
+dhcp_relayed_global_per_sec = 202
+tracked_clients = 4097
+tftp_max_transfers = 65
+tftp_max_pending = 17
+tftp_per_client_transfers = 5
+tftp_rrq_burst = 9
+tftp_rrq_refill_ms = 1100
+tftp_rrq_global_per_sec = 51
+tftp_rrq_global_burst = 101
+tftp_error_per_sec = 21
+verify_concurrency = 3
+
+[tftp]
+max_block_size = 1428
+initial_timeout_ms = 1500
+min_timeout_ms = 300
+max_timeout_ms = 9000
+max_retries = 6
+handshake_retries = 3
+handshake_timeout_ms = 2100
+max_transfer_secs = 601
+max_file_size_bytes = 33554432
+
+[content]
+recheck_interval_secs = 61
+
+[suppression]
+file = "/etc/usgp-relay/suppress.toml"
+reload_interval_secs = 3
+
+[log]
+level = "debug"
+node_name = "relay-a.lab"

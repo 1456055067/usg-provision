@@ -6,4 +6,12 @@
 # `cargo tree --target all -e normal,build,dev` actually shows, and only if
 # nothing is compiled from C/C++ (CM-2: the baseline matches reality).
 #
-# Currently empty: no such crate is in the tree outside usgp-crypto.
+# Review (M1 WU-0, 2026-10-26): windows-sys 0.52.0 (via errno) depends on
+# windows-targets and the windows_{aarch64,i686,x86_64}_{gnu,gnullvm,msvc}
+# crates. Their names do not end in "-sys" and are not build helpers, so the
+# gate pattern does not match them. They compile no C: each build.rs only
+# emits a rustc-link-search path to prebuilt Windows import libraries, used
+# only when targeting Windows. windows-sys 0.61.2 uses windows-link
+# (build = false, no import libraries).
+
+windows-sys # pure-Rust Windows API bindings pulled by tokio/socket2/mio on Windows targets; compiles no C

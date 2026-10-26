@@ -1,0 +1,52 @@
+# Test-only UEFI application for the M1 boot smoke (plan WU-9). It is a
+# separate workspace, excluded from the product workspace (root Cargo.toml
+# `exclude = ["testing"]`), and is never shipped. Pure Rust: the only
+# dependency is `r-efi` (UEFI type and constant definitions; MIT OR
+# Apache-2.0 OR LGPL-2.1-or-later, used under MIT).
+[workspace]
+resolver = "3"
+
+[package]
+name = "usgp-test-payload"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+description = "Test-only UEFI x86-64 application that prints a marker on the console and shuts down"
+# license: pending owner decision (ROADMAP D-10)
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "usgp-test-payload"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+r-efi = { version = "6", default-features = false }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+undocumented_unsafe_blocks = "deny"
+indexing_slicing = "deny"
+as_conversions = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+overflow-checks = true

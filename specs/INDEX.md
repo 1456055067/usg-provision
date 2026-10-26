@@ -239,7 +239,12 @@ decide.
    IPv6 boot (Unconfirmed) is confirmed or decided. **Summarised:
    `specs/standards/pxe-dhcp.md`** (IPv4; RFC 5970 noted in §11; the PXE
    2.1 primary text was not retrievable, so the Intel PXE Internet-Draft
-   and UEFI Appendix E are used).
+   and UEFI Appendix E are used; §5.5, the RFC 4578 presence rule for
+   options 93, 94 and 97, added 2026-10-26; §3.1 server reply fields
+   (RFC 2131 Table 3), §3.2 RFC 1542 minimum message size, and §6.1 tag 71
+   layout (from the PXE draft and UEFI, PXE 2.1 not read) added
+   2026-10-26; OPEN-T71-1, tag 71 byte order, and OPEN-T71-2, what a boot
+   server puts in its tag 71 reply, both need the PXE 2.1 text).
 2. Proxy DHCP behaviour and PXE boot-server discovery (PXE 2.1). No longer
    conditional: by project decision (M1) the boot service never assigns
    addresses. For BOOT-1. **Summarised: `specs/standards/proxy-dhcp.md`**
@@ -248,7 +253,8 @@ decide.
    RFC 2348, RFC 2349) are background reading; whether any are used is a
    clean-side decision. *(conditional)* RFC 7440 windowsize; no source
    covers transfer tuning. **Summarised: `specs/standards/tftp.md`**
-   (includes RFC 1123 §4.2).
+   (includes RFC 1123 §4.2; §10 windowsize end-of-transfer rule corrected
+   2026-10-26).
 4. UEFI HTTP boot (UEFI specification, HTTP Boot chapter; vendor-class
    identifier semantics). For BOOT-4 (single source).
 5. UEFI boot manager variables and boot-order changes after install (UEFI
@@ -284,3 +290,15 @@ decide.
 17. HTTP semantics and TLS for content download (RFC 9110, RFC 8446). For
     MEDIA-2, RFR-1, RELAY-2, BOOT-4. *(conditional)* HTTP range requests
     (RFC 9110 §14); no source covers resumable downloads.
+18. Long and repeated DHCPv4 options (RFC 3396, with RFC 2131 §4.1 and
+    RFC 2132 §9.3 option overload) and what they mean for the PXE options
+    in topic 1. For BOOT-1. **Summarised:
+    `specs/standards/dhcp-long-options.md`** (OPEN-LONG-1).
+19. GUID/UUID text form and byte order: UEFI Appendix A against RFC 9562 /
+    RFC 4122, the RFC 4578 option 97 identifier, and the SMBIOS type 1
+    system UUID. For BOOT-1 and TGT-3. The SMBIOS part relates to
+    pre-registration (Unconfirmed) and to topic 14. **Summarised:
+    `specs/standards/uefi-guid-text.md`** (the SMBIOS byte order rests on
+    a search summary because the DMTF PDF could not be read, again in fix
+    round 1; no REQ may cite those points until confirmed; the byte order
+    of pre-2.6 tables is not confirmed; OPEN-GUID-1 to OPEN-GUID-5).

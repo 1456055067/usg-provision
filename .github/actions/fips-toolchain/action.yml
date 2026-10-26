@@ -1,0 +1,74 @@
+# Pinned FIPS module build toolchain (decision 0001, docs/BUILDING.md
+# section 3, REL-002), shared by every job that builds usgp-crypto.
+#
+# Installs the packages, exports the build environment for the later steps of
+# the calling job (through GITHUB_ENV and GITHUB_PATH), asserts the version
+# series, and records the exact versions in the job summary. Use these exact
+# binaries, not the runner image's own CMake or Go.
+#
+# COMPLIANCE MAPPING:
+# - NIST 800-53: CM-2 (Baseline Configuration), CM-6, SR-4 (Provenance),
+#   SC-13 (the FIPS module is built only with the recorded toolchain)
+name: FIPS module build toolchain
+description: Install, assert and record the pinned FIPS module build toolchain.
+inputs:
+  extra-packages:
+    description: Extra apt packages to install in the same apt transaction (space separated).
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Export the pinned toolchain environment
+      shell: bash
+      run: |
+        {
+          echo "CMAKE=/usr/bin/cmake"
+          echo "CC=/usr/bin/clang-18"
+          echo "CXX=/usr/bin/clang++-18"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib"
+          echo "GOTOOLCHAIN=local"
+          echo "GOPROXY=off"
+          echo "EXPECT_GO=1.22"
+          echo "EXPECT_CMAKE=3.28"
+          echo "EXPECT_CLANG=18.1"
+          echo "EXPECT_PERL=5.38"
+        } >> "$GITHUB_ENV"
+    - name: Install FIPS module build tools (decision 0001, docs/BUILDING.md)
+      shell: bash
+      env:
+        EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        # Word splitting of the package list is intended.
+        # shellcheck disable=SC2086
+        sudo apt-get install -y --no-install-recommends \
+          cmake golang-1.22-go clang-18 libclang-18-dev perl $EXTRA_PACKAGES
+        echo "/usr/lib/go-1.22/bin" >> "$GITHUB_PATH"
+    - name: Verify and record FIPS build toolchain (REL-002)
+      shell: bash
+      run: |
+        set -euo pipefail
+        check() {
+          case "$3" in
+            "$2" | "$2".*) echo "ok: $1 $3" ;;
+            *) echo "::error::$1 is $3, expected $2.x (docs/BUILDING.md)"; exit 1 ;;
+          esac
+        }
+        [ "$(command -v go)" = /usr/lib/go-1.22/bin/go ] || { echo "::error::go is $(command -v go)"; exit 1; }
+        check go "$EXPECT_GO" "$(go env GOVERSION | sed 's/^go//')"
+        check cmake "$EXPECT_CMAKE" "$("$CMAKE" --version | head -n 1 | cut -d ' ' -f 3)"
+        check clang "$EXPECT_CLANG" "$("$CC" -dumpversion)"
+        check perl "$EXPECT_PERL" "$(perl -v | sed -n 's/.*(v\([0-9.]*\)).*/\1/p')"
+        {
+          echo '### FIPS build toolchain (docs/BUILDING.md)'
+          echo '```text'
+          go version
+          "$CMAKE" --version | head -n 1
+          "$CC" --version | head -n 1
+          perl -v | sed -n 2p
+          rustup --version 2> /dev/null
+          dpkg-query -W cmake golang-1.22-go clang-18 libclang-18-dev perl
+          echo '```'
+        } | tee -a "$GITHUB_STEP_SUMMARY"

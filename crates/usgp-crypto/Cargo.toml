@@ -1,0 +1,19 @@
+[package]
+name = "usgp-crypto"
+description = "CryptoProvider trait, FIPS status, and TLS configuration (sole crypto boundary)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Decision 0001 (with Amendment 1): the FIPS 140-3 validated module and the
+# rustls FIPS provider. Only this crate may depend on them; deny.toml enforces.
+aws-lc-rs.workspace = true
+# Direct only to pin the module version exactly (see root Cargo.toml).
+aws-lc-fips-sys.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

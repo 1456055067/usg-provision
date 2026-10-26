@@ -1,0 +1,59 @@
+# Supply-chain policy (cargo-deny 0.20).
+# Decision 0001 + Amendment 1: the AWS-LC FIPS module, the non-FIPS aws-lc-sys
+# (built, not linked) and their build-only tools are confined to usgp-crypto
+# through the `wrappers` lists below. Do not widen a wrapper list without a
+# decision record.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+unused-allowed-license = "allow"
+allow = [
+  "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause", "BSD-3-Clause", "ISC", "OpenSSL", "Unicode-3.0",
+  "Zlib", "CC0-1.0", "Unlicense",
+]
+[licenses.private]
+ignore = true   # workspace crates are publish = false; license pending D-10
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true   # internal path deps
+deny = [
+  # C crypto / TLS / C libraries excluded by the pure-Rust rule
+  "ring", "openssl", "openssl-sys", "native-tls", "boring", "boring-sys",
+  "libsqlite3-sys", "zstd-sys", "bzip2-sys", "lzma-sys", "libgit2-sys",
+  # Native build helpers / vendored C sources (pure-Rust rule)
+  "vcpkg", "cxx", "cxx-build", "link-cplusplus", "openssl-src", "nasm-rs",
+  "autotools",
+  # Decision 0002: libFuzzer only in the separate fuzz/ workspace
+  "libfuzzer-sys",
+  # Decision 0001: FIPS module confined to usgp-crypto
+  { crate = "aws-lc-rs", wrappers = ["usgp-crypto", "rustls", "rustls-webpki"] },
+  { crate = "aws-lc-fips-sys", wrappers = ["aws-lc-rs", "usgp-crypto"] },  # usgp-crypto: exact version pin only (REL-001)
+  { crate = "aws-lc-sys", wrappers = ["aws-lc-rs"] },          # 0001 Amendment 1: build-only, not linked
+  { crate = "rustls", wrappers = ["usgp-crypto"] },            # M1 adds "tokio-rustls"
+  { crate = "rustls-webpki", wrappers = ["rustls"] },
+  { crate = "bindgen", wrappers = ["aws-lc-fips-sys"] },       # 0001 Amendment 1
+  { crate = "clang-sys", wrappers = ["bindgen"] },             # 0001 Amendment 1
+  { crate = "cmake", wrappers = ["aws-lc-fips-sys", "aws-lc-sys"] },          # 0001 Amendment 1
+  { crate = "cc", wrappers = ["aws-lc-fips-sys", "aws-lc-sys", "cmake"] },    # 0001 Amendment 1
+  # Build-time native discovery/loading used only by the AWS-LC chain. CI sets
+  # AWS_LC_{FIPS_,}SYS_USE_SYSTEM=0 so pkg-config never selects a system lib.
+  { crate = "pkg-config", wrappers = ["aws-lc-fips-sys", "aws-lc-sys"] },  # 0001 Amendment 1
+  { crate = "libloading", wrappers = ["clang-sys"] },         # 0001 Amendment 1
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,5 @@
+# Pinned independently of the main workspace (docs/decisions/0002).
+# Verified 2026-10-25: rustc 1.101.0-nightly (7189d39d9 2026-10-22).
+[toolchain]
+channel = "nightly-2026-10-23"
+profile = "minimal"

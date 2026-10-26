@@ -1,0 +1,17 @@
+[package]
+name = "usgp-api"
+description = "Server REST routes, authentication, RBAC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+usgp-common.workspace = true
+usgp-crypto.workspace = true
+usgp-audit.workspace = true
+usgp-db.workspace = true
+usgp-proto.workspace = true
+
+[lints]
+workspace = true

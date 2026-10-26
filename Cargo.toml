@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "services/*", "tools/*"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+# license: pending owner decision (ROADMAP D-10)
+
+[workspace.dependencies]
+# Internal crates
+usgp-common = { path = "crates/usgp-common" }
+usgp-crypto = { path = "crates/usgp-crypto" }
+usgp-audit = { path = "crates/usgp-audit" }
+usgp-db = { path = "crates/usgp-db" }
+usgp-proto = { path = "crates/usgp-proto" }
+usgp-dhcp = { path = "crates/usgp-dhcp" }
+usgp-tftp = { path = "crates/usgp-tftp" }
+usgp-httpboot = { path = "crates/usgp-httpboot" }
+usgp-image = { path = "crates/usgp-image" }
+usgp-disk = { path = "crates/usgp-disk" }
+usgp-wincfg = { path = "crates/usgp-wincfg" }
+usgp-deploy = { path = "crates/usgp-deploy" }
+usgp-cache = { path = "crates/usgp-cache" }
+usgp-api = { path = "crates/usgp-api" }
+# External. Crypto crates are for usgp-crypto ONLY (decision 0001; deny.toml enforces).
+# Exact pins (CM-3, release-notes REL-001): the FIPS module version is set by
+# aws-lc-fips-sys (`links = "aws_lc_fips_0_14_3"`), and aws-lc-rs 1.18.2 only
+# asks for `^0.14.2`, so both are pinned. Changing either is a reviewed
+# manifest edit that must re-check the module's CMVP status (decision 0001).
+aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["fips"] }
+aws-lc-fips-sys = { version = "=0.14.3" }
+rustls = { version = "0.23.46", default-features = false, features = ["fips", "std"] }
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+overflow-checks = true

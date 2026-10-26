@@ -1,0 +1,23 @@
+# Separate, unshipped workspace for cargo-fuzz targets.
+# libfuzzer-sys (C++ libFuzzer) is allowed here only: docs/decisions/0002.
+[package]
+name = "usgp-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "noop"
+path = "fuzz_targets/noop.rs"
+test = false
+doc = false
+bench = false

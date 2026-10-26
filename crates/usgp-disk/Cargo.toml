@@ -1,0 +1,13 @@
+[package]
+name = "usgp-disk"
+description = "Disk inventory model, GPT/MBR layout plans, layout executor trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+usgp-common.workspace = true
+
+[lints]
+workspace = true

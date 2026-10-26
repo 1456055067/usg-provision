@@ -1,0 +1,23 @@
+# Build-script environment for every Cargo invocation in this repository
+# (decision 0001; release-notes REL-004). `force = true` makes these win over
+# the caller's environment, so a host with a system AWS-LC or OpenSSL install
+# cannot be adopted by accident.
+#
+# COMPLIANCE MAPPING:
+# - NIST 800-53: CM-6 (Configuration Settings), SI-7 (Software, Firmware,
+#   and Information Integrity), SR-4 (Provenance)
+[env]
+# Always build the FIPS module (and the build-only non-FIPS crate) from the
+# reviewed source bundled in the crate; never probe OPENSSL_DIR or pkg-config.
+AWS_LC_FIPS_SYS_USE_SYSTEM = { value = "0", force = true }
+AWS_LC_SYS_USE_SYSTEM = { value = "0", force = true }
+# Static FIPS linkage is required for shipped Linux artifacts. AWS-LC refuses
+# a static FIPS build on any other OS ("Static FIPS build of AWS-LC is
+# supported only on Linux"), so the flag uses aws-lc-fips-sys's
+# target-suffixed form (`<VAR>_<target triple with underscores>`) and applies
+# only to the Linux targets listed. macOS stays dynamic and is development-only
+# (POAM-2).
+AWS_LC_FIPS_SYS_STATIC_x86_64_unknown_linux_gnu = { value = "1", force = true }
+AWS_LC_FIPS_SYS_STATIC_aarch64_unknown_linux_gnu = { value = "1", force = true }
+AWS_LC_FIPS_SYS_STATIC_x86_64_unknown_linux_musl = { value = "1", force = true }
+AWS_LC_FIPS_SYS_STATIC_aarch64_unknown_linux_musl = { value = "1", force = true }

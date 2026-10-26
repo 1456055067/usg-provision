@@ -1,0 +1,24 @@
+[package]
+name = "usgp-server"
+description = "Control plane service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "usgp-server"
+path = "src/main.rs"
+
+[dependencies]
+usgp-api.workspace = true
+usgp-audit.workspace = true
+usgp-db.workspace = true
+usgp-image.workspace = true
+usgp-wincfg.workspace = true
+usgp-proto.workspace = true
+usgp-crypto.workspace = true
+usgp-common.workspace = true
+
+[lints]
+workspace = true

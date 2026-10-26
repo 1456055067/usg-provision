@@ -1,0 +1,268 @@
+# CI gates (see .claude/skills/provision-workflow/references/quality-gates.md).
+# Third-party actions are pinned by full commit SHA (supply chain, SR-4).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly re-run so new RustSec advisories surface without a code change.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Decision 0001: always build the FIPS module from the crate's bundled
+  # source. Disable auto-detection of a system AWS-LC/OpenSSL install
+  # (OPENSSL_DIR, pkg-config), which the -sys build scripts otherwise probe
+  # and may load and execute. Linux FIPS builds are static; pin that.
+  AWS_LC_FIPS_SYS_USE_SYSTEM: "0"
+  AWS_LC_SYS_USE_SYSTEM: "0"
+  AWS_LC_FIPS_SYS_STATIC: "1"
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Pinned FIPS module toolchain (docs/BUILDING.md section 3, REL-002).
+      # Use these exact binaries, not the runner image's own CMake/Go.
+      CMAKE: /usr/bin/cmake
+      CC: /usr/bin/clang-18
+      CXX: /usr/bin/clang++-18
+      LIBCLANG_PATH: /usr/lib/llvm-18/lib
+      GOTOOLCHAIN: local
+      GOPROXY: "off"
+      EXPECT_GO: "1.22"
+      EXPECT_CMAKE: "3.28"
+      EXPECT_CLANG: "18.1"
+      EXPECT_PERL: "5.38"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install FIPS module build tools (decision 0001, docs/BUILDING.md)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake golang-1.22-go clang-18 libclang-18-dev perl ripgrep
+          echo "/usr/lib/go-1.22/bin" >> "$GITHUB_PATH"
+      - name: Verify and record FIPS build toolchain (REL-002)
+        run: |
+          set -euo pipefail
+          check() {
+            case "$3" in
+              "$2" | "$2".*) echo "ok: $1 $3" ;;
+              *) echo "::error::$1 is $3, expected $2.x (docs/BUILDING.md)"; exit 1 ;;
+            esac
+          }
+          [ "$(command -v go)" = /usr/lib/go-1.22/bin/go ] || { echo "::error::go is $(command -v go)"; exit 1; }
+          check go "$EXPECT_GO" "$(go env GOVERSION | sed 's/^go//')"
+          check cmake "$EXPECT_CMAKE" "$("$CMAKE" --version | head -n 1 | cut -d ' ' -f 3)"
+          check clang "$EXPECT_CLANG" "$("$CC" -dumpversion)"
+          check perl "$EXPECT_PERL" "$(perl -v | sed -n 's/.*(v\([0-9.]*\)).*/\1/p')"
+          {
+            echo '### FIPS build toolchain (docs/BUILDING.md)'
+            echo '```text'
+            go version
+            "$CMAKE" --version | head -n 1
+            "$CC" --version | head -n 1
+            perl -v | sed -n 2p
+            rustup --version 2> /dev/null
+            dpkg-query -W cmake golang-1.22-go clang-18 libclang-18-dev perl
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install && rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: gates-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --doc --locked
+      - run: scripts/check-pure-rust.sh
+      - run: scripts/check-names.sh
+      - run: NAMES_FORCE_GREP=1 scripts/check-names.sh
+      - run: scripts/test-check-names.sh
+      - name: Binaries start in FIPS mode (fail closed, SC-13)
+        run: |
+          cargo build --workspace --bins --locked
+          # Run the artifacts directly (not via cargo run) so a missing
+          # runtime library fails here.
+          for b in usgp-server usgp-relay usgp-preboot-agent usgp-cli; do
+            "target/debug/$b"
+          done
+
+  fips-linkage:
+    # Decision 0001 Amendment 1: shipped binaries link the FIPS module, do not
+    # link the non-FIPS AWS-LC library, and report FIPS mode active.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # Pinned FIPS module toolchain (docs/BUILDING.md section 3, REL-002).
+      # Use these exact binaries, not the runner image's own CMake/Go.
+      CMAKE: /usr/bin/cmake
+      CC: /usr/bin/clang-18
+      CXX: /usr/bin/clang++-18
+      LIBCLANG_PATH: /usr/lib/llvm-18/lib
+      GOTOOLCHAIN: local
+      GOPROXY: "off"
+      EXPECT_GO: "1.22"
+      EXPECT_CMAKE: "3.28"
+      EXPECT_CLANG: "18.1"
+      EXPECT_PERL: "5.38"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install FIPS module build tools (decision 0001, docs/BUILDING.md)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake golang-1.22-go clang-18 libclang-18-dev perl
+          echo "/usr/lib/go-1.22/bin" >> "$GITHUB_PATH"
+      - name: Verify and record FIPS build toolchain (REL-002)
+        run: |
+          set -euo pipefail
+          check() {
+            case "$3" in
+              "$2" | "$2".*) echo "ok: $1 $3" ;;
+              *) echo "::error::$1 is $3, expected $2.x (docs/BUILDING.md)"; exit 1 ;;
+            esac
+          }
+          [ "$(command -v go)" = /usr/lib/go-1.22/bin/go ] || { echo "::error::go is $(command -v go)"; exit 1; }
+          check go "$EXPECT_GO" "$(go env GOVERSION | sed 's/^go//')"
+          check cmake "$EXPECT_CMAKE" "$("$CMAKE" --version | head -n 1 | cut -d ' ' -f 3)"
+          check clang "$EXPECT_CLANG" "$("$CC" -dumpversion)"
+          check perl "$EXPECT_PERL" "$(perl -v | sed -n 's/.*(v\([0-9.]*\)).*/\1/p')"
+          {
+            echo '### FIPS build toolchain (docs/BUILDING.md)'
+            echo '```text'
+            go version
+            "$CMAKE" --version | head -n 1
+            "$CC" --version | head -n 1
+            perl -v | sed -n 2p
+            rustup --version 2> /dev/null
+            dpkg-query -W cmake golang-1.22-go clang-18 libclang-18-dev perl
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install && rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo build --workspace --bins --release --locked
+      - run: scripts/check-fips-linkage.sh release
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install && rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-audit
+          key: supply-chain-tools-${{ runner.os }}-cargo-deny-0.20.2-cargo-audit-0.22.2
+      - name: Install cargo-deny and cargo-audit
+        run: |
+          command -v cargo-deny || cargo install --locked cargo-deny@0.20.2
+          command -v cargo-audit || cargo install --locked cargo-audit@0.22.2
+      - run: cargo deny check
+      - run: cargo audit
+      - name: Audit the fuzz workspace lockfile (REL-008)
+        # bans and licenses are skipped by design: the fuzz workspace uses
+        # libfuzzer-sys (decision 0002), which the main policy bans, and it
+        # is never shipped.
+        run: |
+          cargo audit --file fuzz/Cargo.lock
+          cargo deny --manifest-path fuzz/Cargo.toml check advisories sources
+
+  markdown:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node and npm come with the runner image (not pinned; REL-008).
+      # markdownlint-cli 0.45.0 and every transitive dependency are pinned
+      # with integrity hashes in .github/markdownlint/package-lock.json.
+      - name: Install markdownlint from the lockfile (REL-008)
+        working-directory: .github/markdownlint
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: .github/markdownlint/node_modules/.bin/markdownlint --version
+      - run: .github/markdownlint/node_modules/.bin/markdownlint "docs/**/*.md" "specs/**/*.md" "fuzz/*.md" "*.md"
+
+  ci-lint:
+    # shellcheck for scripts/, actionlint for workflows (REL-008).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SHELLCHECK_VERSION: "0.9.0"
+      ACTIONLINT_VERSION: "1.7.7"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck (noble archive, version asserted)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          got="$(shellcheck --version | sed -n 's/^version: //p')"
+          [ "$got" = "$SHELLCHECK_VERSION" ] || { echo "::error::shellcheck is $got, expected $SHELLCHECK_VERSION"; exit 1; }
+      - name: Install actionlint (Go module, checksums verified by sum.golang.org)
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: shellcheck scripts/*.sh
+      - run: actionlint -version && actionlint
+
+  fuzz-build:
+    # Separate workspace; libFuzzer allowed only here (decision 0002).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly from fuzz/rust-toolchain.toml
+        working-directory: fuzz
+        run: rustup toolchain install && rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/registry
+            fuzz/target
+          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml') }}
+      - name: Install cargo-fuzz
+        run: command -v cargo-fuzz || cargo install --locked cargo-fuzz@0.13.2
+      - name: Check fuzz/Cargo.lock is up to date (REL-008)
+        working-directory: fuzz
+        run: cargo fetch --locked
+      - name: Build fuzz targets
+        working-directory: fuzz
+        run: cargo fuzz build

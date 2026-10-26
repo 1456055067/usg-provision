@@ -1,0 +1,5 @@
+target/
+fuzz/target/
+fuzz/artifacts/
+fuzz/coverage/
+.github/markdownlint/node_modules/

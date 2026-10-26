@@ -1,0 +1,20 @@
+[package]
+name = "usgp-preboot-agent"
+description = "Agent that runs in the pre-boot environment on the target"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "usgp-preboot-agent"
+path = "src/main.rs"
+
+[dependencies]
+usgp-deploy.workspace = true
+usgp-proto.workspace = true
+usgp-crypto.workspace = true
+usgp-common.workspace = true
+
+[lints]
+workspace = true

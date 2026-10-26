@@ -1,0 +1,12 @@
+[package]
+name = "usgp-common"
+description = "Config loading and validation, error base, ids, time, tracing init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

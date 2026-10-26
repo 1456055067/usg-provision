@@ -1,0 +1,17 @@
+[package]
+name = "usgp-deploy"
+description = "Job plan model and step engine (OS-neutral)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+usgp-common.workspace = true
+usgp-proto.workspace = true
+usgp-disk.workspace = true
+usgp-image.workspace = true
+usgp-wincfg.workspace = true
+
+[lints]
+workspace = true

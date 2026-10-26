@@ -1,0 +1,9 @@
+# Plan of action and milestones
+
+Known weaknesses and gaps. Each item is closed only with evidence.
+
+| ID | Weakness | Control | Location | Milestone | Status |
+|----|----------|---------|----------|-----------|--------|
+| POAM-1 | The FIPS module's validated operational environment is not confirmed for the platforms we build on or ship to. macOS builds are functional only; Windows PE and Windows relay hosts are open (ROADMAP D-5). | SC-13 | `crates/usgp-crypto` | M3 (Windows PE), M5 (Windows relay) | Open — risk accepted by owner 2026-10-25 |
+| POAM-2 | On macOS, `aws-lc-fips-sys` builds the module as a shared library (`libaws_lc_fips_*.dylib`) that the binaries load through `@rpath` with no rpath set; built binaries start only through `cargo run`. Packaging must ship and locate the library, or macOS is a development-only host. Interim: `scripts/check-fips-linkage.sh` treats macOS as development-only (binaries started through `cargo run`, functional evidence only) and Linux as the release platform (static linkage asserted, binaries run directly); `.cargo/config.toml` forces static FIPS linkage for Linux targets only, because AWS-LC refuses a static FIPS build on macOS. | SC-13, CM-2 | `crates/usgp-crypto`, release packaging | Before first release | Open — risk accepted by owner 2026-10-25 (macOS development-only) |
+| POAM-3 | FIPS module version and CMVP certificate are not confirmed (REL-001a): `aws-lc-fips-sys` 0.14.3 bundles AWS-LC source reporting 4.2.0, while the crate README names module 3.0.x. Versions are pinned (`aws-lc-rs =1.18.2`, `aws-lc-fips-sys =0.14.3`). No "FIPS validated" claim may be made until the certificate, module version and security policy are confirmed and recorded in decision 0001, `docs/BUILDING.md` and ATO evidence. | SC-13 | `crates/usgp-crypto`, `Cargo.toml`, `docs/BUILDING.md` | Before ATO package / first release | Open — risk accepted by owner 2026-10-25 |

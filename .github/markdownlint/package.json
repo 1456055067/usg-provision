@@ -1,0 +1,9 @@
+{
+  "name": "usg-provision-ci-markdownlint",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned markdownlint for CI (REL-008). Install with npm ci --ignore-scripts.",
+  "dependencies": {
+    "markdownlint-cli": "0.45.0"
+  }
+}

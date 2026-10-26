@@ -1,0 +1,9 @@
+# Crates matching the pure-Rust gate pattern (any -sys crate, or a C/C++
+# build helper: cc, bindgen, cmake, pkg-config, vcpkg, cxx, cxx-build,
+# link-cplusplus, nasm-rs, openssl-src, autotools) that are allowed anywhere
+# in the workspace. One crate name per line, then a `#` reason. Add an entry
+# only in the change that introduces the crate, only for what
+# `cargo tree --target all -e normal,build,dev` actually shows, and only if
+# nothing is compiled from C/C++ (CM-2: the baseline matches reality).
+#
+# Currently empty: no such crate is in the tree outside usgp-crypto.

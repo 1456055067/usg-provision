@@ -1,7 +1,11 @@
 # Capability index
 
-Survey baseline, 2026-10-25. All capabilities are `NOT SPECCED`; each area
-reserves the REQ ID range `REQ-<AREA>-001` to `REQ-<AREA>-099`.
+Survey baseline, 2026-10-25. Each area reserves the REQ ID range
+`REQ-<AREA>-001` to `REQ-<AREA>-099`. Capabilities are `NOT SPECCED`
+unless the table says otherwise. Spec run M1 network boot (2026-10-25/26)
+moved BOOT-1, BOOT-2 and BOOT-5 to `DRAFT`, then to `AUDITED` after the
+clean-room audit and owner acceptance of DEC-0004 (2026-10-26). BOOT-1 and
+BOOT-5 are partly `AUDITED`: their OPEN REQs stay open.
 
 Priority is for a **Windows client (10/11 Enterprise) first** release:
 
@@ -9,7 +13,8 @@ Priority is for a **Windows client (10/11 Enterprise) first** release:
 - **P2**: needed for production fleet use.
 - **P3**: later, or other operating systems.
 
-Sources are IDs in the provenance log (dirty side only).
+Sources are IDs in the provenance log (dirty side only). `DEC-nnnn` IDs
+are project decisions, not product behaviour.
 
 ## End-to-end outcomes (survey answer)
 
@@ -26,14 +31,19 @@ cannot network-boot. It also covers secure wipe and retirement of devices.
 
 ### BOOT — Network boot
 
-| ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
-|----|--------------------------|-----------|----------|--------|---------|
-| BOOT-1 | A device on the local network can boot over the network (PXE) and be served the provisioning environment by a boot service on that segment, including when the boot service answers across subnets. | `specs/boot-network.md` | P1 | NOT SPECCED | SRC-003, SRC-004, SRC-005, SRC-006 |
-| BOOT-2 | Network boot works on UEFI firmware. | `specs/boot-network.md` | P1 | NOT SPECCED | SRC-004, SRC-009 |
-| BOOT-3 | Network boot also works on legacy BIOS firmware, including first-generation virtual machines, with working video output. | `specs/boot-network.md` | P2 | NOT SPECCED | SRC-004, SRC-006, SRC-007 |
-| BOOT-4 | UEFI devices can use HTTP boot instead of TFTP-based PXE, for faster transfer. *Single source (SRC-009, dated 2022); the public release notes do not mention it. Any requirement derived from this row is capped at SHOULD, or marked `OPEN`, until a second public source confirms it.* | `specs/boot-network.md` | P2 | NOT SPECCED | SRC-009 |
-| BOOT-5 | After a network-booted install, the device's next boot goes to the installed disk rather than looping back into network boot. | `specs/boot-network.md` | P1 | NOT SPECCED | SRC-004 |
-| BOOT-6 | ARM-architecture devices can be provisioned. | `specs/boot-network.md` | P3 | NOT SPECCED | SRC-004, SRC-007 |
+REQ IDs in use: `REQ-BOOT-001` to `REQ-BOOT-070`, grouped by topic in
+tens with gaps. BOOT-3, BOOT-4 and BOOT-6 have no REQs yet. In the REQ
+column, "OPEN" lists requirements whose behaviour still needs a source or
+a decision.
+
+| ID | Capability (behavioural) | Spec file | Priority | Status | REQ IDs | Sources |
+|----|--------------------------|-----------|----------|--------|---------|---------|
+| BOOT-1 | A device on the local network can boot over the network (PXE) and be served the provisioning environment by a boot service on that segment, including when the boot service answers across subnets. The boot service never assigns addresses and works beside the site's DHCP server (project decision, M1). | `specs/boot-network.md` | P1 | AUDITED (partial; OPEN: 013, 014, 035, 054) | REQ-BOOT-001, 002, 004 to 007, 010 to 014, 020 to 023, 030 to 035, 040 to 045, 052 to 054, 070 (OPEN: 013, 014, 035, 054) | SRC-003, SRC-004, SRC-005, SRC-006, SRC-007, SRC-009, DEC-0003 |
+| BOOT-2 | Network boot works on UEFI firmware (M1 scope by project decision: x86-64, IPv4). | `specs/boot-network.md` | P1 | AUDITED | REQ-BOOT-003, 005 | SRC-004 (indirect), DEC-0004 |
+| BOOT-3 | Network boot also works on legacy BIOS firmware, including first-generation virtual machines, with working video output. | `specs/boot-network.md` | P2 | NOT SPECCED | none | SRC-004, SRC-006, SRC-007 |
+| BOOT-4 | UEFI devices can use HTTP boot instead of TFTP-based PXE, for faster transfer. *Single source (SRC-009, dated 2022); the public release notes do not mention it. Any requirement derived from this row is capped at SHOULD, or marked `OPEN`, until a second public source confirms it.* | `specs/boot-network.md` | P2 | NOT SPECCED | none | SRC-009 |
+| BOOT-5 | After a network-booted install, the device's next boot goes to the installed disk rather than looping back into network boot. For M1, an operator can tell the boot service not to offer a boot program to a device, so that the device falls through to its next boot option (project decision, M1). | `specs/boot-network.md` | P1 | AUDITED (partial; AUDITED: 050, 051, 060; OPEN: 061, 062) | REQ-BOOT-050, 051, 060 to 062 (OPEN: 061, 062) | SRC-004, DEC-0004 |
+| BOOT-6 | ARM-architecture devices can be provisioned. | `specs/boot-network.md` | P3 | NOT SPECCED | none | SRC-004, SRC-007 |
 
 ### MEDIA — Boot media
 
@@ -193,8 +203,11 @@ needs a cited source or a product decision.
   receive a specific deployment without a choice at the device.
 - Zero-touch bare-metal installs with no input at the device.
 - Multicast image delivery.
-- Coexistence with an existing DHCP server (proxy DHCP behaviour) and what
-  network configuration the boot service requires.
+- What network configuration the boot service requires beyond what
+  `specs/boot-network.md` states. DHCP coexistence itself is now settled
+  by project decision (M1, DEC-0003): the boot service never assigns
+  addresses and works beside the site DHCP server (REQ-BOOT-010 to
+  REQ-BOOT-012). There is still no vendor source for it.
 - BitLocker or other encryption of the installed OS disk; TPM handling.
 - Windows Server as a target OS.
 - A general operator API (only a retirement-specific API is mentioned).
@@ -223,21 +236,29 @@ decide.
 1. PXE boot flow and DHCP options for PXE/UEFI clients (Intel PXE 2.1;
    RFC 2131, RFC 2132, RFC 4578 client architecture types). For BOOT-1,
    BOOT-2, BOOT-3. *(conditional)* RFC 5970 IPv6 boot options, only if
-   IPv6 boot (Unconfirmed) is confirmed or decided.
-2. *(conditional)* Proxy DHCP behaviour and PXE boot-server discovery
-   (PXE 2.1). Relates to DHCP coexistence (Unconfirmed). Background for
-   BOOT-1 only.
+   IPv6 boot (Unconfirmed) is confirmed or decided. **Summarised:
+   `specs/standards/pxe-dhcp.md`** (IPv4; RFC 5970 noted in §11; the PXE
+   2.1 primary text was not retrievable, so the Intel PXE Internet-Draft
+   and UEFI Appendix E are used).
+2. Proxy DHCP behaviour and PXE boot-server discovery (PXE 2.1). No longer
+   conditional: by project decision (M1) the boot service never assigns
+   addresses. For BOOT-1. **Summarised: `specs/standards/proxy-dhcp.md`**
+   (partly from secondary sources, marked in the file).
 3. TFTP (RFC 1350) for BOOT-1, BOOT-2, BOOT-3. Option extensions (RFC 2347,
    RFC 2348, RFC 2349) are background reading; whether any are used is a
    clean-side decision. *(conditional)* RFC 7440 windowsize; no source
-   covers transfer tuning.
+   covers transfer tuning. **Summarised: `specs/standards/tftp.md`**
+   (includes RFC 1123 §4.2).
 4. UEFI HTTP boot (UEFI specification, HTTP Boot chapter; vendor-class
    identifier semantics). For BOOT-4 (single source).
 5. UEFI boot manager variables and boot-order changes after install (UEFI
-   specification, Boot Manager chapter). For BOOT-5.
+   specification, Boot Manager chapter). For BOOT-5. **Summarised:
+   `specs/standards/uefi-boot-manager.md`** (UEFI 2.10).
 6. *(conditional)* UEFI Secure Boot and the signed boot chain (UEFI
    specification, Secure Boot chapter; Microsoft public guidance on signing
-   requirements). Relates to Secure Boot (Unconfirmed).
+   requirements). Relates to Secure Boot (Unconfirmed). **Summarised as
+   background only: `specs/standards/uefi-secure-boot.md`** (no signing
+   design).
 7. Legacy BIOS boot and MBR partitioning. For BOOT-3, DISK-1.
 8. GPT partitioning and the Windows recommended UEFI partition layout
    (UEFI specification GPT chapter; Microsoft Learn partition guidance).

@@ -5,9 +5,19 @@ Survey baseline, 2026-10-25. Each area reserves the REQ ID range
 unless the table says otherwise. Spec run M1 network boot (2026-10-25/26)
 moved BOOT-1, BOOT-2 and BOOT-5 to `DRAFT`, then to `AUDITED` after the
 clean-room audit and owner acceptance of DEC-0004 (2026-10-26). BOOT-1 and
-BOOT-5 are partly `AUDITED`: their OPEN REQs stay open.
+BOOT-5 are partly `AUDITED`: their OPEN REQs stay open. Spec run M2
+(content store, integrity, operator access; 2026-10-26) moved IMG-1,
+IMG-2, the image-content part of OS-1 and the import part of PE-1 to
+`DRAFT`, and added RBAC-2 and AUD-2 (`specs/operator-access.md`). M2 fix
+round 1 (CR-501 to CR-510) applied the owner's decisions DEC-0006,
+DEC-0007, DEC-0009, DEC-0010 and DEC-0011. After the re-audit (round 1,
+approved, 2026-10-26) these rows are `AUDITED`, partly where OPEN REQs
+remain; OPEN REQs stay open. The M2 standards summaries (topics 9, 11,
+17, 20 and 21) are audited.
 
-Priority is for a **Windows client (10/11 Enterprise) first** release:
+Priority is for a **Windows client (10/11 Enterprise) first** release.
+For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64
+(`specs/os-support.md`).
 
 - **P1**: needed to provision one Windows client over the network end to end.
 - **P2**: needed for production fleet use.
@@ -58,7 +68,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| PE-1 | Windows installs run from a Windows PE environment that the operator prepares from Microsoft's deployment kit (the product does not ship Microsoft components). | `specs/preinstall-env.md` | P1 | NOT SPECCED | SRC-004, SRC-008 |
+| PE-1 | Windows installs run from a Windows PE environment that the operator prepares from Microsoft's deployment kit (the product does not ship Microsoft components). | `specs/preinstall-env.md` | P1 | AUDITED (partial; import part, M2: REQ-PE-001 to 010; OPEN: 005, 010. Booting WinPE is M3, not specced) | SRC-001, SRC-004, SRC-005, SRC-008, SRC-047, SRC-048, SRC-057, SRC-058, SRC-060, SRC-061, SRC-063, DEC-0009 |
 | PE-2 | The environment is usable at the device: network/Wi-Fi selection, on-screen keyboard, a command shell on error, and optional company branding. | `specs/preinstall-env.md` | P2 | NOT SPECCED | SRC-004, SRC-005, SRC-006 |
 | PE-3 | Access to the environment's shell and administrative functions is protected by operator-set passwords. | `specs/preinstall-env.md` | P2 | NOT SPECCED | SRC-004 |
 | PE-4 | A Linux-based environment is used for Linux installs and Linux image capture. | `specs/preinstall-env.md` | P3 | NOT SPECCED | SRC-004, SRC-006 |
@@ -67,8 +77,8 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| IMG-1 | An operator defines a deployment package that combines an OS image with its configuration, and can create, clone, view, edit, and delete packages. | `specs/os-images.md` | P1 | NOT SPECCED | SRC-001, SRC-004 |
-| IMG-2 | Windows images in WIM format can be uploaded (including multi-gigabyte files and images containing many editions, where one edition is selected). | `specs/os-images.md` | P1 | NOT SPECCED | SRC-004, SRC-006 |
+| IMG-1 | An operator defines a deployment package that combines an OS image with its configuration, and can create, clone, view, edit, and delete packages. | `specs/os-images.md` | P1 | AUDITED (partial; REQ-IMG-001 to 006, 010 to 018, 020 to 022, 052, 054; OPEN: 002, 015, 016, 018) | SRC-001, SRC-004, SRC-005, SRC-007, DEC-0011 |
+| IMG-2 | Windows images in WIM format can be uploaded (including multi-gigabyte files and images containing many editions, where one edition is selected). | `specs/os-images.md` | P1 | AUDITED (partial; REQ-IMG-030 to 044, 050, 051, 053; OPEN: 034, 036, 039, 043, 044) | SRC-001, SRC-004, SRC-005, SRC-047, SRC-048, SRC-049, SRC-050, SRC-051, SRC-056, DEC-0006, DEC-0007, DEC-0011 |
 | IMG-3 | Microsoft OS media can be downloaded directly into the product instead of uploaded. | `specs/os-images.md` | P2 | NOT SPECCED | SRC-004 |
 | IMG-4 | A reference device's OS can be captured as a new custom image. | `specs/os-images.md` | P2 | NOT SPECCED | SRC-004, SRC-007 |
 | IMG-5 | Images exported from another imaging system in WIM format can be reused. | `specs/os-images.md` | P3 | NOT SPECCED | SRC-004 |
@@ -162,13 +172,15 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| RBAC-1 | Operator capabilities are gated by roles, including separate administrator and read-only roles for device retirement and an administrator right to create boot services. | `specs/rbac.md` | P2 | NOT SPECCED | SRC-004, SRC-006 |
+| RBAC-1 | Operator capabilities are gated by roles, including separate administrator and read-only roles for device retirement and an administrator right to create boot services. | `specs/rbac.md` | P2 | NOT SPECCED (REQ-RBAC-020 onward reserved) | SRC-004, SRC-006 |
+| RBAC-2 | Managing images, preinstall environments and packages needs role permissions; operators are individually authenticated (M2). | `specs/operator-access.md` | P1 | AUDITED (partial; REQ-RBAC-001 to 006; OPEN: 002) | SRC-004, SRC-006, DEC-0007, DEC-0010, DEC-0011 |
 
 ### AUD — Audit
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| AUD-1 | Retirement actions are logged with operator notes and the log can be exported. | `specs/audit.md` | P2 | NOT SPECCED | SRC-004 |
+| AUD-1 | Retirement actions are logged with operator notes and the log can be exported. | `specs/audit.md` | P2 | NOT SPECCED (REQ-AUD-020 onward reserved) | SRC-004 |
+| AUD-2 | Content-management actions, refusals and content state changes are recorded for audit in a tamper-evident way, without secrets (M2; project requirement, not described product behaviour). | `specs/operator-access.md` | P1 | AUDITED (partial; REQ-AUD-001 to 005; OPEN: 004) | SRC-004, DEC-0007, DEC-0009, DEC-0010, DEC-0011 |
 
 ### RET — Wipe and retirement
 
@@ -181,7 +193,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| OS-1 | Windows 10 and Windows 11 can be installed on bare metal and refreshed. | `specs/os-support.md` | P1 | NOT SPECCED | SRC-004, SRC-005 |
+| OS-1 | Windows 10 and Windows 11 can be installed on bare metal and refreshed. | `specs/os-support.md` | P1 | AUDITED (partial; image-content part, M2: REQ-OS-001 to 010; M2 scope Windows 11 Enterprise x64 by DEC-0009; OPEN: 003, 005, 006, 010 in part. Install and refresh not specced) | SRC-004, SRC-005, SRC-058, SRC-064, SRC-065, SRC-066, SRC-067, DEC-0009 |
 | OS-2 | Linux distributions (Red Hat Enterprise Linux, CentOS, Debian, Ubuntu, Rocky Linux, AlmaLinux) can be installed and refreshed. | `specs/os-support.md` | P3 | NOT SPECCED | SRC-005, SRC-006 |
 | OS-3 | Cloud-hosted virtual machines (Microsoft Azure) are supported. | `specs/os-support.md` | P3 | NOT SPECCED | SRC-004 |
 
@@ -189,8 +201,11 @@ a decision.
 
 Public release notes indicate support for packages with more than 100 files,
 image uploads over 10 GB, long-running install steps (hours), and length
-limits on package names and descriptions. Exact values beyond these are
-`OPEN`. (SRC-004, SRC-006)
+limits on the name and description of another operator-defined object.
+Exact values beyond these are `OPEN`. (SRC-004, SRC-006)
+The M2 specs carry these as REQ-IMG-003, REQ-IMG-031, REQ-IMG-042 and
+OPEN-IMG-L1 in `specs/os-images.md`; whether packages have such limits
+is OPEN in REQ-IMG-002.
 
 ## Unconfirmed
 
@@ -271,11 +286,18 @@ decide.
    For BOOT-2, DISK-1.
 9. WIM image format and edition indexes (Microsoft Learn WIM/DISM docs and
    the published WIM format documentation). For IMG-2, IMG-4, IMG-5.
+   **Summarised: `specs/standards/wim.md`** (M2, audited; from
+   Microsoft's public WIM paper and Learn pages; byte order and several
+   layout points are [reading] or OPEN-WIM-1 to OPEN-WIM-11). Codecs are
+   topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.
 11. Windows PE: building from the Windows ADK, adding drivers, startup
     scripts, and its licensing/redistribution constraints (Microsoft Learn).
-    For PE-1, PE-2, PE-3, DRV-2.
+    For PE-1, PE-2, PE-3, DRV-2. **Summarised: `specs/standards/winpe.md`**
+    (M2, audited; the ADK licence terms are click-through and were not
+    read; one secondary Q&A source on redistribution; OPEN-PE-LIC for
+    counsel; network boot of WinPE not yet summarised).
 12. Offline driver injection (DISM driver servicing; INF/CAB packaging).
     For DRV-1, DRV-2.
 13. Offline domain join provisioning (Microsoft Learn `djoin` documentation).
@@ -289,7 +311,11 @@ decide.
     removable media per UEFI specification). For MEDIA-1, MEDIA-4.
 17. HTTP semantics and TLS for content download (RFC 9110, RFC 8446). For
     MEDIA-2, RFR-1, RELAY-2, BOOT-4. *(conditional)* HTTP range requests
-    (RFC 9110 §14); no source covers resumable downloads.
+    (RFC 9110 §14); no source covers resumable downloads. Also for IMG-2
+    uploads and operator sessions (M2). **Summarised:
+    `specs/standards/http-tls.md`** (M2, audited; RFC 9110; RFC 8446,
+    noting that RFC 9846 now obsoletes it; NIST SP 800-52 Rev. 2 from its
+    publication page only, [primary not read], OPEN-TLS-1).
 18. Long and repeated DHCPv4 options (RFC 3396, with RFC 2131 §4.1 and
     RFC 2132 §9.3 option overload) and what they mean for the PXE options
     in topic 1. For BOOT-1. **Summarised:
@@ -302,3 +328,17 @@ decide.
     a search summary because the DMTF PDF could not be read, again in fix
     round 1; no REQ may cite those points until confirmed; the byte order
     of pre-2.6 tables is not confirmed; OPEN-GUID-1 to OPEN-GUID-5).
+20. WIM compression codecs: XPRESS with Huffman ([MS-XCA]), LZX (the
+    archived Microsoft Cabinet LZX format, with [MS-PATCH] LZXD as
+    background), LZMS (no public format found). For IMG-2, PE-1.
+    **Summarised: `specs/standards/wim-compression.md`** (M2, audited;
+    how WIM applies each codec is not stated by Microsoft: OPEN-WIMC-1 to
+    OPEN-WIMC-4).
+21. Security baseline: FIPS 186-5 signatures, RFC 5280 certificates, NIST
+    SP 800-57 Part 1 key management, and operator authentication (FIPS
+    201-3, SP 800-73-5, SP 800-63B). For IMG-2 integrity, RBAC-2.
+    **Summarised: `specs/standards/security-baseline.md`** (M2, audited;
+    NIST PDFs could not be read; FIPS 186-5, SP 800-57, FIPS 201-3 and
+    SP 800-73-5 rest on NIST's publication pages only, [primary not
+    read]; SP 800-63B read from NIST's HTML edition; OPEN-SB-1 to
+    OPEN-SB-3).

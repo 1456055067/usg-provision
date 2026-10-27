@@ -6,9 +6,10 @@ over read-only TFTP. It never assigns addresses (decision 0003). This
 guide covers the M1 release: a static, file-based configuration on a
 Linux host.
 
-M1 evidence status: the relay's behaviour is tested in-process. The live
-boot scenarios (boot smoke S1 to S8) have not run yet (see
-`docs/compliance/POAM.md`, POAM-17). The service unit below is an
+M1 evidence status: the relay's behaviour is tested in-process, and the
+live boot scenarios (boot smoke S1 to S8) passed in CI run 40438138720
+on 2026-10-27, in one lab topology with OVMF firmware (see
+`docs/compliance/TEST_EVIDENCE.md`). The service unit below is an
 example: it has not been tested, and none is shipped yet.
 
 ## Contents
@@ -371,10 +372,12 @@ What the relay's checks do and do not cover:
   leave the relay, and the relay cannot detect that (SC-8, POAM-8).
 - **On the device**: whether the device's firmware detects a changed
   program depends on its Secure Boot check. How the product relies on
-  Secure Boot is an open spec question (OPEN-BOOT-SB), and M1 has no
-  evidence for it: the Secure Boot refusal test (M1 exit 5, scenario S5)
-  has NOT RUN. Do not rely on it as a tested control. Keeping Secure Boot
-  enabled on devices is still recommended.
+  Secure Boot is an open spec question (OPEN-BOOT-SB). The M1 evidence is
+  narrow: in scenario S5 (CI run 40438138720) OVMF firmware with Secure
+  Boot enabled refused an unsigned test program served by the relay. That
+  shows the relay does not weaken the firmware check; it says nothing
+  about other firmware or about signed boot chains. Keeping Secure Boot
+  enabled on devices is recommended.
 
 The network controls in
 [Denial-of-service mitigations](#denial-of-service-mitigations-in-the-network)
@@ -547,5 +550,6 @@ pass the trust checks above, and a user-owned `$TMPDIR` would fail them
 
 | Date | Change |
 |------|--------|
+| 2026-10-27 | Evidence status: boot smoke S1 to S8 passed in CI run 40438138720; the Secure Boot note now cites S5 and states its limits. |
 | 2026-10-26 | M1 final pass: corrected what the manifest check and Secure Boot protect (QA-004); example unit no longer restart-loops on a failed `--check-config` (REL-M1-010). |
 | 2026-10-26 | First version for milestone M1: configuration reference, command line, file ownership, running without root, network requirements (REQ-BOOT-023), secrets (REQ-BOOT-043), suppression (REQ-BOOT-045), time, logging, network mitigations, audit event catalogue, large-file note. |

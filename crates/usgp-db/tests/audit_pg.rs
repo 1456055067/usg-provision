@@ -192,14 +192,18 @@ mod t {
     }
 
     async fn tamper(db: &TestDb, sql: &str) {
+        // Three separate statements, not one batch: a batch is one implicit
+        // transaction, and a DELETE queues the deferred foreign-key checks
+        // on audit_record, so re-enabling triggers in the same transaction
+        // fails with 55006 (pending trigger events).
         let owner = db.raw_owner().await;
-        owner
-            .batch_execute(&format!(
-                "ALTER TABLE audit_record DISABLE TRIGGER USER; {sql}; \
-             ALTER TABLE audit_record ENABLE TRIGGER USER;"
-            ))
-            .await
-            .unwrap();
+        for stmt in [
+            "ALTER TABLE audit_record DISABLE TRIGGER USER",
+            sql,
+            "ALTER TABLE audit_record ENABLE TRIGGER USER",
+        ] {
+            owner.batch_execute(stmt).await.unwrap();
+        }
     }
 
     #[tokio::test]

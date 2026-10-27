@@ -80,7 +80,7 @@ jobs:
             local log=$1 t line passed ignored
             shift
             for t in "$@"; do
-              line="$(awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
+              line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }')"
               passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
               ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
               if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
@@ -467,7 +467,7 @@ jobs:
           bad=0
           for entry in $PG_REQUIRED_TESTS; do
             t="${entry#*:}"
-            line="$(awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
+            line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }')"
             passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
             ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
             if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
@@ -600,7 +600,7 @@ jobs:
           status=0
           cargo test -p usgp-server --release --locked --features pg-integration,large-tests \
             --test large_upload_pg -- --nocapture 2>&1 | tee "$log" || status=$?
-          line="$(awk '$1 == "Running" && $2 == "tests/large_upload_pg.rs" { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
+          line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk '$1 == "Running" && $2 == "tests/large_upload_pg.rs" { f = 1; next } f && /^test result:/ { print; exit }')"
           passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
           ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
           {
@@ -718,7 +718,13 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
       - name: Build fuzz targets
         working-directory: fuzz
-        run: cargo fuzz build
+        # --sanitizer none on Linux: AWS-LC FIPS (linked through usgp-crypto)
+        # cannot be built with AddressSanitizer, because its delocate step
+        # rejects ASan's GOTPCREL code (CI run 40599553698). libFuzzer
+        # coverage, panic, timeout and RSS-limit detection are unchanged;
+        # every fuzzed crate forbids unsafe code. Local macOS gates keep
+        # ASan. Build and run must use the same flag, or run rebuilds.
+        run: cargo fuzz build --sanitizer none
       - name: Replay the committed seeds (regression, no new inputs)
         # Every target in fuzz/fuzz_targets/ must be listed here; a target
         # without a replay fails this step.
@@ -734,7 +740,7 @@ jobs:
             esac
           done
           for t in $targets; do
-            cargo fuzz run "$t" "corpus/$t" -- -runs=0 -rss_limit_mb=2048 -timeout=10
+            cargo fuzz run --sanitizer none "$t" "corpus/$t" -- -runs=0 -rss_limit_mb=2048 -timeout=10
           done
 
   fuzz-smoke:
@@ -808,7 +814,7 @@ jobs:
           mkdir -p "artifacts/$TARGET" "$RUNNER_TEMP/work/$TARGET"
           # Scratch working corpus first, so new inputs (no recorded origin)
           # never land in fuzz/corpus/ (CONTRIBUTING.md test-data rule).
-          cargo fuzz run "$TARGET" "$RUNNER_TEMP/work/$TARGET" "corpus/$TARGET" -- \
+          cargo fuzz run --sanitizer none "$TARGET" "$RUNNER_TEMP/work/$TARGET" "corpus/$TARGET" -- \
             -max_total_time="$RUN_SECS" -max_len="$MAX_LEN" -rss_limit_mb=2048 -timeout=10 \
             -print_final_stats=1 \
             2>&1 | tee "artifacts/$TARGET/fuzz.log"

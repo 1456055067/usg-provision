@@ -31,6 +31,17 @@ M1 results (2026-10-26) are recorded as they were reported:
   1:8.2.2+ds-0ubuntu1.18), KVM acceleration, relay run as uid 65534.
   Firmware and binary SHA-256 values are in
   `docs/compliance/ATO_EVIDENCE.md`. The artifact has a 30-day retention.
+- **CI 40439279903** means GitHub Actions run 40439279903, a manual
+  (`workflow_dispatch`) run on the same commit 70e3c1f (2026-10-27,
+  <https://github.com/1456055067/usg-provision/actions/runs/40439279903>),
+  conclusion success, every job success. It is the first run of the
+  `fuzz-smoke` job: one `ubuntu-24.04` job per target, 600 s each
+  (`-max_total_time=600`), and the job fails if libFuzzer reports under
+  600 s. Results are copied from the job logs (`Done … runs in …
+  second(s)`). Each `fuzz-smoke-<target>` artifact (30-day retention)
+  holds one file, the job's `fuzz.log`; no crash, OOM or timeout input
+  was written. The same run re-ran boot smoke: `pass=9 fail=0
+  not_run=0`, preflight OK.
 
 The full gate list and the commands are in `docs/compliance/ATO_EVIDENCE.md`.
 Each group row below names its tests; the per-REQ mapping is in
@@ -78,12 +89,15 @@ Each group row below names its tests; the per-REQ mapping is in
 | Boot smoke S1 to S8, first CI run | `scripts/boot-smoke.sh` | Run 40434148508 on commit 2c0807c: S4, S6 and S7 failed, as did the `fips-linkage` and `ci-lint` jobs. All causes were harness and script defects (probe expectations for repeated options contrary to RFC 3396; fall-through deadline shorter than OVMF's IPv6 and HTTP boot attempts; a `grep -q` under `pipefail` false negative; shellcheck findings), fixed in 70e3c1f without product code changes | None | Superseded by CI 40438138720; not counted as evidence either way |
 | `scripts/check-fips-linkage.sh release` | CI `fips-linkage` job | On Linux, for `usgp-server`, `usgp-relay`, `usgp-preboot-agent` and `usgp-cli` release builds: FIPS module symbols (`aws_lc_fips_*`) are defined in the binary (static linkage), no non-FIPS AWS-LC symbols, no AWS-LC shared library among the dynamic dependencies, and each binary exits 0 from its FIPS start-up check | SC-13; decision 0001 Amendment 1 | PASS (CI 40438138720, job conclusion success; first Linux result). FAIL in run 40434148508 was a script false negative, fixed in 70e3c1f |
 | CI `gates`, `testing-workspaces`, `supply-chain`, `markdown`, `ci-lint`, `fuzz-build` jobs | `.github/workflows/ci.yml` | fmt, clippy, workspace and doc tests, pure-Rust and name checks, FIPS start-up of every binary (Linux, debug); testing workspaces including payload reproducibility; `cargo deny` and `cargo audit`; markdownlint; shellcheck and actionlint; fuzz build and seed replay | SA-11, SR-3, CM-2, SC-13 | PASS (CI 40438138720, job conclusions only; per-step logs not reviewed here) |
-| CI `fuzz-smoke` (600 s per target) | `.github/workflows/ci.yml` | Timed fuzzing in CI | SI-10 | NOT RUN in CI 40438138720 (dispatch and schedule only); a dispatched run is recorded separately |
+| CI `fuzz-smoke (dhcp_packet, 1600)` | `.github/workflows/ci.yml`, `fuzz` | 62,568,898 executions in 601 s with `-max_len=1600` on Linux (`ubuntu-24.04`); no crash, OOM or timeout | SI-10, SA-11; M1 exit 3 | PASS (CI 40439279903). Not run in CI 40438138720 (push; the job runs on dispatch and schedule only) |
+| CI `fuzz-smoke (tftp_packet, 4096)` | `.github/workflows/ci.yml`, `fuzz` | 9,715,509 executions in 601 s with `-max_len=4096` on Linux (`ubuntu-24.04`); no crash, OOM or timeout | SI-10, SA-11; M1 exit 3 | PASS (CI 40439279903). Not run in CI 40438138720 (push; the job runs on dispatch and schedule only) |
+| Boot smoke preflight, `payload-disk` and S1 to S8, re-run | `scripts/boot-smoke.sh` | Same scenarios as the CI 40438138720 rows above, same commit | M1 exit 1 to 5 | PASS (CI 40439279903): `pass=9 fail=0 not_run=0`, preflight OK, relay uid 65534, KVM. Job log only; the per-scenario rows above remain sourced from CI 40438138720 |
 
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-27 | M1 CI fuzz evidence: recorded CI run 40439279903 (`workflow_dispatch`, commit 70e3c1f). Replaced the `fuzz-smoke` NOT RUN row with one PASS row per target (`dhcp_packet` 62,568,898 and `tftp_packet` 9,715,509 executions in 601 s, no crash); added the boot smoke re-run in the same run (`pass=9 fail=0 not_run=0`). |
 | 2026-10-27 | M1 CI evidence: recorded CI run 40438138720 (commit 70e3c1f). Boot smoke preflight, `payload-disk` and S1 to S8 PASS, one row per scenario with what it proves; S8 recorded with its stall-timing limit. Recorded the superseded first run 40434148508, the first Linux `fips-linkage` PASS, the other CI job conclusions, and `fuzz-smoke` as NOT RUN in that run. `config_rejected_carries_host_node_name` noted as an inferred Linux PASS, not counted as Tested. |
 | 2026-10-26 | M1 final pass (QA report FP.8): round-2 and round-3 tests moved to PASS (QA final pass); added `qa_r3.rs` and the netlab probe test; recorded the final gate run and 60 s fuzz runs; `config_rejected_carries_host_node_name` stays NOT RUN. |
 | 2026-10-26 | M1: recorded QA results (initial pass and re-verify round 1), the orchestrator's final gate run after fix round 3, the fuzz runs, boot smoke `payload-disk` as payload-only evidence, and S1 to S8 as NOT RUN. |

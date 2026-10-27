@@ -15,6 +15,12 @@
 # scripts/boot-smoke.sh). Build the artifacts first: `cargo build --release
 # --locked -p usgp-relay -p usgp-cli` and `scripts/boot-smoke.sh build`.
 #
+# REQ-PE-001 (finding QA-001): the same artifacts, and the repository, are
+# also checked by scripts/check-pe-files.sh for Windows PE / ADK file names
+# and WIM images (rule in that script's header): `files` over the artifacts
+# above with no exception, and `repo` over every tracked and untracked, not
+# ignored file. Its result is combined with the name scan's.
+#
 # Exit status: 0 no hit; 1 a hit; 2 a required artifact is missing or a file
 # could not be read (fails closed). A false positive is fixed by renaming or
 # by changing what goes into the artifact, never by excluding a file
@@ -23,6 +29,7 @@
 # COMPLIANCE MAPPING:
 # - NIST 800-53: SA-11 (Developer Testing and Evaluation), CM-7
 # - CLAUDE.md clean-room rule 5; docs/decisions/0005-names-gate-scope.md
+# - SPEC: specs/preinstall-env.md#REQ-PE-001 (via check-pe-files.sh)
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -76,10 +83,28 @@ if [ -s "$errs" ]; then
   exit 2
 fi
 
+# REQ-PE-001: artifacts (no exception), then the repository.
+pe_targets=("${required[@]}")
+[ -d "$evidence_dir" ] && pe_targets+=("$evidence_dir")
+pe_status=0
+"$root/scripts/check-pe-files.sh" files "${pe_targets[@]}" || pe_status=$?
+repo_status=0
+"$root/scripts/check-pe-files.sh" repo || repo_status=$?
+if [ "$pe_status" -eq 2 ] || [ "$repo_status" -eq 2 ]; then
+  echo "artifact-names: ERROR (REQ-PE-001 check could not complete; failing closed)"
+  exit 2
+fi
+
+status=0
 if [ -n "$path_hits" ] || [ -n "$file_hits" ]; then
   echo "artifact-names: FAIL (clean-room rule 5)"
   [ -n "$path_hits" ] && printf 'path names:\n%s\n' "$path_hits" | sed '2,$s/^/  /'
   [ -n "$file_hits" ] && printf 'file contents:\n%s\n' "$file_hits" | sed '2,$s/^/  /'
-  exit 1
+  status=1
 fi
-echo "artifact-names: OK ($count files scanned)"
+if [ "$pe_status" -ne 0 ] || [ "$repo_status" -ne 0 ]; then
+  echo "artifact-names: FAIL (REQ-PE-001)"
+  status=1
+fi
+[ "$status" -eq 0 ] || exit 1
+echo "artifact-names: OK ($count files scanned; REQ-PE-001 checks passed)"

@@ -1,26 +1,52 @@
-//! Command-line parsing (std only, no parser crate; plan WU-7).
+//! Command-line parsing (std only, no parser crate; plan WU-7, WU-8).
 //!
-//! Grammar (plan section 3.6):
+//! Grammar (M1 plan section 3.6; M2 plan WU-8):
 //!
 //! ```text
 //! usgp-cli [-h | --help]
 //! usgp-cli boot-manifest create --root DIR --out FILE [--] NAME...
 //! usgp-cli boot-manifest verify --root DIR --manifest FILE
+//! usgp-cli limits
+//! usgp-cli image upload FILE --name NAME
+//! usgp-cli image list | view ID | delete ID [--yes]
+//! usgp-cli image declare ID --index N --release R --edition E --arch A
+//! usgp-cli image download ID --out FILE
+//! usgp-cli pe import FILE --name NAME --arch A --kit-version V
+//! usgp-cli pe list | view ID | delete ID [--yes] | download ID --out FILE
+//! usgp-cli package create --name N [--description D] --image ID --index N --pe ID
+//! usgp-cli package edit ID [--name N] [--description D] [--image ID] [--index N] [--pe ID]
+//! usgp-cli package list | view ID | clone ID --name N | delete ID [--yes]
+//! usgp-cli package manifest ID --out FILE
 //! ```
+//!
+//! Every M2 command also takes the connection options `--config FILE`,
+//! `--server URL`, `--server-ca FILE`, `--client-cert FILE`,
+//! `--client-key FILE` and `--content-key-pub FILE` (see
+//! [`crate::config`]).
 //!
 //! Options take their value as the next argument. Each option may appear
 //! once, in any order, before `--`. Every argument after `--` is a name, so
 //! names that start with `-` can be given. Any other shape is a usage error
 //! (exit 2). Names are not validated here; [`crate::boot_manifest`] refuses
 //! invalid names as a failure (exit 1), so the refusal is audited.
+//!
+//! For M2 commands, shape errors (unknown or repeated option, missing
+//! value or argument, a non-numeric `--index`, text that is not UTF-8)
+//! are usage errors (exit 2). Value rules (names, ids, closed value sets)
+//! are checked by the command against the `usgp-proto` types before
+//! anything is sent (exit 1).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-10 (Information Input Validation) - operator input is
 //   checked for shape before any file is touched; anything unexpected is
 //   refused, never guessed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+
+use crate::cmd_image::Declare;
+use crate::cmd_package::Definition;
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -33,6 +59,91 @@ pub enum Command {
     Create(CreateArgs),
     /// `boot-manifest verify`.
     Verify(VerifyArgs),
+    /// An M2 command that talks to the server.
+    Api(Box<ApiCommand>),
+}
+
+/// Connection options of the M2 commands (see [`crate::config`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConnArgs {
+    /// `--config FILE`.
+    pub config: Option<PathBuf>,
+    /// `--server URL`.
+    pub server: Option<String>,
+    /// `--server-ca FILE`.
+    pub server_ca: Option<PathBuf>,
+    /// `--client-cert FILE`.
+    pub client_cert: Option<PathBuf>,
+    /// `--client-key FILE`.
+    pub client_key: Option<PathBuf>,
+    /// `--content-key-pub FILE`.
+    pub content_key_pub: Option<PathBuf>,
+}
+
+/// An M2 command with its connection options.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ApiCommand {
+    /// Connection options.
+    pub conn: ConnArgs,
+    /// What to do.
+    pub action: Action,
+}
+
+/// What an M2 command does. Ids and names are unvalidated text here.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Action {
+    /// `limits`.
+    Limits,
+    /// `image upload FILE --name N`.
+    ImageUpload {
+        /// The file.
+        file: PathBuf,
+        /// Display name.
+        name: String,
+    },
+    /// `image list`.
+    ImageList,
+    /// `image view ID`.
+    ImageView(String),
+    /// `image declare ID ...`.
+    ImageDeclare(String, Declare),
+    /// `image delete ID [--yes]`.
+    ImageDelete(String, bool),
+    /// `image download ID --out FILE`.
+    ImageDownload(String, PathBuf),
+    /// `pe import FILE --name N --arch A --kit-version V`.
+    PeImport {
+        /// The file.
+        file: PathBuf,
+        /// Display name.
+        name: String,
+        /// Declared architecture.
+        arch: String,
+        /// Declared kit version.
+        kit_version: String,
+    },
+    /// `pe list`.
+    PeList,
+    /// `pe view ID`.
+    PeView(String),
+    /// `pe delete ID [--yes]`.
+    PeDelete(String, bool),
+    /// `pe download ID --out FILE`.
+    PeDownload(String, PathBuf),
+    /// `package create ...`.
+    PackageCreate(Definition),
+    /// `package list`.
+    PackageList,
+    /// `package view ID`.
+    PackageView(String),
+    /// `package edit ID ...`.
+    PackageEdit(String, Definition),
+    /// `package clone ID --name N`.
+    PackageClone(String, String),
+    /// `package delete ID [--yes]`.
+    PackageDelete(String, bool),
+    /// `package manifest ID --out FILE`.
+    PackageManifest(String, PathBuf),
 }
 
 /// Arguments of `boot-manifest create`.
@@ -80,6 +191,9 @@ where
     };
     if is_help(&first) {
         return Ok(Command::Help);
+    }
+    if first == "limits" || first == "image" || first == "pe" || first == "package" {
+        return parse_api(&first, it.collect());
     }
     if first != "boot-manifest" {
         return Err(UsageError(format!("unknown command {first:?}")));
@@ -182,6 +296,274 @@ fn parse_verify(rest: Vec<OsString>) -> Result<Command, UsageError> {
         root: required(o.root, "--root")?,
         manifest: required(o.manifest, "--manifest")?,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// M2 commands (plan WU-8)
+// ---------------------------------------------------------------------------
+
+/// Connection options accepted by every M2 command.
+const CONN_OPTS: &[&str] = &[
+    "--config",
+    "--server",
+    "--server-ca",
+    "--client-cert",
+    "--client-key",
+    "--content-key-pub",
+];
+
+/// Options and positional arguments of one M2 command.
+#[derive(Default)]
+struct Scanned {
+    values: BTreeMap<&'static str, OsString>,
+    flags: BTreeSet<&'static str>,
+    positional: Vec<OsString>,
+    help: bool,
+}
+
+/// Splits `rest` into value options (`values` plus [`CONN_OPTS`]), flag
+/// options (`flags`) and positional arguments.
+fn scan_m2(
+    rest: Vec<OsString>,
+    values: &[&'static str],
+    flags: &[&'static str],
+) -> Result<Scanned, UsageError> {
+    let mut s = Scanned::default();
+    let mut it = rest.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            s.positional.extend(it);
+            break;
+        }
+        if is_help(&a) {
+            s.help = true;
+            continue;
+        }
+        let Some(text) = a.to_str().filter(|t| t.starts_with('-')) else {
+            s.positional.push(a);
+            continue;
+        };
+        if let Some(&f) = flags.iter().find(|f| **f == text) {
+            if !s.flags.insert(f) {
+                return Err(UsageError(format!("{f} given more than once")));
+            }
+            continue;
+        }
+        let Some(&opt) = values.iter().chain(CONN_OPTS).find(|o| **o == text) else {
+            return Err(UsageError(format!("unknown option {text:?}")));
+        };
+        let Some(value) = it.next() else {
+            return Err(UsageError(format!("{opt} needs a value")));
+        };
+        if value.is_empty() {
+            return Err(UsageError(format!("{opt} value is empty")));
+        }
+        if s.values.insert(opt, value).is_some() {
+            return Err(UsageError(format!("{opt} given more than once")));
+        }
+    }
+    Ok(s)
+}
+
+impl Scanned {
+    fn path(&mut self, opt: &str) -> Option<PathBuf> {
+        self.values.remove(opt).map(PathBuf::from)
+    }
+
+    fn text(&mut self, opt: &str) -> Result<Option<String>, UsageError> {
+        self.values
+            .remove(opt)
+            .map(|v| {
+                v.into_string()
+                    .map_err(|_| UsageError(format!("{opt} value is not valid UTF-8")))
+            })
+            .transpose()
+    }
+
+    fn required(&mut self, opt: &str) -> Result<String, UsageError> {
+        self.text(opt)?
+            .ok_or_else(|| UsageError(format!("{opt} is required")))
+    }
+
+    fn number(&mut self, opt: &str) -> Result<Option<u64>, UsageError> {
+        self.text(opt)?
+            .map(|t| {
+                if t.is_empty() || t.len() > 20 || !t.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(UsageError(format!("{opt} must be a decimal number")));
+                }
+                t.parse()
+                    .map_err(|_| UsageError(format!("{opt} must be a decimal number")))
+            })
+            .transpose()
+    }
+
+    /// Exactly `names.len()` positional arguments.
+    fn positional(&mut self, names: &[&str]) -> Result<Vec<OsString>, UsageError> {
+        let got = std::mem::take(&mut self.positional);
+        if got.len() < names.len() {
+            let missing = names.get(got.len()).copied().unwrap_or("argument");
+            return Err(UsageError(format!("{missing} is required")));
+        }
+        if let Some(extra) = got.get(names.len()) {
+            return Err(UsageError(format!("unexpected argument {extra:?}")));
+        }
+        Ok(got)
+    }
+
+    fn id(&mut self) -> Result<String, UsageError> {
+        let mut p = self.positional(&["ID"])?.into_iter();
+        p.next()
+            .unwrap_or_default()
+            .into_string()
+            .map_err(|_| UsageError("ID is not valid UTF-8".into()))
+    }
+
+    fn file(&mut self) -> Result<PathBuf, UsageError> {
+        let mut p = self.positional(&["FILE"])?.into_iter();
+        Ok(PathBuf::from(p.next().unwrap_or_default()))
+    }
+
+    fn conn(&mut self) -> Result<ConnArgs, UsageError> {
+        Ok(ConnArgs {
+            config: self.path("--config"),
+            server: self.text("--server")?,
+            server_ca: self.path("--server-ca"),
+            client_cert: self.path("--client-cert"),
+            client_key: self.path("--client-key"),
+            content_key_pub: self.path("--content-key-pub"),
+        })
+    }
+}
+
+/// The value and flag options of each M2 subcommand.
+fn options(group: &str, sub: &str) -> Option<(&'static [&'static str], &'static [&'static str])> {
+    const NONE: &[&str] = &[];
+    const DEF: &[&str] = &["--name", "--description", "--image", "--index", "--pe"];
+    Some(match (group, sub) {
+        ("limits", "")
+        | ("image" | "pe" | "package", "list")
+        | ("image" | "pe" | "package", "view") => (NONE, NONE),
+        ("image" | "pe" | "package", "delete") => (NONE, &["--yes"]),
+        ("image" | "pe", "download") | ("package", "manifest") => (&["--out"], NONE),
+        ("image", "upload") => (&["--name"], NONE),
+        ("image", "declare") => (&["--index", "--release", "--edition", "--arch"], NONE),
+        ("pe", "import") => (&["--name", "--arch", "--kit-version"], NONE),
+        ("package", "create" | "edit") => (DEF, NONE),
+        ("package", "clone") => (&["--name"], NONE),
+        _ => return None,
+    })
+}
+
+fn definition(s: &mut Scanned) -> Result<Definition, UsageError> {
+    Ok(Definition {
+        name: s.text("--name")?,
+        description: s.text("--description")?,
+        image: s.text("--image")?,
+        index: s.number("--index")?,
+        pe: s.text("--pe")?,
+    })
+}
+
+fn parse_api(group: &OsStr, rest: Vec<OsString>) -> Result<Command, UsageError> {
+    let group = group.to_str().unwrap_or_default();
+    let mut rest = rest.into_iter();
+    let sub = if group == "limits" {
+        OsString::new()
+    } else {
+        match rest.next() {
+            None => return Err(UsageError(format!("{group} needs a subcommand"))),
+            Some(s) if is_help(&s) => return Ok(Command::Help),
+            Some(s) => s,
+        }
+    };
+    let sub_text = sub.to_str().unwrap_or("\u{fffd}");
+    let Some((values, flags)) = options(group, sub_text) else {
+        return Err(UsageError(format!("unknown {group} command {sub:?}")));
+    };
+    let mut s = scan_m2(rest.collect(), values, flags)?;
+    if s.help {
+        return Ok(Command::Help);
+    }
+    let conn = s.conn()?;
+    let yes = s.flags.contains("--yes");
+    let out = |s: &mut Scanned| {
+        s.path("--out")
+            .ok_or_else(|| UsageError("--out is required".into()))
+    };
+    let action = match (group, sub_text) {
+        ("limits", _) => {
+            s.positional(&[])?;
+            Action::Limits
+        }
+        ("image", "upload") => Action::ImageUpload {
+            file: s.file()?,
+            name: s.required("--name")?,
+        },
+        ("image", "list") => {
+            s.positional(&[])?;
+            Action::ImageList
+        }
+        ("image", "view") => Action::ImageView(s.id()?),
+        ("image", "declare") => {
+            let id = s.id()?;
+            let index = s
+                .number("--index")?
+                .ok_or_else(|| UsageError("--index is required".into()))?;
+            Action::ImageDeclare(
+                id,
+                Declare {
+                    index,
+                    release: s.required("--release")?,
+                    edition: s.required("--edition")?,
+                    architecture: s.required("--arch")?,
+                },
+            )
+        }
+        ("image", "delete") => Action::ImageDelete(s.id()?, yes),
+        ("image", "download") => Action::ImageDownload(s.id()?, out(&mut s)?),
+        ("pe", "import") => Action::PeImport {
+            file: s.file()?,
+            name: s.required("--name")?,
+            arch: s.required("--arch")?,
+            kit_version: s.required("--kit-version")?,
+        },
+        ("pe", "list") => {
+            s.positional(&[])?;
+            Action::PeList
+        }
+        ("pe", "view") => Action::PeView(s.id()?),
+        ("pe", "delete") => Action::PeDelete(s.id()?, yes),
+        ("pe", "download") => Action::PeDownload(s.id()?, out(&mut s)?),
+        ("package", "create") => {
+            s.positional(&[])?;
+            let d = definition(&mut s)?;
+            for (v, flag) in [
+                (d.name.is_none(), "--name"),
+                (d.image.is_none(), "--image"),
+                (d.index.is_none(), "--index"),
+                (d.pe.is_none(), "--pe"),
+            ] {
+                if v {
+                    return Err(UsageError(format!("{flag} is required")));
+                }
+            }
+            Action::PackageCreate(d)
+        }
+        ("package", "list") => {
+            s.positional(&[])?;
+            Action::PackageList
+        }
+        ("package", "view") => Action::PackageView(s.id()?),
+        ("package", "edit") => {
+            let id = s.id()?;
+            Action::PackageEdit(id, definition(&mut s)?)
+        }
+        ("package", "clone") => Action::PackageClone(s.id()?, s.required("--name")?),
+        ("package", "delete") => Action::PackageDelete(s.id()?, yes),
+        ("package", "manifest") => Action::PackageManifest(s.id()?, out(&mut s)?),
+        _ => return Err(UsageError(format!("unknown {group} command {sub:?}"))),
+    };
+    Ok(Command::Api(Box::new(ApiCommand { conn, action })))
 }
 
 #[cfg(test)]
@@ -355,6 +737,247 @@ mod tests {
                 "--out",
                 "/o",
             ],
+        ];
+        for args in bad {
+            assert!(p(args).is_err(), "{args:?} should be a usage error");
+        }
+    }
+
+    fn api(args: &[&str]) -> ApiCommand {
+        match p(args) {
+            Ok(Command::Api(c)) => *c,
+            other => panic!("{args:?}: {other:?}"),
+        }
+    }
+
+    const ID: &str = "0b7c2f4e-9a1d-4c3b-8e6f-1a2b3c4d5e6f";
+
+    #[test]
+    fn m2_commands_parse() {
+        assert_eq!(api(&["limits"]).action, Action::Limits);
+        assert_eq!(
+            api(&["image", "upload", "my image.wim", "--name", "Win 11"]).action,
+            Action::ImageUpload {
+                file: "my image.wim".into(),
+                name: "Win 11".into()
+            }
+        );
+        assert_eq!(api(&["image", "list"]).action, Action::ImageList);
+        assert_eq!(
+            api(&["image", "view", ID]).action,
+            Action::ImageView(ID.into())
+        );
+        assert_eq!(
+            api(&[
+                "image",
+                "declare",
+                ID,
+                "--index",
+                "1",
+                "--release",
+                "windows-11",
+                "--edition",
+                "enterprise",
+                "--arch",
+                "x64"
+            ])
+            .action,
+            Action::ImageDeclare(
+                ID.into(),
+                Declare {
+                    index: 1,
+                    release: "windows-11".into(),
+                    edition: "enterprise".into(),
+                    architecture: "x64".into()
+                }
+            )
+        );
+        assert_eq!(
+            api(&["image", "delete", ID]).action,
+            Action::ImageDelete(ID.into(), false)
+        );
+        assert_eq!(
+            api(&["pe", "delete", "--yes", ID]).action,
+            Action::PeDelete(ID.into(), true)
+        );
+        assert_eq!(
+            api(&["pe", "download", ID, "--out", "/o"]).action,
+            Action::PeDownload(ID.into(), "/o".into())
+        );
+        assert_eq!(
+            api(&[
+                "pe",
+                "import",
+                "boot.wim",
+                "--name",
+                "PE",
+                "--arch",
+                "x64",
+                "--kit-version",
+                "10.1.26100.1"
+            ])
+            .action,
+            Action::PeImport {
+                file: "boot.wim".into(),
+                name: "PE".into(),
+                arch: "x64".into(),
+                kit_version: "10.1.26100.1".into()
+            }
+        );
+        assert_eq!(
+            api(&[
+                "package", "create", "--name", "L", "--image", ID, "--index", "2", "--pe", ID
+            ])
+            .action,
+            Action::PackageCreate(Definition {
+                name: Some("L".into()),
+                description: None,
+                image: Some(ID.into()),
+                index: Some(2),
+                pe: Some(ID.into()),
+            })
+        );
+        assert_eq!(
+            api(&["package", "edit", ID, "--pe", ID]).action,
+            Action::PackageEdit(
+                ID.into(),
+                Definition {
+                    pe: Some(ID.into()),
+                    ..Definition::default()
+                }
+            )
+        );
+        assert_eq!(
+            api(&["package", "clone", ID, "--name", "copy"]).action,
+            Action::PackageClone(ID.into(), "copy".into())
+        );
+        assert_eq!(
+            api(&["package", "manifest", ID, "--out", "/m.json"]).action,
+            Action::PackageManifest(ID.into(), "/m.json".into())
+        );
+    }
+
+    #[test]
+    fn m2_connection_options() {
+        let c = api(&[
+            "image",
+            "list",
+            "--server",
+            "https://ctl:8443",
+            "--server-ca",
+            "/ca.pem",
+            "--client-cert",
+            "/c.pem",
+            "--client-key",
+            "/c.key",
+            "--content-key-pub",
+            "/k.pub",
+            "--config",
+            "/cfg.toml",
+        ]);
+        assert_eq!(
+            c.conn,
+            ConnArgs {
+                config: Some("/cfg.toml".into()),
+                server: Some("https://ctl:8443".into()),
+                server_ca: Some("/ca.pem".into()),
+                client_cert: Some("/c.pem".into()),
+                client_key: Some("/c.key".into()),
+                content_key_pub: Some("/k.pub".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn m2_help() {
+        for args in [
+            &["image", "--help"][..],
+            &["pe", "-h"],
+            &["package", "create", "--help"],
+            &["limits", "-h"],
+        ] {
+            assert_eq!(p(args), Ok(Command::Help), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn m2_usage_errors() {
+        let bad: &[&[&str]] = &[
+            &["image"],
+            &["image", "frob"],
+            &["limits", "extra"],
+            &["image", "list", "extra"],
+            &["image", "view"],
+            &["image", "view", ID, ID],
+            &["image", "upload", "f.wim"],
+            &["image", "upload", "--name", "n"],
+            &[
+                "image",
+                "declare",
+                ID,
+                "--index",
+                "x",
+                "--release",
+                "r",
+                "--edition",
+                "e",
+                "--arch",
+                "a",
+            ],
+            &[
+                "image",
+                "declare",
+                ID,
+                "--index",
+                "-1",
+                "--release",
+                "r",
+                "--edition",
+                "e",
+                "--arch",
+                "a",
+            ],
+            &[
+                "image",
+                "declare",
+                ID,
+                "--release",
+                "r",
+                "--edition",
+                "e",
+                "--arch",
+                "a",
+            ],
+            &[
+                "image",
+                "declare",
+                ID,
+                "--index",
+                "1",
+                "--edition",
+                "e",
+                "--arch",
+                "a",
+            ],
+            &["image", "delete", ID, "--yes", "--yes"],
+            &["image", "download", ID],
+            &["pe", "import", "f", "--name", "n", "--arch", "x64"],
+            &["pe", "import", "f", "--name", "n", "--kit-version", "10.1"],
+            &["pe", "declare", ID],
+            &[
+                "package", "create", "--name", "n", "--image", ID, "--index", "1",
+            ],
+            &[
+                "package", "create", ID, "--name", "n", "--image", ID, "--index", "1", "--pe", ID,
+            ],
+            &["package", "clone", ID],
+            &["package", "manifest", ID],
+            &["package", "view", ID, "--out", "/x"],
+            &["package", "list", "--server"],
+            &["package", "list", "--server", ""],
+            &["package", "list", "--server", "a", "--server", "b"],
+            &["package", "list", "--yes"],
+            &["package", "edit", ID, "--description", ""],
         ];
         for args in bad {
             assert!(p(args).is_err(), "{args:?} should be a usage error");

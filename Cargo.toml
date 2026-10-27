@@ -45,6 +45,28 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
+# M2 (plan WU-0, section 4). All pure Rust; licences MIT, Apache-2.0 OR MIT,
+# or (whoami) Apache-2.0 OR BSL-1.0 OR MIT. Defaults off where they pull more
+# than the members need (CM-7).
+# PostgreSQL (decisions 0008, 0012): certificate-only login; the driver's
+# password code (md-5/sha2/hmac) is present but unreachable; deny.toml confines it.
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime", "with-uuid-1"] }
+deadpool-postgres = { version = "0.14", default-features = false, features = ["rt_tokio_1"] }
+# Ids are built from usgp-crypto DRBG bytes; no `v4`/getrandom feature.
+uuid = { version = "1", default-features = false }
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# usgp-crypto ONLY (decision 0001; deny.toml enforces). The rustls provider is
+# passed explicitly (FIPS); the default aws_lc_rs/ring features stay off.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+# usgp-crypto ONLY. The test PKI does not use x509-cert's `builder` feature.
+x509-cert = { version = "0.2.5", default-features = false, features = ["std", "pem"] }
+# 0.38 (plan section 4) has RUSTSEC-2026-0194/0195 (fixed in 0.41); 0.42 is current.
+quick-xml = { version = "0.42", default-features = false }
+zeroize = { version = "1.8", features = ["std"] }
+serde_json = "1"
+base64ct = { version = "1", features = ["alloc"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

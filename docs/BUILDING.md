@@ -162,7 +162,9 @@ The script checks each shipped binary (`usgp-server`, `usgp-relay`,
 - it contains no non-FIPS AWS-LC symbols (`aws_lc_<version>_*`),
 - it has no non-FIPS AWS-LC shared library among its dynamic dependencies,
 - it exits 0 at start-up, meaning `usgp-crypto` found FIPS mode active.
-  The binaries fail closed if it is not.
+  The binaries fail closed if it is not. `usgp-server` and `usgp-relay`
+  run with `--self-check` (FIPS check only). With no arguments they print
+  usage and exit 2, so a bare run is not a FIPS check.
 
 To check static linkage on Linux by hand (the script does not yet assert
 it, REL-003):
@@ -177,7 +179,12 @@ for b in usgp-server usgp-relay usgp-preboot-agent usgp-cli; do
   # The FIPS module must be defined in the binary itself (T = text symbol).
   nm "$p" | grep -qE ' T aws_lc_fips_[0-9]' || echo "FAIL $b: FIPS module not linked statically"
   # Run the binary directly, not through cargo run, so a missing library fails.
-  "$p" > /dev/null || echo "FAIL $b: FIPS mode not active"
+  # The server and relay need --self-check; with no arguments they exit 2.
+  case "$b" in
+    usgp-server | usgp-relay) args=(--self-check) ;;
+    *) args=() ;;
+  esac
+  "$p" "${args[@]}" > /dev/null || echo "FAIL $b: FIPS mode not active"
 done
 ```
 
@@ -196,3 +203,98 @@ For each evidence or release build, keep:
   section 1 (TODO REL-001).
 
 SBOM, signing, and provenance for release artifacts are tracked in REL-007.
+
+## 8. PostgreSQL for tests
+
+The `pg-integration` tests (plan WU-3b; decisions 0008 and 0012) run
+against PostgreSQL 16 over TLS with certificate-only login:
+
+- `usgp-db`: `tests/migrate_pg.rs`, `tests/repo_pg.rs`,
+  `tests/audit_pg.rs`;
+- `usgp-server`: `tests/e2e_pg.rs` (the M2 end-to-end flow);
+- `usgp-server`: `tests/large_upload_pg.rs`, which also needs the
+  `large-tests` feature, about 14 GiB of free disk and Linux.
+
+Built with `--features pg-integration`, these tests **fail** (they do not
+skip) when the `USGP_TEST_PG_*` variables are missing. CI runs them in the
+`pg-integration` job on every change, and the large upload in the
+`large-upload` job (weekly and on manual dispatch). Locally they are
+**NOT RUN** unless you set up a database as below. `scripts/gates.sh`
+records NOT RUN for them, never PASS.
+
+`scripts/pg-test-setup.sh` needs `docker` and `openssl`. It makes a
+throwaway test PKI in a temporary directory outside the work tree (the CA
+key is deleted once the certificates are issued; certificates are valid
+for 2 days), and starts a digest-pinned `postgres:16` container published
+on `127.0.0.1` only. `pg_hba.conf` allows TLS client-certificate login
+only, and no role has a password. The script checks this configuration
+and smoke-tests the logins before it writes the environment file.
+
+### Database roles and key files
+
+The script creates three login roles, each with its own client
+certificate and no password (decisions 0012 and 0016). Migrations
+0002 and 0003 set their grants; migration 0003 fails if `usgp_admin`
+does not exist, so a real deployment's database administrator creates
+all three roles before the first `usgp-server migrate`.
+
+| Role | Used by | Environment variables | Rights |
+|---|---|---|---|
+| `usgp_owner` | `usgp-server migrate` (`--owner-user`, `--owner-cert`, `--owner-key`) | `USGP_TEST_PG_OWNER_{USER,CERT,KEY}` | owns the schema; runs migrations 0001 to 0003 (schema version 3) |
+| `usgp_app` | `usgp-server serve` (`[database]`) | `USGP_TEST_PG_APP_{USER,CERT,KEY}` | what the API needs; SELECT only on operator records |
+| `usgp_admin` | `operator enrol`, `operator disable`, `audit verify` (`[database.admin]`) | `USGP_TEST_PG_ADMIN_{USER,CERT,KEY}` | operator records; appends to and reads the audit chain, never updates or deletes it |
+
+Private key files follow these rules:
+
+- The owner key (`--owner-key`) and the admin key
+  (`[database.admin].client_key`) must be mode 0600 or 0400: no group or
+  other read bit, whoever runs the command, root included. Otherwise the
+  command refuses to start.
+- `serve` refuses to start (exit 78, `server.start.refused` with reason
+  `admin_key_readable_by_service`) if it can open the configured admin
+  key. In a deployment the admin key belongs to root (or a designated
+  administrator account) and the service account cannot read it.
+- The application key, the TLS key and the signing keys must not be
+  readable by others, and are readable by the group only if it is the
+  service's group.
+
+The tests run every role as one uid. They set the copied admin key to
+mode 0000 while `serve` runs and back to 0600 for the admin commands.
+**Run the pg tests as a non-root user:** root can open a 0000 file, so
+under root every `serve` in `e2e_pg` and `large_upload_pg` is refused.
+CI checks that its runner user is not root, and `scripts/gates.sh`
+records these tests as NOT RUN when it runs as root.
+
+```bash
+scripts/pg-test-setup.sh up
+# The script prints the env file path; by default it is
+# ${RUNNER_TEMP:-${TMPDIR:-/tmp}}/usgp-pg-test/pg-test.env
+set -a
+. "${TMPDIR:-/tmp}/usgp-pg-test/pg-test.env"
+set +a
+
+cargo test --locked --workspace --features pg-integration
+# or the whole local gate run, which then includes these tests:
+scripts/gates.sh
+
+scripts/pg-test-setup.sh check   # re-check the configuration (optional)
+scripts/pg-test-setup.sh down    # remove the container and the test keys
+```
+
+Options (environment): `USGP_PG_TEST_DIR` (key and env-file directory;
+refused inside the work tree except under `target/`), `USGP_PG_TEST_PORT`
+(default 55432), and `USGP_PG_TEST_IMAGE` (must be pinned by
+`@sha256:` digest). The image digest is part of the test baseline: change
+it deliberately (CM-3) and re-run CI.
+
+The large upload test is opt-in locally because it writes about 10.5 GiB:
+
+```bash
+GATES_LARGE=1 TMPDIR=/path/with/14GiB/free scripts/gates.sh
+```
+
+Test-only features are never enabled in shipped builds. CI and
+`scripts/gates.sh` fail if the release build graph turns on `test-pki`,
+`testkit`, `dism-samples`, `pg-integration` or `large-tests`. The
+`dism-samples` tests run only with a `wim-samples` workflow artifact
+(`USGP_WIM_SAMPLES`); they fail without it by design.

@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio.workspace = true
 # Decision 0001 (with Amendment 1): the FIPS 140-3 validated module and the
 # rustls FIPS provider. Only this crate may depend on them; deny.toml enforces.
 aws-lc-rs.workspace = true
@@ -15,6 +16,17 @@ aws-lc-fips-sys.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
 usgp-common.workspace = true
+# Decision 0001: TLS stream wrapper and X.509 parsing stay inside this crate.
+tokio-rustls.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
+
+[features]
+# Test-only PKI builder (plan WU-1). Never enabled by release binaries.
+test-pki = []
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util"] }

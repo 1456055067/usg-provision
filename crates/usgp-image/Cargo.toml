@@ -7,8 +7,19 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+usgp-proto.workspace = true
 usgp-common.workspace = true
 usgp-crypto.workspace = true
+# M2 (plan WU-0, section 4)
+quick-xml.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Test-only WIM builder and XPRESS encoder (plan WU-5/WU-X); never enabled
+# by release builds.
+testkit = []
+# DISM sample checks (plan WU-W item 2): tests/dism_samples.rs reads the
+# workflow artifact named by USGP_WIM_SAMPLES and fails if it is unset.
+dism-samples = ["testkit"]

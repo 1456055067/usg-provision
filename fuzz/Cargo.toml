@@ -14,7 +14,15 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4"
+serde = "1"
+serde_json = "1"
+usgp-crypto = { path = "../crates/usgp-crypto" }
 usgp-dhcp = { path = "../crates/usgp-dhcp" }
+# `testkit` (WIM builder, XPRESS test encoder) is test-only; the fuzz
+# workspace is never shipped (decision 0002), so it may enable it for seeds
+# and the round-trip mode of `xpress_chunk`.
+usgp-image = { path = "../crates/usgp-image", features = ["testkit"] }
+usgp-proto = { path = "../crates/usgp-proto" }
 usgp-tftp = { path = "../crates/usgp-tftp" }
 
 [[bin]]
@@ -27,6 +35,48 @@ bench = false
 [[bin]]
 name = "tftp_packet"
 path = "fuzz_targets/tftp_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wim_header"
+path = "fuzz_targets/wim_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wim_xml"
+path = "fuzz_targets/wim_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wim_lookup"
+path = "fuzz_targets/wim_lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wim_check"
+path = "fuzz_targets/wim_check.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xpress_chunk"
+path = "fuzz_targets/xpress_chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "api_json"
+path = "fuzz_targets/api_json.rs"
 test = false
 doc = false
 bench = false

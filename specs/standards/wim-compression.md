@@ -25,7 +25,13 @@ documents covered by the Open Specifications Promise or Community
 Promise. Whether a promise covers these two documents was not checked
 (OPEN-WIMC-4).
 
-Labels: **[derived]** and **[reading]** as in `wim.md`.
+- **Observation record (clean side, not Microsoft text)**:
+  `docs/formats/wim-observed.md`, run R1 (see `wim.md` Sources), records
+  OBS-012 and OBS-013 for XPRESS.
+
+Labels: **[derived]**, **[reading]**, **[observed]** and
+**[project rule]** as in `wim.md`. An [observed] note holds for the R1
+files only and is not a statement by Microsoft.
 
 ## 1. Which codecs WIM uses
 
@@ -41,6 +47,10 @@ Labels: **[derived]** and **[reading]** as in `wim.md`.
 - **No Microsoft source read says which [MS-XCA] variant WIM's "XPRESS"
   is, or which [CAB-LZX] settings WIM's LZX uses** (OPEN-WIMC-1,
   OPEN-WIMC-2).
+- **[observed]** (OBS-012): in R1, the XPRESS selected by header flag
+  0x00020000 is [MS-XCA] LZ77+Huffman (§3), applied to each 32 KiB
+  chunk on its own. OPEN-WIMC-1 is **confirmed for R1**. How WIM uses
+  LZX is not observed and stays OPEN-WIMC-2.
 
 ## 2. Common framing for WIM
 
@@ -53,7 +63,9 @@ starts.
 
 Whether this is WIM's XPRESS is OPEN-WIMC-1 **[reading: it is the only
 Huffman-based XPRESS variant Microsoft documents; confirm with DISM
-files]**. Sections: "LZ77+Huffman Compression Algorithm Details" (§2.1),
+files]**. **[observed]**: confirmed for R1 (OBS-012, OBS-013); the
+notes in §3.1, §3.3, §3.4 and §3.6 say what was and was not seen.
+Sections: "LZ77+Huffman Compression Algorithm Details" (§2.1),
 "LZ77 Phase" (§2.1.4.1), "Final Encoding Phase", and "Processing"
 (§2.2.4, the decoder).
 
@@ -71,6 +83,11 @@ files]**. Sections: "LZ77+Huffman Compression Algorithm Details" (§2.1),
 - Symbols **0 to 255** are literal bytes. Symbols **256 to 511** are
   matches. For a match, `s = symbol − 256`; the low 4 bits of `s` are the
   length header and `s / 16` (0 to 15) is the number of extra offset bits.
+- **[observed]** (OBS-012): every R1 chunk starts with one 256-byte
+  table, even symbol in the low nibble, whose lengths fill the code
+  space exactly (§3.2). Each chunk is a single block: no WIM chunk
+  expands beyond 32768 bytes, so the 65536-byte block rule never splits
+  one. **Never observed**: a chunk with more than one block.
 
 ### 3.2 Building the decoding table (§2.2.4)
 
@@ -91,9 +108,33 @@ files]**. Sections: "LZ77+Huffman Compression Algorithm Details" (§2.1),
   two 16-bit units into the register.
 - Each symbol is found from the top 15 bits of the register. The symbol's
   code length is then consumed, and a new 16-bit unit is read when needed.
+- **Refill rule** ([MS-XCA] §2.2.4 decoder pseudocode, SRC-053; our
+  wording). The decoder keeps a count of how many bits the register
+  holds beyond the 16 it must always hold. After the two-unit preload
+  that count is 16. Consuming bits shifts the register left (towards
+  its top) by that many bits and lowers the count by the same number.
+  If the count is then below zero, the decoder at once reads the next
+  16-bit unit (low byte first) from the current input position, shifts
+  that unit left by the amount the count went below zero, merges it
+  into the register with a bitwise OR, raises the count by 16, and
+  moves the input position on by 2 bytes. Read so, the new unit lands
+  directly below the bits still unread **[derived]**.
+- The check is made at two points per match: right after the symbol's
+  code is consumed, and again right after the extra offset bits (§3.5)
+  are consumed. After a literal only the first check applies. One step
+  consumes at most 15 bits, so the count never goes below −15 and one
+  unit per check is always enough **[derived]**.
+- Order within a match, as the pseudocode gives it: symbol, first
+  refill check, any extra length bytes (§3.4), offset bits, second
+  refill check. So a refill caused by the symbol takes its two bytes
+  from the input before the extra length bytes are read.
 - Extra length bytes (§3.4) are not part of the bit register. They are
   read straight from the current input position, which is where the
   encoder put them.
+- **[observed]** (OBS-012, OBS-013): reading 16-bit units low byte
+  first, with two units preloaded after the table, decodes all 369 R1
+  chunk instances to the expected size and every resource to its lookup
+  SHA-1. The [derived] byte order above is **confirmed** for R1.
 
 ### 3.4 Match length
 
@@ -107,6 +148,10 @@ files]**. Sections: "LZ77+Huffman Compression Algorithm Details" (§2.1),
   length for very long matches. The decoder pseudocode treats a 16-bit
   value under 15 as invalid, so it rejects that form **[reading]**. In a
   32 KB WIM chunk no match can need it (OPEN-WIMC-1).
+- **[observed]** (OBS-012): 49236 matches in R1 used the one-byte
+  extension. **Never observed**: the 16-bit form (`b` = 255) and the
+  32-bit form. A sample with long runs is still needed to exercise them
+  (`wim.md` §13).
 
 ### 3.5 Match offset
 
@@ -132,6 +177,27 @@ files]**. Sections: "LZ77+Huffman Compression Algorithm Details" (§2.1),
   encoders should append symbol 256.
 - The spec requires an error on any access outside the input or output
   buffer.
+
+**[observed]** (OBS-013), in all 369 R1 chunk instances:
+
+- when the output reached the expected chunk size, the next symbol was
+  256;
+- at that moment the input position, counting the two preloaded units,
+  equalled the chunk's stored size exactly;
+- no refill ever needed a byte beyond the stored size;
+- the bits left in the register after symbol 256 were all zero, and the
+  last two bytes of every chunk were zero;
+- symbol 256 also appeared 87 times before the end, where it is an
+  ordinary match (length 3, offset 1), and the output was still correct.
+
+So the end-symbol part of OPEN-WIMC-1 is **confirmed** for R1: DISM ends
+every chunk with symbol 256, placed so that it is read exactly when all
+stored bytes are consumed. **Never observed**: a chunk that needs a
+refill past the end of its input, and a chunk that fills its output
+without a final symbol 256. A decoder that treats any read past the end
+of the input as invalid, as [MS-XCA] requires (§6), and that requires
+the final symbol 256 with all input consumed, refuses none of the R1
+chunks.
 
 ## 4. LZX (Microsoft Cabinet LZX format)
 
@@ -290,6 +356,10 @@ Stated by [CAB-LZX], which a decoder must therefore check:
 - **OPEN-WIMC-1**: confirm that WIM's XPRESS is [MS-XCA] LZ77+Huffman,
   whether WIM chunks follow the 65536-byte block rule unchanged (a 32 KB
   chunk fits in one block), and whether a WIM chunk ends with symbol 256.
+  **Confirmed for R1** (OBS-012, OBS-013): all three parts. Never
+  observed in R1: the 16-bit and 32-bit length forms, a chunk of more
+  than one block, and a refill past the end of the input. Other DISM
+  builds are not covered.
 - **OPEN-WIMC-2**: how WIM uses LZX. Not stated in any Microsoft source
   read: the window size for WIM, whether call translation is on and with
   what translation size, whether each 32 KB WIM chunk is an independent
@@ -308,3 +378,10 @@ Stated by [CAB-LZX], which a decoder must therefore check:
 Until these are settled, the product can only decode what is documented.
 `specs/os-images.md` REQ-IMG-038 says how the product must behave when it
 meets a file it cannot decode.
+
+**M2 scope (project decision 0014, 2026-10-27; not described product
+behaviour).** M2 accepts uncompressed and XPRESS files only, and refuses
+LZX and LZMS files. So for M2 only OPEN-WIMC-1 must be settled (by the
+method of decision 0006); OPEN-WIMC-2 and OPEN-WIMC-3 are not needed
+until LZX or LZMS is accepted. The questions themselves stay open.
+OPEN-WIMC-1 is now confirmed for R1 (OBS-012, OBS-013).

@@ -7,7 +7,24 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+usgp-crypto.workspace = true
+usgp-proto.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+zeroize.workspace = true
+usgp-audit.workspace = true
 usgp-common.workspace = true
+# M2 (plan WU-0, section 4)
+tokio-postgres.workspace = true
+deadpool-postgres.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+usgp-crypto = { workspace = true, features = ["test-pki"] }
+
+[features]
+pg-integration = []

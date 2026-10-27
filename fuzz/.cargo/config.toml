@@ -1,0 +1,5 @@
+# Build output goes to the root target/ (decision 0005: nested build output
+# is scanned by the name gate on purpose; compiled third-party metadata can
+# trip it, so build output lives under the excluded root target/).
+[build]
+target-dir = "../target/fuzz"

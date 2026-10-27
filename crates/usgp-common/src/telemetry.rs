@@ -15,9 +15,12 @@
 
 // POAM: AU-5 (Response to Audit Logging Process Failures) - write errors
 // on stdout are dropped by the fmt layer; the process keeps running with
-// no record and no alert. M2's usgp-audit store handles write failure;
-// until then deployment must run the relay under a persistent, monitored
-// journal (docs/operations/relay.md).
+// no record and no alert. This is the relay's only audit path until it
+// reports to the server (M6); deployment must run the relay under a
+// persistent, monitored journal (docs/operations/relay.md). The server's
+// primary store is usgp-audit (append failure refuses the action), but its
+// stdout mirror has the same silent-drop behaviour, so a SIEM fed only
+// from stdout can miss records without an alert.
 
 use std::io;
 

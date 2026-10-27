@@ -158,6 +158,78 @@ M2 finalisation (same run, 2026-10-26):
   (CR-512). Non-OPEN M2 REQs moved from DRAFT to AUDITED after the
   approved re-audit.
 
+Owner decisions 0012 to 0015 (2026-10-27):
+
+- No research and no fetches. The researcher read only the four
+  decision records and the dirty-side spec and provenance files.
+- DEC-0012 to DEC-0015 were added to the decision table. DEC-0013 to
+  DEC-0015 settle the M2 parts of REQ-IMG-015, 038, 043, REQ-PE-005,
+  REQ-OS-004, 005, OPEN-OS-2, OPEN-IMG-C1, OPEN-AUD-1 and OPEN-ACC-2,
+  and add REQ-AUD-006 and 007. Each is marked "project design, not
+  described product behaviour" and is DRAFT pending audit. Post-M2
+  questions are kept open as OPEN-IMG-C1 (rest), OPEN-IMG-D1,
+  OPEN-IMG-F1, OPEN-OS-2 (rest) and OPEN-ACC-2 (rest).
+- Finalisation 2 (2026-10-27, no fetches): after the decisions
+  0012-0015 check, the M2 parts above and REQ-AUD-006, 007 moved to
+  AUDITED. CR-517: the DEC-0010 row now lists REQ-IMG-015, 043 and
+  INDEX IMG-1. CR-516: new REQ-OS-011 (DRAFT) cites DEC-0013.
+
+M2 fix round 1, drift (content-store run
+`target/agent-workflow/20261026-225553-m2-content-store`, report in the
+M2 spec run directory, 2026-10-27):
+
+- No research, no fetches and no searches. No vendor source and no
+  Microsoft page was opened. The researcher read the clean-room
+  protocol, the reviewers' drift and clean-room findings, the project's
+  observation record `docs/formats/wim-observed.md`, decisions 0006,
+  0013, 0014 and 0016, and the dirty-side spec and provenance files.
+- The observation record is logged below as a clean-side observation
+  source (OBS-001 to OBS-017, run R1). `wim.md` and
+  `wim-compression.md` cite it under a new **[observed]** label, kept
+  apart from Microsoft text, and mark each point confirmed, contradicted
+  or still open. Two header rules (`cbSize` must be 208; offset 20 must
+  be 32768 for XPRESS) are recorded as **[project rule, decision
+  pending]**, not as Microsoft text.
+- REQ-IMG-038 Status notes that OPEN-WIMC-1 is confirmed for R1.
+- REQ-OS-011 moved from DRAFT to AUDITED, text unchanged, after the
+  auditor's diff check.
+- CR-604: INDEX IMG-2 now lists DEC-0010, and the DEC-0010 row lists
+  INDEX IMG-2.
+- DEC-0016 (separate administrative database role) is not added to the
+  decision table: no spec text cites it. It concerns database roles and
+  host privileges, which are clean-side design; `operator-access.md`
+  already states the M2 outcome (audit records read only with a local
+  administrative command on the server host, DEC-0015) and was not
+  changed.
+
+M2 fix round 2, part D (content-store run re-verify round 1,
+2026-10-27):
+
+- One fetch only: the [MS-XCA] Processing page (SRC-053, §2.2.4),
+  public and anonymous, for CR-608. No vendor source, no search.
+- The researcher read the clean-room protocol, the "Re-verify round 1"
+  section of the content-store run's clean-room findings, and the
+  dirty-side spec and provenance files. Decision records, the
+  observation record and the boot-protocol findings were not opened
+  (outside the researcher's read scope); BOOT-011 to BOOT-014 were
+  handled from the orchestrator's task text.
+- CR-605: DEC-0017 (Proposed) added to the decision table and cited in
+  both wim.md header rules; INDEX topic 9 updated.
+- CR-607: wim.md §4 impact note made conditional.
+- CR-608: wim-compression.md §3.3 refill rule, own words.
+- BOOT-014: wim.md §10 split-part refusal labelled [project rule,
+  decision 0014]; one pointer line on further fail-closed rules.
+- BOOT-011 to BOOT-013: samples S11, S12 and the bootable PE note
+  added to wim.md §13.
+- INDEX preamble, topics 9 and 20: "await audit" changed to audited.
+
+DEC-0017 status update (2026-10-27):
+
+- Status-only edit, no research. The owner accepted decision 0017 on
+  2026-10-27. The DEC-0017 row, both wim.md §2 header rules and the
+  INDEX preamble and topic 9 now say accepted. The CR-605 line above is
+  kept as the historical record.
+
 ## Project decisions cited
 
 These are project design decisions, not product behaviour. They are
@@ -167,11 +239,27 @@ recorded in the repository and need no public-access check.
 |----|-------|-----------|------|--------|------------------|
 | DEC-0003 | Boot service never leases addresses (ProxyDHCP only) | `docs/decisions/0003-proxy-dhcp-only.md` | 2026-10-25 (Accepted) | Project decision, not product behaviour | REQ-BOOT-010, REQ-BOOT-011, REQ-BOOT-012; INDEX BOOT-1 and Unconfirmed (DHCP coexistence); standards/proxy-dhcp.md header |
 | DEC-0004 | M1 network-boot scope and per-device boot suppression | `docs/decisions/0004-m1-boot-scope-and-suppression.md` | 2026-10-26 (Accepted by the owner, 2026-10-26) | Project decision, not product behaviour | REQ-BOOT-003 (x86-64 and IPv4 scope), REQ-BOOT-005 (M1 architecture set), REQ-BOOT-007 (operator part), REQ-BOOT-050, REQ-BOOT-051; INDEX BOOT-2, BOOT-5. (M2 citations for REQ-OS-002 and REQ-PE-005 removed in M2 fix round 1, CR-506; those now rest on DEC-0009.) |
-| DEC-0006 | WIM format details from our own test files | `docs/decisions/0006-wim-format-by-black-box-test-files.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-IMG-038 (LZMS refused in M2); os-images.md OPEN-IMG-C1; preinstall-env.md OPEN-PE-LIC (counsel question on the method); standards/wim.md §13; standards/wim-compression.md §4.2, §7 (OPEN-WIMC-2, OPEN-WIMC-3); standards/winpe.md §7; INDEX IMG-2 |
+| DEC-0006 | WIM format details from our own test files | `docs/decisions/0006-wim-format-by-black-box-test-files.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-IMG-038 (LZMS refused in M2); os-images.md OPEN-IMG-C1; preinstall-env.md OPEN-PE-LIC (counsel question on the method); standards/wim.md §13; standards/wim-compression.md §4.2, §7 (OPEN-WIMC-2, OPEN-WIMC-3); standards/winpe.md §7; method for the [observed] notes in standards/wim.md and wim-compression.md (drift round); INDEX IMG-2 |
 | DEC-0007 | Operator authentication by mutual TLS (PIV/CAC) | `docs/decisions/0007-operator-authentication-mtls.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-RBAC-005, REQ-IMG-053, REQ-AUD-001 (unauthenticated requests audited); operator-access.md OPEN-ACC-1, OPEN-ACC-3; INDEX IMG-2, RBAC-2, AUD-2 |
 | DEC-0009 | M2 image scope: Windows 11 Enterprise x64 | `docs/decisions/0009-m2-image-scope.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-OS-001, 002, 004, 005, 007, 008, 009 (unknown status blocks readiness; moved from States, CR-511); REQ-PE-005; REQ-AUD-001 (refusals audited); os-support.md Purpose, OPEN-OS-2; INDEX OS-1, PE-1, AUD-2 |
-| DEC-0010 | Every operator action is audited | `docs/decisions/0010-audit-every-operator-action.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-AUD-001, 002, 005; REQ-RBAC-003 (refusal audited); operator-access.md OPEN-AUD-2; INDEX RBAC-2, AUD-2 |
+| DEC-0010 | Every operator action is audited | `docs/decisions/0010-audit-every-operator-action.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-AUD-001, 002, 005; REQ-RBAC-003 (refusal audited); REQ-IMG-015, 043 (auditing); operator-access.md OPEN-AUD-2; INDEX IMG-1, IMG-2 (CR-604), RBAC-2, AUD-2 |
 | DEC-0011 | Content integrity and secrets handling baseline | `docs/decisions/0011-content-integrity-and-secrets-baseline.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-IMG-035, 050, 052, 053, 054; REQ-RBAC-006; REQ-AUD-003; INDEX IMG-1, IMG-2, RBAC-2, AUD-2 |
+| DEC-0012 | PostgreSQL driver and certificate-only database login | `docs/decisions/0012-postgres-driver-certificate-auth.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | None (clean-side design; no spec relies on it; recorded for completeness); INDEX header note |
+| DEC-0013 | Operator-declared image facts, cross-checked by the product | `docs/decisions/0013-operator-declared-image-facts.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | REQ-IMG-043 (M2 items 1 to 4); REQ-PE-005 (M2 items 1 to 4); REQ-OS-004 (Enterprise variants refused in M2, item 3); REQ-OS-005 (declared and read facts, item 3); REQ-OS-011 (when a fact counts as unknown in M2, derived from items 1 to 3; CR-516); os-images.md OPEN-IMG-F1; os-support.md OPEN-OS-2, REQ-OS-010 status note; standards/wim.md §7 and §13 (OPEN-WIM-8 notes, drift round); INDEX PE-1, IMG-2, OS-1 |
+| DEC-0014 | M2 WIM compression scope | `docs/decisions/0014-m2-wim-compression-scope.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | REQ-IMG-038 (M2 accepted and refused set); REQ-IMG-039 status note; os-images.md OPEN-IMG-C1 (M2 part); standards/wim-compression.md §7 M2 scope note; standards/wim.md §10 (split parts refused in M2, drift round; labelled [project rule] in fix round 2); INDEX IMG-2 |
+| DEC-0015 | M2 content and audit operating rules | `docs/decisions/0015-m2-content-and-audit-operating-rules.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | REQ-IMG-015 item 1 (item 2 of the decision); REQ-AUD-006 (item 1); REQ-AUD-007 (item 3); REQ-AUD-004, 005 status notes; os-images.md OPEN-IMG-D1; preinstall-env.md States; operator-access.md OPEN-AUD-1, OPEN-ACC-2; INDEX IMG-1, PE-1, RBAC-2, AUD-2 |
+| DEC-0017 | WIM header strictness | `docs/decisions/0017-wim-header-strictness.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | standards/wim.md §2 "Project rules on the header" (`cbSize` must be 208; offset 20 must be 32768 for XPRESS; CR-605, fix round 2); INDEX header note and topic 9 |
+
+## Project observation records
+
+Clean-side records of the project's own interoperability tests with
+Microsoft's public tools, made under DEC-0006. They are not vendor
+material and not Microsoft text, need no public-access check, and are
+cited in specs only under the [observed] label.
+
+| ID | Title | Repo path | Run and date | Nature | Used for |
+|----|-------|-----------|--------------|--------|----------|
+| OBS-001 to OBS-017 (run R1) | WIM format: observations from our own DISM-made files | `docs/formats/wim-observed.md` | Workflow run 40535666995, attempt 1, commit ba23bed (branch of the WIM sample job); DISM 10.0.26100.32860 on Windows build 26100.33650; 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R1 files only | standards/wim.md Sources, labels, §2, §3, §4, §5, §7, §8, §9, §10, §12, §13; standards/wim-compression.md Sources, §1, §3, §3.1, §3.3, §3.4, §3.6, §7; REQ-IMG-038 Status (OPEN-WIMC-1 confirmed for R1); INDEX header, topics 9 and 20 |
 
 ## Sources used
 
@@ -229,7 +317,7 @@ recorded in the repository and need no public-access check.
 | SRC-050 | Microsoft Learn: Take Inventory of an Image or Component Using DISM | https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/take-inventory-of-an-image-or-component-using-dism | 2026-10-26 | Yes: as SRC-048 | standards/wim.md §7; REQ-IMG-040, REQ-IMG-043 |
 | SRC-051 | Microsoft Learn: unattend Microsoft-Windows-Setup ImageInstall OSImage InstallFrom MetaData Key | https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-setup-imageinstall-osimage-installfrom-metadata-key | 2026-10-26 | Yes: as SRC-048 | standards/wim.md §7, §11; REQ-IMG-041 (Source and Standards: Setup selects one image by index, name or description) |
 | SRC-052 | Microsoft Learn: WIMSetImageInformation (WIMGAPI) | https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/wim/dd834951(v=msdn.10) | 2026-10-26 | Yes: as SRC-048 | standards/wim.md §7 |
-| SRC-053 | Microsoft Open Specifications [MS-XCA] Xpress Compression Algorithm (rev. 10.0, 2024-04-23): landing page with IP notice; LZ77+Huffman Compression Algorithm Details; LZ77 Phase; Final Encoding Phase; Processing | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xca/a8b7cb0a-92a6-4187-a23b-5e14273b96f8 ; .../c0244bfe-fd96-4fe5-97dd-39b9fc99b801 ; .../75e3628e-e430-4d4e-9ca7-4637256e3755 ; .../c7ec7ba9-ca8f-448f-bb85-027c1516db1c ; .../26db8e62-bbd8-472c-a09e-623f6de10f0b | 2026-10-26 | Yes: anonymous fetch of public Microsoft Open Specifications pages; the IP notice permits copying to build implementations and claims no trade secrets (patent position noted as OPEN-WIMC-4) | standards/wim-compression.md §3, §6 |
+| SRC-053 | Microsoft Open Specifications [MS-XCA] Xpress Compression Algorithm (rev. 10.0, 2024-04-23): landing page with IP notice; LZ77+Huffman Compression Algorithm Details; LZ77 Phase; Final Encoding Phase; Processing | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xca/a8b7cb0a-92a6-4187-a23b-5e14273b96f8 ; .../c0244bfe-fd96-4fe5-97dd-39b9fc99b801 ; .../75e3628e-e430-4d4e-9ca7-4637256e3755 ; .../c7ec7ba9-ca8f-448f-bb85-027c1516db1c ; .../26db8e62-bbd8-472c-a09e-623f6de10f0b | 2026-10-26 | Yes: anonymous fetch of public Microsoft Open Specifications pages; the IP notice permits copying to build implementations and claims no trade secrets (patent position noted as OPEN-WIMC-4). Processing page (§2.2.4) fetched again anonymously 2026-10-27 (M2 fix round 2, CR-608), same content, no gate | standards/wim-compression.md §3, §6; §3.3 refill rule (fix round 2, CR-608) |
 | SRC-054 | Microsoft Open Specifications [MS-PATCH] LZX DELTA Compression and Decompression (rev. 14.1, 2025-08-19): landing page; Structures; Chunk Size; Block Header; Decoding Matches and Literals; Encoding the Trees and Pretrees (added in M2 fix round 1) | https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-patch/cc78752a-b4af-4eee-88cb-01f4d8a4c2bf ; .../2c64cf78-71a2-48d3-b85f-85ced4a8c36e ; .../ce9bcad1-3205-4d2a-ab6b-8c8dd4b56588 ; .../517e354e-a5c5-4239-ada5-25389cfe3170 ; .../06ee7ce0-730a-4907-be3c-f1f5673b0300 ; .../8b31ee78-6d50-428a-9520-9191238971f4 | 2026-10-26 | Yes: as SRC-053 (landing page and pretree page fetched again anonymously in fix round 1, same IP notice, no gate) | standards/wim-compression.md §4.4 (background only); §4.2 delta-direction cross-check and pretree storage (LZXD, [reading] for WIM; fix round 1, CR-509) |
 | SRC-055 | Microsoft Learn (archive): Microsoft Cabinet SDK page, and Microsoft Cabinet Format documentation including "Microsoft LZX Data Compression Format" | https://learn.microsoft.com/en-us/previous-versions/ms974336(v=msdn.10) ; https://learn.microsoft.com/en-us/previous-versions/bb417343(v=msdn.10) | 2026-10-26 | Yes: anonymous fetch of public Microsoft Learn archive pages. The SDK page says the SDK download is gone and points to this documentation. Extracted text lost some exponents and figures (noted in the standards file) | standards/wim-compression.md §4.1 to §4.3, §6, OPEN-WIMC-2 |
 | SRC-056 | Microsoft Learn: Using the Compression API (Win32) | https://learn.microsoft.com/en-us/windows/win32/cmpapi/using-the-compression-api | 2026-10-26 | Yes: as SRC-048 | standards/wim-compression.md §1, §5; REQ-IMG-038 |

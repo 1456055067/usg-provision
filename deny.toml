@@ -41,7 +41,22 @@ deny = [
   { crate = "aws-lc-rs", wrappers = ["usgp-crypto", "rustls", "rustls-webpki"] },
   { crate = "aws-lc-fips-sys", wrappers = ["aws-lc-rs", "usgp-crypto"] },  # usgp-crypto: exact version pin only (REL-001)
   { crate = "aws-lc-sys", wrappers = ["aws-lc-rs"] },          # 0001 Amendment 1: build-only, not linked
-  { crate = "rustls", wrappers = ["usgp-crypto"] },            # M1 adds "tokio-rustls"
+  { crate = "rustls", wrappers = ["usgp-crypto", "tokio-rustls"] },  # M2 WU-0: tokio-rustls (itself confined below)
+  # M2 WU-0 (plan section 4; decision 0001): the TLS stream wrapper and the
+  # X.509/DER/SPKI parsers stay inside usgp-crypto. Other crates use the
+  # stream and certificate types usgp-crypto exports.
+  { crate = "tokio-rustls", wrappers = ["usgp-crypto"] },
+  { crate = "x509-cert", wrappers = ["usgp-crypto"] },
+  { crate = "spki", wrappers = ["x509-cert"] },
+  { crate = "der", wrappers = ["x509-cert", "spki"] },
+  # Decision 0012 (accepted; plan section 5.5): tokio-postgres' protocol crate
+  # carries non-FIPS RustCrypto code for SCRAM-SHA-256/MD5 password login.
+  # The server logs in with a TLS client certificate only and never configures
+  # a password, so this code is linked but unreachable (POA&M). No other crate
+  # may use these; all hashing/MAC goes through usgp-crypto (decision 0001).
+  { crate = "md-5", wrappers = ["postgres-protocol"] },
+  { crate = "sha2", wrappers = ["postgres-protocol"] },
+  { crate = "hmac", wrappers = ["postgres-protocol"] },
   { crate = "rustls-webpki", wrappers = ["rustls"] },
   { crate = "bindgen", wrappers = ["aws-lc-fips-sys"] },       # 0001 Amendment 1
   { crate = "clang-sys", wrappers = ["bindgen"] },             # 0001 Amendment 1

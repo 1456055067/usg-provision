@@ -1,8 +1,11 @@
 # Spec traceability
 
-Every specced requirement maps to code and a test. Rows cover every REQ ID
-that milestone M1 put in scope (`specs/boot-network.md`, all AUDITED), plus
-the OPEN REQs of the same spec that M1 deliberately leaves alone.
+Every specced requirement maps to code and a test. The first table covers
+every REQ ID that milestone M1 put in scope (`specs/boot-network.md`, all
+AUDITED), plus the OPEN REQs of the same spec that M1 deliberately leaves
+alone. Milestone M2 requirements are in
+[their own section](#m2-requirements-content-store-integrity-operator-api)
+with their own evidence rules.
 
 Evidence rules for the Status column:
 
@@ -77,10 +80,120 @@ Test path abbreviations: `responder`, `reply`, `ident`, `packet` are
 | REQ-BOOT-061 | Next boot goes to the installed disk | None | None | OPEN. Out of M1 scope |
 | REQ-BOOT-062 | Make a device eligible for network boot again | None | None | OPEN. Out of M1 scope |
 
+## M2 requirements (content store, integrity, operator API)
+
+Rows cover every REQ ID of the M2 specs (`specs/os-images.md`,
+`specs/os-support.md`, `specs/preinstall-env.md`,
+`specs/operator-access.md`), AUDITED and OPEN, as of the uncommitted M2
+work on base 55bd6a1 (2026-10-27). Where a decision settles an item the
+spec still marks OPEN, the decision is cited.
+
+M2 evidence rules for the Status column:
+
+- **Tested (QA M2)**: the test passed in the M2 QA report's run
+  (2026-10-27) on the macOS development host. API and server tests run on
+  the in-memory store over real mTLS. macOS results are functional
+  evidence only (POAM-2).
+- **Fix-round test**: added in review fix rounds 1 or 2, after the QA
+  run; passed in coders' and reviewers' local runs (macOS); QA
+  re-verify pending. Not counted as Tested.
+- **CI NOT RUN**: needs PostgreSQL, Linux, a Windows runner or 14 GiB of
+  disk; nothing from M2 has run in CI (POAM-34). Never counted as PASS.
+- **DISM samples (local R1)**: `crates/usgp-image/tests/dism_samples.rs`
+  passed on macOS against a local copy of `wim-samples` run R1 (GitHub
+  run 40535666995); the CI `verify` job is NOT RUN. Functional evidence
+  only; OPEN-PE-LIC is with counsel (POAM-35).
+- **Deferred**: out of M2 scope by the brief or plan; no code, no test.
+- **OPEN**: the spec leaves the question open; nothing is implemented
+  beyond the AUDITED parts.
+
+Test path abbreviations: `api::<file>` is
+`crates/usgp-api/tests/api/<file>.rs`; `img::<file>` is
+`crates/usgp-image/tests/<file>.rs`; `audit::<file>` is
+`crates/usgp-audit/tests/audit/<file>.rs`; `server::<file>` is
+`services/usgp-server/tests/<file>.rs`; `db::<file>` is
+`crates/usgp-db/tests/<file>.rs`; `cli::<file>` is
+`tools/usgp-cli/tests/<file>.rs`; `tls_mtls` is
+`crates/usgp-crypto/tests/tls_mtls.rs`; names without a path prefix in
+`facts`, `os_support`, `error`, `lookup`, `idle`, `files` are unit tests
+in those source modules.
+
+| REQ ID | Spec | Code | Test | Status |
+|--------|------|------|------|--------|
+| REQ-IMG-001 | Minimum content of a package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs), [package_status.rs](../../crates/usgp-api/src/package_status.rs) | `api::packages::ready_when_declared_in_scope_manifest_signed`, `undeclared_edition_not_usable`, `bad_index_422_and_not_ready_409` | Tested (QA M2) |
+| REQ-IMG-002 | Name and description | [names.rs](../../crates/usgp-proto/src/names.rs) (SI-10 bounds only) | `names::display_name_limits`, `description_limits` (unit tests in `crates/usgp-proto/src/names.rs`) | OPEN (maximum lengths, uniqueness). SI-10 project bounds only, refused, never truncated |
+| REQ-IMG-003, 005, 006, 017 | Package files | None | None | Deferred: no file attachments to packages in M2 |
+| REQ-IMG-004 | Empty files refused | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs) | `api::uploads::zero_size_refused_422` | Tested (QA M2) for uploads; package files deferred |
+| REQ-IMG-010 | Create a package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::ready_when_declared_in_scope_manifest_signed`; `server::e2e_pg` | Tested (QA M2). PostgreSQL: CI NOT RUN |
+| REQ-IMG-011 | View packages | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::ready_when_declared_in_scope_manifest_signed`, `clone_copies_all_original_unchanged` | Tested (QA M2) |
+| REQ-IMG-012 | Edit a package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::edit_if_match_all_or_nothing_switch_pe` | Tested (QA M2) |
+| REQ-IMG-013 | Clone a package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::clone_copies_all_original_unchanged` | Tested (QA M2); no secrets exist in M2 |
+| REQ-IMG-014 | Delete a package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs), [cmd_package.rs](../../tools/usgp-cli/src/cmd_package.rs) | `api::packages::delete_requires_if_match_in_use_409_names_dependants`; `cli::args_m2::delete_prompts_unless_yes` | Tested (QA M2) |
+| REQ-IMG-015 (items 1, 2) | In-use deletion refused, naming dependants (decision 0015 item 2) | [images.rs](../../crates/usgp-api/src/handlers/images.rs), [pe.rs](../../crates/usgp-api/src/handlers/pe.rs), [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::delete_requires_if_match_in_use_409_names_dependants`; `api::declarations::in_use_409_and_not_ready_409`; `api::qa_m2::in_use_delete_refusal_audit_names_dependants` | Tested (QA M2). Item 3: OPEN (OPEN-IMG-D1) |
+| REQ-IMG-016 | Package versions | `revision` counter for ETag and signing only | None | OPEN. No history is viewable or restorable |
+| REQ-IMG-018 | Delete several packages at once | None | None | OPEN |
+| REQ-IMG-020 | Status is visible | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs), [package_status.rs](../../crates/usgp-api/src/package_status.rs) | `api::uploads::file_name_with_spaces_roundtrip_ready_object_readonly`; `api::packages::undeclared_edition_not_usable` | Tested (QA M2) |
+| REQ-IMG-021 | Nothing stays stuck in progress | [checker.rs](../../crates/usgp-api/src/checker.rs) | `api::uploads::stall_watchdog_fails`, `restart_recovery_marks_failed`, `expired_session_failed_and_orphan_reported`; `server::serve::restart_marks_interrupted_upload_failed`; `server::e2e_pg` | Tested (QA M2). PostgreSQL: CI NOT RUN. The time bound is project design (OPEN-IMG-L1) |
+| REQ-IMG-022 | Clear failure reasons | [error.rs](../../crates/usgp-image/src/error.rs), [error.rs](../../crates/usgp-api/src/error.rs) | `error::reason_codes_are_one_to_one`; `img::negative` (each refusal checked for a known code and text); `api::uploads::reason_in_body_and_failed_audited`; `api::qa_m2::lzms_esd_resource_only_metadata_only_refused_via_api`. New codes and remedy text: `error::metadata_order_message_states_the_remedy` | Tested (QA M2); codes added in fix rounds (`wim_resource_overlap`, `wim_duplicate_resource`, `wim_metadata_order_not_supported`): fix-round tests. Codes and remedies listed in [server.md](../operations/server.md) |
+| REQ-IMG-030 | Upload a WIM file | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs), [store.rs](../../crates/usgp-api/src/store.rs) | `api::real_wim::uncompressed_multi_edition_end_to_end`, `xpress_multi_edition_with_integrity_end_to_end`; `server::e2e_pg` | Tested (QA M2, memory store). PostgreSQL: CI NOT RUN |
+| REQ-IMG-031 | Multi-gigabyte files | [limits.rs](../../crates/usgp-api/src/limits.rs), [limits.rs](../../crates/usgp-api/src/handlers/limits.rs) | `api::limits::limits_route_states_max`, `too_large_413_before_body`; `limits::tests::defaults_are_valid_and_match_the_plan`; `server::large_upload_pg` (10.5 GiB) | Stated limit and 413: Tested (QA M2). Upload over 10 GB: CI NOT RUN (exit 1b); real media MT-1 NOT RUN (POAM-33). Maximum size is project design (OPEN-IMG-L1) |
+| REQ-IMG-032 | No time-out after upload | [idle.rs](../../crates/usgp-api/src/idle.rs) | `idle::trickle_survives_silence_times_out`; `server::large_upload_pg` | Progress-based timeout: Tested (QA M2). Large file: CI NOT RUN |
+| REQ-IMG-033 | File names with spaces | [names.rs](../../crates/usgp-proto/src/names.rs) | `api::uploads::file_name_with_spaces_roundtrip_ready_object_readonly` | Tested (QA M2) |
+| REQ-IMG-034 | Upload progress | None | None | OPEN |
+| REQ-IMG-035 | Interrupted uploads leave nothing usable | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs), [store.rs](../../crates/usgp-api/src/store.rs) | `api::uploads::digest_mismatch_failed_staging_removed`, `interrupted_body_failed_staging_removed`, `cancel`, `restart_recovery_marks_failed` | Tested (QA M2) |
+| REQ-IMG-036 | Resume an upload | None | None | OPEN. Not built |
+| REQ-IMG-037 | Check the image file before it is ready | [check.rs](../../crates/usgp-image/src/wim/check.rs), [header.rs](../../crates/usgp-image/src/wim/header.rs), [lookup.rs](../../crates/usgp-image/src/wim/lookup.rs), [resource.rs](../../crates/usgp-image/src/wim/resource.rs), [xml.rs](../../crates/usgp-image/src/wim/xml.rs), [integrity.rs](../../crates/usgp-image/src/wim/integrity.rs), [xpress.rs](../../crates/usgp-image/src/codec/xpress.rs) | `img::negative` (incl. `truncated_at_every_header_byte`, `wrong_magic`, `header_size_out_of_range`, `resource_entry_out_of_bounds_and_overflow`, `count_mismatch_header_xml_metadata`, `xml_refusals`, `integrity_mismatch`, `limits_enforced`, `random_damage_never_panics`), `img::check`, `img::xpress_vectors`; fuzz `wim_header`, `wim_xml`, `wim_lookup`, `wim_check`, `xpress_chunk` (60 s local); fix-round: `repeated_metadata_range_refused`, `file_resource_overlaps_refused`, `duplicate_file_hash_refused`, `metadata_out_of_offset_order_refused`, `total_metadata_budget`, `boot_metadata_must_match_boot_image`, `integrity_header_flags_must_be_zero`, `impossible_part_fields_malformed`, `file_chunk_tables_checked`, `identical_metadata_at_distinct_ranges_accepted`; `img::dism_samples` (local R1) | Tested (QA M2). Fix-round rules: fix-round tests. 600 s fuzzing: CI NOT RUN (exit 2b). Several rules are project rules on unobserved layouts (decision 0017; POAM-26, POAM-32) |
+| REQ-IMG-038 | Files the product cannot handle (decision 0014) | [header.rs](../../crates/usgp-image/src/wim/header.rs), [lookup.rs](../../crates/usgp-image/src/wim/lookup.rs) | `img::negative::lzx_refused`, `lzms_unknown_flag_refused`, `spanned_refused`, `resource_only_refused`, `metadata_only_refused`; `api::real_wim::lzx_and_split_refused_with_reason`; `api::qa_m2::lzms_esd_resource_only_metadata_only_refused_via_api`; DISM S03, S06, S07 (local R1) | Tested (QA M2). Resource flag 0x10 mapped to `wim_compression_not_supported` in fix round 1 |
+| REQ-IMG-039 | Split image sets | Refused as `wim_split_not_supported` | `img::negative::spanned_refused` | OPEN after M2; refused in M2 (decision 0014) |
+| REQ-IMG-040 | Show the editions | [xml.rs](../../crates/usgp-image/src/wim/xml.rs), [images.rs](../../crates/usgp-api/src/handlers/images.rs) | `img::check::editions_index_name_desc_size`; `api::real_wim::uncompressed_multi_edition_end_to_end`; DISM S04 (local R1) | Tested (QA M2) |
+| REQ-IMG-041 | Choose one edition per package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs), [lookup.rs](../../crates/usgp-image/src/wim/lookup.rs) | `api::packages::bad_index_422_and_not_ready_409`; `img::negative::metadata_out_of_offset_order_refused` (fix-round) | Tested (QA M2). Metadata-to-index mapping for serviced files is unobserved; such files are refused (`wim_metadata_order_not_supported`, POAM-32) |
+| REQ-IMG-042 | Many editions | [check.rs](../../crates/usgp-image/src/wim/check.rs) | `img::check::twelve_images`; DISM S04, 12 editions (local R1); `server::large_upload_pg` | Tested (QA M2). Large: CI NOT RUN |
+| REQ-IMG-043 (items 1 to 4) | Learn and show edition facts (decision 0013) | [facts.rs](../../crates/usgp-image/src/facts.rs), [declarations.rs](../../crates/usgp-api/src/handlers/declarations.rs) | `facts::empty_table_all_declared`, `no_name_inference`, `agreement_is_verified`, `contradiction_refused`, `inconsistent_file_refused`; `api::declarations::declare_ok_source_declared`, `invalid_value_422`, `contradiction_422_audited`, `in_use_409_and_not_ready_409`; `api::qa_m2::verified_and_declared_sources_signed_into_package_manifest`, `inconsistent_file_fact_refuses_declaration` | Tested (QA M2). Every real fact is `declared`; contradiction reachable with test tables only (POAM-23). Item 5: OPEN (OPEN-IMG-F1) |
+| REQ-IMG-044 | One image in several packages | Not prevented | None | OPEN. No claim |
+| REQ-IMG-050 | Verified before every use | [store.rs](../../crates/usgp-api/src/store.rs), [content.rs](../../crates/usgp-api/src/handlers/content.rs), [cmd_content.rs](../../tools/usgp-cli/src/cmd_content.rs) | `api::content_verify::download_verified_and_manifest_signed`, `tamper_first_chunk_500_marked_failed_package_not_usable`, `tamper_later_chunk_stream_aborted_marked_failed`, `bad_manifest_signature_refused`, `truncated_object_refused`; `api::qa_m2::chunks_verified_on_every_download_not_cached`, `package_manifest_bad_signature_refused`; `cli::download_verify::good`, `tampered_chunk`, `bad_signature`; fix-round `api::hardening::unreadable_object_is_503_and_content_stays_ready` | Tested (QA M2) |
+| REQ-IMG-051 | Format hashes not trusted | [check.rs](../../crates/usgp-image/src/wim/check.rs) | `img::check::sha1_consistent_but_operator_digest_differs_refused`, `img::negative::metadata_sha1_mismatch` | Tested (QA M2) |
+| REQ-IMG-052 | Ready content does not change | [store.rs](../../crates/usgp-api/src/store.rs) | `api::uploads::file_name_with_spaces_roundtrip_ready_object_readonly` (0440); `api::packages::edit_if_match_all_or_nothing_switch_pe` (edit = new revision) | Tested (QA M2) |
+| REQ-IMG-053 | Protected upload channel | [server.rs](../../crates/usgp-crypto/src/tls/server.rs), [mod.rs](../../crates/usgp-crypto/src/tls/mod.rs) | `tls_mtls::negotiated_version_suite_and_alpn_in_allowed_set`, `configs_are_fips`, `no_resumption_across_connections`; `api::unauthenticated::no_cert_401_www_authenticate_audited` | Tested (QA M2). SP 800-52r2 detail OPEN (OPEN-TLS-1) |
+| REQ-IMG-054 | Secret values in packages | No secret field exists | `api::routes_table::no_secret_fields_in_types`; `api::qa_m2::content_private_key_never_in_debug_or_records` | Met by design (no secret field in M2); mechanism planned for M4 |
+| REQ-OS-001, REQ-OS-007 | Windows 11 only; Windows 10 refused | [os_support.rs](../../crates/usgp-image/src/os_support.rs) | `os_support::windows_10_refused`, `other_release_refused`; `api::packages::os_scope_refused_at_selection_nothing_created_audited`; `api::qa_m2::every_out_of_scope_value_refused_at_selection_audited` | Tested (QA M2), on declared facts |
+| REQ-OS-002 | x64 only | [os_support.rs](../../crates/usgp-image/src/os_support.rs) | `os_support::x86_arm64_arm_refused`; `api::qa_m2::every_out_of_scope_value_refused_at_selection_audited` | Tested (QA M2), on declared facts |
+| REQ-OS-003 | Other architectures later | None | None | OPEN |
+| REQ-OS-004 | Enterprise only (LTSC and IoT refused, decision 0013 item 3) | [os_support.rs](../../crates/usgp-image/src/os_support.rs) | `os_support::ltsc_refused`, `iot_refused`, `pro_home_education_refused`; `api::qa_m2::every_out_of_scope_value_refused_at_selection_audited` | Tested (QA M2), on declared facts |
+| REQ-OS-005 | Refuse out-of-scope images clearly (decision 0013) | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::os_scope_refused_at_selection_nothing_created_audited`, `edit_if_match_all_or_nothing_switch_pe`; `api::qa_m2::every_out_of_scope_value_refused_at_selection_audited`; `os_support::every_failing_fact_is_named` | Tested (QA M2) |
+| REQ-OS-006 | Show what is supported | Project statement in [server.md](../operations/server.md) | None | OPEN. The `server.md` text is project scope, not a product claim |
+| REQ-OS-008 | No rule based on feature update | [os_support.rs](../../crates/usgp-image/src/os_support.rs) | `os_support::no_feature_update_input` | Tested by construction (QA M2) |
+| REQ-OS-009 | Unknown support blocks readiness | [os_support.rs](../../crates/usgp-image/src/os_support.rs), [package_status.rs](../../crates/usgp-api/src/package_status.rs) | `api::packages::undeclared_edition_not_usable`; `os_support::undeclared_is_unknown` | Tested (QA M2) |
+| REQ-OS-010 (sentence 1) | PE must suit the image | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs) | `api::uploads::pe_import_declaration_rules` | Tested (QA M2). Sentence 2 (kit age): OPEN |
+| REQ-OS-011 | When a fact counts as unknown | [os_support.rs](../../crates/usgp-image/src/os_support.rs) | `os_support::undeclared_is_unknown`, `verified_and_declared_treated_alike`; `api::packages::undeclared_edition_not_usable`, `os_scope_refused_at_selection_nothing_created_audited` | Tests passed in the QA M2 run, but QA reviewed REQ-OS-011 as DRAFT; QA confirmation against the AUDITED text pending |
+| REQ-PE-001 | Microsoft components come from the operator | [check-pe-files.sh](../../scripts/check-pe-files.sh) | `scripts/test-check-pe-files.sh` (43 cases); `scripts/check-pe-files.sh repo` OK (508 files) | Implemented (gate) in fix round 1; local runs only, QA re-verify pending; CI steps NOT RUN. Licensing questions OPEN (OPEN-PE-LIC, POAM-35) |
+| REQ-PE-002 | Import a Windows PE image | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs), [pe.rs](../../crates/usgp-api/src/handlers/pe.rs) | `api::uploads::pe_import_declaration_rules`; `api::real_wim::uncompressed_multi_edition_end_to_end`; `server::e2e_pg` | Tested (QA M2). PostgreSQL: CI NOT RUN |
+| REQ-PE-003 | Preparation on non-English Windows | None | None | N/A: no helper supplied in M2 (OPEN-PE-LIC) |
+| REQ-PE-004 | Check an imported environment | [check.rs](../../crates/usgp-image/src/wim/check.rs) | `img::check::pe_single_image_ok`, `pe_boot_index_names_one`, `pe_multi_no_boot_index_refused`; fix-round `img::negative::boot_metadata_must_match_boot_image` | Tested (QA M2) on builder files. No bootable DISM sample (OPEN-PE-LIC); boot-index rule derived, unconfirmed |
+| REQ-PE-005 | Architecture and version (decision 0013) | [uploads.rs](../../crates/usgp-api/src/handlers/uploads.rs), [facts.rs](../../crates/usgp-image/src/facts.rs) | `api::uploads::pe_import_declaration_rules`; `facts::pe_contradiction`; `api::qa_m2::verified_and_declared_sources_signed_into_package_manifest`, `pe_declaration_contradicting_file_fails_import_audited` | Tested (QA M2). Facts `declared` only (POAM-23) |
+| REQ-PE-006 | What the operator sees | [pe.rs](../../crates/usgp-api/src/handlers/pe.rs) | `api::uploads::pe_import_declaration_rules`; `api::qa_m2::pe_view_shows_required_fields_and_packages_using_it` | Tested (QA M2) |
+| REQ-PE-007 | Several environments, chosen per package | [packages.rs](../../crates/usgp-api/src/handlers/packages.rs) | `api::packages::edit_if_match_all_or_nothing_switch_pe` | Tested (QA M2) |
+| REQ-PE-008 | Integrity | [content.rs](../../crates/usgp-api/src/handlers/content.rs) | `api::qa_m2::pe_tamper_detected_package_not_usable`; `api::content_verify` (shared path) | Tested (QA M2) |
+| REQ-PE-009 | Known-bad kit releases | [limits.rs](../../crates/usgp-api/src/limits.rs), [config.rs](../../services/usgp-server/src/config.rs) | `api::uploads::known_bad_kit_warns_and_audits` | Mechanism Tested (QA M2); the list is empty by default (no source names one) |
+| REQ-PE-010 | Changes to the environment | None | None | OPEN |
+| REQ-RBAC-001 | Content actions need a permission | [routes.rs](../../crates/usgp-api/src/routes.rs), [rbac.rs](../../crates/usgp-api/src/rbac.rs) | `api::routes_table::every_route_has_permission_and_audit`; `api::authz_matrix::no_role_403_nothing_changes_audited_no_existence_leak` | Tested (QA M2). Permission set and roles OPEN (OPEN-ACC-2) |
+| REQ-RBAC-002 | View without change | None | None | OPEN |
+| REQ-RBAC-003 | Refused actions change nothing | [router.rs](../../crates/usgp-api/src/router.rs) | `api::authz_matrix::no_role_403_nothing_changes_audited_no_existence_leak`; `api::uploads::chunked_411_size_mismatch_400_and_wrong_owner_403` | Tested (QA M2) |
+| REQ-RBAC-004 | Built-in roles work as intended | [rbac.rs](../../crates/usgp-api/src/rbac.rs) | `api::authz_matrix::administrator_can_do_every_route` | Tested (QA M2) |
+| REQ-RBAC-005 | Individual operators, authenticated by certificate | [authn.rs](../../crates/usgp-api/src/authn.rs), [server.rs](../../crates/usgp-crypto/src/tls/server.rs), [operator.rs](../../services/usgp-server/src/operator.rs), [serve.rs](../../services/usgp-server/src/serve.rs) | `api::unauthenticated::no_cert_401_www_authenticate_audited`; `api::qa_m2::every_route_401_audited_for_each_authn_failure`, `tls_failure_classes_audited`, `tls_stale_crl_and_policy_audited`; `tls_mtls` refusal tests; `server::serve::crl_reload_fail_closed_then_revokes`; fix-round: `tls_mtls::absent_eku_extension_refused` (EKU always required, also at enrolment), `server::serve::crl_rollback_refused_and_audited`; `server::e2e_pg` | Tested (QA M2). EKU and CRL-rollback rules: fix-round tests. PostgreSQL: CI NOT RUN. Gaps POAM-19, 20, 21, 29 |
+| REQ-RBAC-006 | Secret values stay hidden | No secret field exists | `api::routes_table::no_secret_fields_in_types`; `api::qa_m2::content_private_key_never_in_debug_or_records` | Met by design |
+| REQ-AUD-001 | Record every action and refusal | [routes.rs](../../crates/usgp-api/src/routes.rs), [router.rs](../../crates/usgp-api/src/router.rs), [authn.rs](../../crates/usgp-api/src/authn.rs) | `api::routes_table::every_mutation_emits_audit`; `api::authz_matrix::no_role_403_nothing_changes_audited_no_existence_leak`; `api::qa_m2::every_route_401_audited_for_each_authn_failure`, `tls_failure_classes_audited`, `audit_failure_refuses_every_protected_read`, `every_out_of_scope_value_refused_at_selection_audited`; fix-round `api::hardening::anonymous_noise_then_revoked_certificate_still_recorded`, `self_made_certificates_then_revoked_certificate_still_recorded`; `server::e2e_pg` | Tested (QA M2), with an exception: refusal records are capped per source and globally (two budgets split by `trust_anchor`); beyond a cap only summary counts are kept, and the credential budget can be used up with public certificates (POAM-28). PostgreSQL: CI NOT RUN |
+| REQ-AUD-002 | Record content state changes | [checker.rs](../../crates/usgp-api/src/checker.rs), [context.rs](../../crates/usgp-api/src/context.rs) | `api::uploads::file_name_with_spaces_roundtrip_ready_object_readonly`, `reason_in_body_and_failed_audited`; `api::content_verify::tamper_first_chunk_500_marked_failed_package_not_usable` | Tested (QA M2) |
+| REQ-AUD-003 | No secrets in audit records | [record.rs](../../crates/usgp-audit/src/record.rs) | `audit::append::detail_never_contains_key_material`; `api::routes_table::no_secret_fields_in_types`; `api::qa_m2::content_private_key_never_in_debug_or_records` | Tested (QA M2). The stdout mirror is not captured in a local test; `e2e_pg` reads it: CI NOT RUN |
+| REQ-AUD-004 | Export audit records | None | None | OPEN |
+| REQ-AUD-005 | Records show tampering | [chain.rs](../../crates/usgp-audit/src/chain.rs), [checkpoint.rs](../../crates/usgp-audit/src/checkpoint.rs), [verify.rs](../../crates/usgp-audit/src/verify.rs), [audit_cmd.rs](../../services/usgp-server/src/audit_cmd.rs) | `audit::chain_tamper` (modified, deleted, reordered, inserted, recomputed chain caught by checkpoint, records after head); `server::qa_audit_verify` (5); `server::serve::audit_verify_detects_tampering`; fix-round `audit::policy` (cadence, `checkpoint_stale`, heartbeat); `db::audit_pg` | Tested (QA M2, memory store). Cadence and heartbeat rules: fix-round tests. PostgreSQL: CI NOT RUN. Truncation residual (POAM-25). Retention OPEN (OPEN-AUD-L1) |
+| REQ-AUD-006 | No action without its audit record (decision 0015 item 1) | [context.rs](../../crates/usgp-api/src/context.rs), [pool.rs](../../crates/usgp-db/src/pool.rs) | `audit::append::store_failure_refuses_and_changes_nothing`; `api::uploads::audit_failure_refuses_upload_nothing_changes`; `api::packages::audit_failure_refuses_package_create`; `api::qa_m2::audit_failure_refuses_every_mutation`, `audit_failure_refuses_every_protected_read`, `audit_failure_blocks_ready_transition`; `server::serve::start_refusals` | Tested (QA M2). PostgreSQL rollback (`db::audit_pg::failed_audit_write_rolls_back_the_change`): CI NOT RUN |
+| REQ-AUD-007 | Reading audit records in M2 (decision 0015 item 3; decision 0016) | [audit_cmd.rs](../../services/usgp-server/src/audit_cmd.rs), [0003_admin_role.sql](../../crates/usgp-db/migrations/0003_admin_role.sql) | `api::routes_table::every_route_has_permission_and_audit` (no audit route); `server::serve::local_admin_rule`; fix-round `server::startup::serve_refuses_a_readable_admin_key`, `files::tests::admin_key_modes`; `db::repo_pg::admin_role_least_privilege` | Tested (QA M2) for "no API, local command only". Enforcement rests on the root-only `usgp_admin` key (fix-round tests; POAM-30). Grants: CI NOT RUN |
+
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-27 | M2 (content store, uncommitted on 55bd6a1): added the M2 section with its own evidence rules (QA M2 on macOS, fix-round tests, CI NOT RUN, DISM samples local R1) and 68 rows covering every REQ-IMG, REQ-OS, REQ-PE, REQ-RBAC and REQ-AUD ID of the four M2 specs (some rows group IDs), from QA report section 4, the fix-round notes and decisions 0013, 0015 and 0016. REQ-PE-001 maps to `scripts/check-pe-files.sh` (fix round 1; QA-001 closed in code, QA re-verify pending). REQ-AUD-001 records the refusal-record cap exception (POAM-28); REQ-AUD-007 records that enforcement rests on the `usgp_admin` key. PostgreSQL, large-upload and 600 s fuzz evidence recorded as CI NOT RUN. Closes QA-002 in documentation. |
 | 2026-10-27 | M1 CI evidence: evidence rules now define "S*n* PASS (CI 40438138720)"; rows cite the boot smoke scenario that exercised them live, replacing every S1 to S8 NOT RUN: REQ-BOOT-001 to 007, 010, 011, 012, 020 to 022, 030, 031, 034, 040 to 042, 044, 050 to 052, 060, 070. In-process labels kept. REQ-BOOT-011 stays Partial (lab DHCP server only), REQ-BOOT-034 records the S8 stall-timing limit, REQ-BOOT-060 stays Not met. OPEN rows unchanged. |
 | 2026-10-26 | M1 (network boot): added every REQ-BOOT ID in the M1 brief with code, tests and status from the M1 QA report; S1 to S8 recorded as NOT RUN; fix-round 2 and 3 tests marked as pending QA re-verify; OPEN REQs listed. |
 | 2026-10-26 | M1 final pass (QA report FP.8): round-2 and round-3 tests moved to Tested; added `qa_r3` and netlab probe tests; REQ-BOOT-023 and 045 QA doc review passed; REQ-BOOT-043 statement corrected for QA-004. |

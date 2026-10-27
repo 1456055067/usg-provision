@@ -1,0 +1,56 @@
+# Plan M2 section 3.5 example configuration, every key written out.
+# Parsed by tests/config.rs (no file is opened: the paths need not exist).
+schema_version = 1
+node_name = "ctl-01"
+
+[api]
+listen = "127.0.0.1:8443"
+max_connections = 64
+header_timeout_s = 10
+idle_timeout_s = 120
+max_json_bytes = 65536
+
+[tls]
+cert_chain = "/etc/usgp-server/tls/server.pem"
+private_key = "/etc/usgp-server/tls/server.key"
+min_version = "1.2"
+client_trust_anchors = "/etc/usgp-server/tls/operator-cas.pem"
+client_crls = ["/etc/usgp-server/tls/crl/agency.crl"]
+crl_reload_s = 300
+acceptable_policy_oids = []
+
+[database]
+host = "db.internal"
+port = 5432
+dbname = "usgp"
+user = "usgp_app"
+server_ca = "/etc/usgp-server/db/ca.pem"
+server_name = "db.internal"
+client_cert = "/etc/usgp-server/db/client.pem"
+client_key = "/etc/usgp-server/db/client.key"
+pool_size = 8
+connect_timeout_s = 10
+
+[content]
+root = "/var/lib/usgp-server/content"
+max_upload_bytes = 34359738368
+max_open_uploads = 4
+max_open_uploads_per_operator = 2
+upload_idle_timeout_s = 300
+upload_session_ttl_s = 86400
+check_concurrency = 1
+check_stall_timeout_s = 600
+
+[signing]
+content_key = "/etc/usgp-server/keys/content.p8"
+audit_key = "/etc/usgp-server/keys/audit.p8"
+
+[audit]
+checkpoint_every_records = 100
+checkpoint_every_s = 60
+unauth_records_per_source_per_min = 10
+
+[wim]
+
+[log]
+level = "info"

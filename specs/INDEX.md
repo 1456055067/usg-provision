@@ -13,7 +13,19 @@ round 1 (CR-501 to CR-510) applied the owner's decisions DEC-0006,
 DEC-0007, DEC-0009, DEC-0010 and DEC-0011. After the re-audit (round 1,
 approved, 2026-10-26) these rows are `AUDITED`, partly where OPEN REQs
 remain; OPEN REQs stay open. The M2 standards summaries (topics 9, 11,
-17, 20 and 21) are audited.
+17, 20 and 21) are audited. On 2026-10-27 the owner's decisions
+DEC-0013, DEC-0014 and DEC-0015 settled the M2 parts of several OPEN
+REQs (project design, not described product behaviour). After the
+decisions 0012-0015 check (2026-10-27) their M2 parts, and the new
+REQ-AUD-006 and 007, are `AUDITED`; their post-M2 questions stay OPEN.
+REQ-OS-011 (CR-516) passed its diff check and is `AUDITED` (2026-10-27,
+text unchanged). DEC-0012 (database login) is recorded but no spec
+relies on it. M2 fix round 1 (drift, 2026-10-27) added the project's own
+DISM observations (OBS-001 to OBS-017, run R1) to the topic 9 and 20
+summaries as [observed] notes, kept apart from Microsoft text; those
+notes were audited in re-verify round 1 (2026-10-27). M2 fix round 2
+(2026-10-27) cites DEC-0017 (accepted 2026-10-27) for
+the two WIM header rules and adds the [MS-XCA] refill rule to topic 20.
 
 Priority is for a **Windows client (10/11 Enterprise) first** release.
 For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64
@@ -68,7 +80,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| PE-1 | Windows installs run from a Windows PE environment that the operator prepares from Microsoft's deployment kit (the product does not ship Microsoft components). | `specs/preinstall-env.md` | P1 | AUDITED (partial; import part, M2: REQ-PE-001 to 010; OPEN: 005, 010. Booting WinPE is M3, not specced) | SRC-001, SRC-004, SRC-005, SRC-008, SRC-047, SRC-048, SRC-057, SRC-058, SRC-060, SRC-061, SRC-063, DEC-0009 |
+| PE-1 | Windows installs run from a Windows PE environment that the operator prepares from Microsoft's deployment kit (the product does not ship Microsoft components). | `specs/preinstall-env.md` | P1 | AUDITED (partial; import part, M2: REQ-PE-001 to 010; 005 AUDITED for M2 (DEC-0013; post-M2 OPEN-IMG-F1); OPEN: 010. Booting WinPE is M3, not specced) | SRC-001, SRC-004, SRC-005, SRC-008, SRC-047, SRC-048, SRC-057, SRC-058, SRC-060, SRC-061, SRC-063, DEC-0009, DEC-0013, DEC-0015 |
 | PE-2 | The environment is usable at the device: network/Wi-Fi selection, on-screen keyboard, a command shell on error, and optional company branding. | `specs/preinstall-env.md` | P2 | NOT SPECCED | SRC-004, SRC-005, SRC-006 |
 | PE-3 | Access to the environment's shell and administrative functions is protected by operator-set passwords. | `specs/preinstall-env.md` | P2 | NOT SPECCED | SRC-004 |
 | PE-4 | A Linux-based environment is used for Linux installs and Linux image capture. | `specs/preinstall-env.md` | P3 | NOT SPECCED | SRC-004, SRC-006 |
@@ -77,8 +89,8 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| IMG-1 | An operator defines a deployment package that combines an OS image with its configuration, and can create, clone, view, edit, and delete packages. | `specs/os-images.md` | P1 | AUDITED (partial; REQ-IMG-001 to 006, 010 to 018, 020 to 022, 052, 054; OPEN: 002, 015, 016, 018) | SRC-001, SRC-004, SRC-005, SRC-007, DEC-0011 |
-| IMG-2 | Windows images in WIM format can be uploaded (including multi-gigabyte files and images containing many editions, where one edition is selected). | `specs/os-images.md` | P1 | AUDITED (partial; REQ-IMG-030 to 044, 050, 051, 053; OPEN: 034, 036, 039, 043, 044) | SRC-001, SRC-004, SRC-005, SRC-047, SRC-048, SRC-049, SRC-050, SRC-051, SRC-056, DEC-0006, DEC-0007, DEC-0011 |
+| IMG-1 | An operator defines a deployment package that combines an OS image with its configuration, and can create, clone, view, edit, and delete packages. | `specs/os-images.md` | P1 | AUDITED (partial; REQ-IMG-001 to 006, 010 to 018, 020 to 022, 052, 054; 015 AUDITED for items 1 and 2 (M2 rule, DEC-0015; post-M2 OPEN-IMG-D1); OPEN: 002, 016, 018) | SRC-001, SRC-004, SRC-005, SRC-007, DEC-0010, DEC-0011, DEC-0015 |
+| IMG-2 | Windows images in WIM format can be uploaded (including multi-gigabyte files and images containing many editions, where one edition is selected). | `specs/os-images.md` | P1 | AUDITED (partial; REQ-IMG-030 to 044, 050, 051, 053; 038 AUDITED (M2 compression scope, DEC-0014; post-M2 OPEN-IMG-C1); 043 AUDITED for M2 items 1 to 4 (DEC-0013; item 5 and post-M2 OPEN-IMG-F1); OPEN: 034, 036, 039, 044) | SRC-001, SRC-004, SRC-005, SRC-047, SRC-048, SRC-049, SRC-050, SRC-051, SRC-056, DEC-0006, DEC-0007, DEC-0010, DEC-0011, DEC-0013, DEC-0014 |
 | IMG-3 | Microsoft OS media can be downloaded directly into the product instead of uploaded. | `specs/os-images.md` | P2 | NOT SPECCED | SRC-004 |
 | IMG-4 | A reference device's OS can be captured as a new custom image. | `specs/os-images.md` | P2 | NOT SPECCED | SRC-004, SRC-007 |
 | IMG-5 | Images exported from another imaging system in WIM format can be reused. | `specs/os-images.md` | P3 | NOT SPECCED | SRC-004 |
@@ -173,14 +185,14 @@ a decision.
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
 | RBAC-1 | Operator capabilities are gated by roles, including separate administrator and read-only roles for device retirement and an administrator right to create boot services. | `specs/rbac.md` | P2 | NOT SPECCED (REQ-RBAC-020 onward reserved) | SRC-004, SRC-006 |
-| RBAC-2 | Managing images, preinstall environments and packages needs role permissions; operators are individually authenticated (M2). | `specs/operator-access.md` | P1 | AUDITED (partial; REQ-RBAC-001 to 006; OPEN: 002) | SRC-004, SRC-006, DEC-0007, DEC-0010, DEC-0011 |
+| RBAC-2 | Managing images, preinstall environments and packages needs role permissions; operators are individually authenticated (M2). | `specs/operator-access.md` | P1 | AUDITED (partial; REQ-RBAC-001 to 006; OPEN: 002; OPEN-ACC-2 open except who reads audit records in M2, settled by DEC-0015 in REQ-AUD-007) | SRC-004, SRC-006, DEC-0007, DEC-0010, DEC-0011, DEC-0015 |
 
 ### AUD — Audit
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
 | AUD-1 | Retirement actions are logged with operator notes and the log can be exported. | `specs/audit.md` | P2 | NOT SPECCED (REQ-AUD-020 onward reserved) | SRC-004 |
-| AUD-2 | Content-management actions, refusals and content state changes are recorded for audit in a tamper-evident way, without secrets (M2; project requirement, not described product behaviour). | `specs/operator-access.md` | P1 | AUDITED (partial; REQ-AUD-001 to 005; OPEN: 004) | SRC-004, DEC-0007, DEC-0009, DEC-0010, DEC-0011 |
+| AUD-2 | Content-management actions, refusals and content state changes are recorded for audit in a tamper-evident way, without secrets (M2; project requirement, not described product behaviour). | `specs/operator-access.md` | P1 | AUDITED (partial; REQ-AUD-001 to 007; 006 (fail closed, DEC-0015) and 007 (M2 audit reading, DEC-0015) AUDITED; OPEN: 004) | SRC-004, DEC-0007, DEC-0009, DEC-0010, DEC-0011, DEC-0015 |
 
 ### RET — Wipe and retirement
 
@@ -193,7 +205,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| OS-1 | Windows 10 and Windows 11 can be installed on bare metal and refreshed. | `specs/os-support.md` | P1 | AUDITED (partial; image-content part, M2: REQ-OS-001 to 010; M2 scope Windows 11 Enterprise x64 by DEC-0009; OPEN: 003, 005, 006, 010 in part. Install and refresh not specced) | SRC-004, SRC-005, SRC-058, SRC-064, SRC-065, SRC-066, SRC-067, DEC-0009 |
+| OS-1 | Windows 10 and Windows 11 can be installed on bare metal and refreshed. | `specs/os-support.md` | P1 | AUDITED (partial; image-content part, M2: REQ-OS-001 to 011; M2 scope Windows 11 Enterprise x64 by DEC-0009; 004, 005 AUDITED for M2 (DEC-0013 item 3; post-M2 OPEN-OS-2, OPEN-IMG-F1); 011 AUDITED (unknown facts in M2, DEC-0013, CR-516); OPEN: 003, 006, 010 in part. Install and refresh not specced) | SRC-004, SRC-005, SRC-058, SRC-064, SRC-065, SRC-066, SRC-067, DEC-0009, DEC-0013 |
 | OS-2 | Linux distributions (Red Hat Enterprise Linux, CentOS, Debian, Ubuntu, Rocky Linux, AlmaLinux) can be installed and refreshed. | `specs/os-support.md` | P3 | NOT SPECCED | SRC-005, SRC-006 |
 | OS-3 | Cloud-hosted virtual machines (Microsoft Azure) are supported. | `specs/os-support.md` | P3 | NOT SPECCED | SRC-004 |
 
@@ -288,8 +300,12 @@ decide.
    the published WIM format documentation). For IMG-2, IMG-4, IMG-5.
    **Summarised: `specs/standards/wim.md`** (M2, audited; from
    Microsoft's public WIM paper and Learn pages; byte order and several
-   layout points are [reading] or OPEN-WIM-1 to OPEN-WIM-11). Codecs are
-   topic 20.
+   layout points are [reading] or OPEN-WIM-1 to OPEN-WIM-11; M2 fix
+   round 1 added [observed] notes from the project's own DISM samples,
+   OBS-001 to OBS-017, which settle OPEN-WIM-1 and parts of others for
+   run R1, and two header rules marked [project rule] that cite DEC-0017
+   (accepted 2026-10-27); these notes were audited
+   2026-10-27). Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.
 11. Windows PE: building from the Windows ADK, adding drivers, startup
@@ -333,7 +349,9 @@ decide.
     background), LZMS (no public format found). For IMG-2, PE-1.
     **Summarised: `specs/standards/wim-compression.md`** (M2, audited;
     how WIM applies each codec is not stated by Microsoft: OPEN-WIMC-1 to
-    OPEN-WIMC-4).
+    OPEN-WIMC-4; OPEN-WIMC-1 confirmed for run R1 by [observed] notes,
+    OBS-012 and OBS-013, added in M2 fix round 1 and audited
+    2026-10-27; §3.3 refill rule added in M2 fix round 2).
 21. Security baseline: FIPS 186-5 signatures, RFC 5280 certificates, NIST
     SP 800-57 Part 1 key management, and operator authentication (FIPS
     201-3, SP 800-73-5, SP 800-63B). For IMG-2 integrity, RBAC-2.

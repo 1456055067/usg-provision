@@ -37,8 +37,12 @@
 //   docs/compliance/POAM.md (IA-3 on TB-1).
 // - SPEC: specs/boot-network.md#REQ-BOOT-045, #REQ-BOOT-052
 
-// POAM: AU-9 (Protection of Audit Information) - events go to stdout only
-// in M1; the tamper-evident store (usgp-audit) arrives in M2.
+// POAM: AU-9 (Protection of Audit Information) - for the relay, events
+// written through this module go to stdout only, with no tamper evidence,
+// until the relay reports to the server (M6). The server's primary audit
+// store is the tamper-evident chain in usgp-audit; its stdout copy (the
+// usgp-audit mirror, which reuses this shape) is protected only by
+// whatever external forwarding the deployment provides.
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;

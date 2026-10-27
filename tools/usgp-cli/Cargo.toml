@@ -11,11 +11,22 @@ name = "usgp-cli"
 path = "src/main.rs"
 
 [dependencies]
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util"] }
 usgp-proto.workspace = true
 usgp-crypto.workspace = true
 usgp-common.workspace = true
 thiserror.workspace = true
 libc.workspace = true
+# M2 (plan WU-0, section 4)
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+usgp-crypto = { workspace = true, features = ["test-pki"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "macros"] }

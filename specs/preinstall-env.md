@@ -1,8 +1,11 @@
 # Preinstallation environment (PE-1, import part for milestone M2)
 
 Status: AUDITED, partial (spec run M2, 2026-10-26; re-audit round 1
-approved). OPEN: REQ-PE-005, 010. REQ range in use: `REQ-PE-001` to
-`REQ-PE-010`. Booting the environment on a device is
+approved). REQ-PE-005 (M2) AUDITED 2026-10-27 after the decisions
+0012-0015 check. OPEN: REQ-PE-010; the post-M2 part of 005
+(`specs/os-images.md` OPEN-IMG-F1).
+REQ range in use: `REQ-PE-001` to `REQ-PE-010`. Booting the environment
+on a device is
 milestone M3 and has no REQs here (see "Later sections").
 
 ## Purpose
@@ -102,18 +105,38 @@ deploy Windows 11. A PE for any other architecture is refused with a
 reason that names the architecture, and the refusal is audited
 (`specs/operator-access.md` REQ-AUD-001).
 
-- Priority: MUST (architecture check); SHOULD (version shown)
+In M2 the product learns these facts as for an image edition
+(`specs/os-images.md` REQ-IMG-043):
+
+1. At import the operator declares the PE's processor architecture and
+   kit version.
+2. The product reads the same facts from the image information inside
+   the file, as far as Microsoft documents where that information
+   records them (`specs/standards/wim.md` §7, OPEN-WIM-8). If a declared
+   fact contradicts a fact read from the file, the import, or the choice
+   of the PE for a package, is refused with a reason that names the
+   fact, and the refusal is audited.
+3. A fact the file does not state is taken from the declaration and is
+   shown and recorded as declared, not verified.
+4. Each declaration is audited with the operator's identity.
+
+The x64 rule above applies to the declared and the read architecture
+alike. After M2, whether these facts are read from the file without a
+declaration is `specs/os-images.md` OPEN-IMG-F1.
+
+- Priority: MUST (architecture check; items 1 to 4); SHOULD (version
+  shown)
 - Source: SRC-004, SRC-008 (the kit release matters: one release did not
   work with the product); SRC-058 (32-bit WinPE cannot deploy Windows
   11); SRC-060 (kit architectures amd64, x86, arm, arm64)
 - Basis: DEC-0009 (M2 image scope is Windows 11 Enterprise x64; refusals
   are clear and audited). Accepting only an x64 PE follows from that
-  scope (project design, not described product behaviour)
-- Standards: `specs/standards/winpe.md` §2, §3
-- Status: OPEN (How does the product learn a PE's architecture and kit
-  version? The image metadata that records them is not publicly
-  documented (`wim.md` OPEN-WIM-8). Read from the file by a documented
-  means, or declared by the operator at import?)
+  scope. Items 1 to 4 and the x64 rule's use of declared facts are
+  DEC-0013 items 1 to 4. Project design, not described product
+  behaviour.
+- Standards: `specs/standards/winpe.md` §2, §3; `specs/standards/wim.md`
+  §7
+- Status: AUDITED (M2; the rule after M2 is OPEN-IMG-F1)
 
 ### REQ-PE-006: What the operator sees
 
@@ -179,8 +202,9 @@ before serving it, and when, is not settled.
 ## States and transitions
 
 As for an image file in `specs/os-images.md`: *Receiving*, *Checking*,
-*Ready*, *Failed* (with reason), *Deleted*. Deleting a PE that packages
-use follows REQ-IMG-015 (OPEN).
+*Ready*, *Failed* (with reason), *Deleted*. In M2, deleting a PE that
+packages use is refused, naming those packages (`specs/os-images.md`
+REQ-IMG-015).
 
 ## Limits
 
@@ -195,6 +219,10 @@ use follows REQ-IMG-015 (OPEN).
 - Not a WIM, damaged, or unsupported variant: refused with a reason
   (REQ-PE-004).
 - Wrong architecture: refused with a reason (REQ-PE-005).
+- Declared architecture or kit version contradicts the file: refused
+  with a reason naming the fact; audited (REQ-PE-005).
+- Deleting a PE that packages use: refused in M2, naming them
+  (REQ-IMG-015).
 - Known-bad kit release: warning (REQ-PE-009).
 - Digest mismatch later: not used; reported (REQ-PE-008).
 
@@ -243,4 +271,5 @@ use follows REQ-IMG-015 (OPEN).
   product needs for network boot of WinPE. M3.
 - **OPEN-PE-3**: whether the product checks that an imported PE has
   Microsoft's security updates applied.
-- REQ-PE-005, REQ-PE-010: see each Status line.
+- REQ-PE-010: see its Status line. REQ-PE-005 after M2:
+  `specs/os-images.md` OPEN-IMG-F1.

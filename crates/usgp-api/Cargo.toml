@@ -7,11 +7,24 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "sync"] }
+usgp-image.workspace = true
+thiserror.workspace = true
 usgp-common.workspace = true
 usgp-crypto.workspace = true
 usgp-audit.workspace = true
 usgp-db.workspace = true
 usgp-proto.workspace = true
+# M2 (plan WU-0, section 4)
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+usgp-image = { workspace = true, features = ["testkit"] }
+usgp-crypto = { workspace = true, features = ["test-pki"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "sync", "macros"] }

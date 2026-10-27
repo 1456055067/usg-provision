@@ -1,7 +1,10 @@
 # OS images and deployment packages (IMG-1, IMG-2 for milestone M2)
 
 Status: AUDITED, partial (spec run M2, 2026-10-26; re-audit round 1
-approved). OPEN: REQ-IMG-002, 015, 016, 018, 034, 036, 039, 043, 044.
+approved). REQ-IMG-015 (items 1, 2), 038 and 043 (M2 items 1 to 4)
+AUDITED 2026-10-27 after the decisions 0012-0015 check. OPEN:
+REQ-IMG-002, 016, 018, 034, 036, 039, 044; the post-M2 parts of 015 and
+043 (OPEN-IMG-D1, OPEN-IMG-F1).
 REQ range in use: `REQ-IMG-001` to `REQ-IMG-054`. Numbers
 are grouped by topic in tens, so some numbers are unused.
 
@@ -200,18 +203,24 @@ operator and asks for confirmation. Deletion works for large packages.
 
 ### REQ-IMG-015: Deleting content that is in use
 
-What happens when an operator deletes a package that a device is being
-installed from, or an image file or preinstall environment that one or
-more packages use, is not settled. Whatever the rule, a deletion must not
-leave a package that refers to content that no longer exists without the
-operator being told.
+1. **M2 rule.** When an operator asks to delete an image file, a
+   preinstall environment or a package that something else in the
+   product depends on (for example an image file or preinstall
+   environment that one or more packages use), the product refuses the
+   deletion, changes nothing, and names the items that depend on it. The
+   refusal is audited (`specs/operator-access.md` REQ-AUD-001).
+2. **Always.** A deletion never leaves a package that refers to content
+   that no longer exists without the operator being told.
+3. **After M2.** Whether a different rule applies later, for example to
+   a package that a device is being installed from, is OPEN-IMG-D1.
 
-- Priority: MUST (the last sentence)
-- Source: none (derived from REQ-IMG-020)
+- Priority: MUST
+- Source: none
+- Basis: item 1 is DEC-0015 item 2 (project design, not described
+  product behaviour); its auditing follows DEC-0010. Item 2 is derived
+  from REQ-IMG-020.
 - Standards: none
-- Status: OPEN (Is deletion of in-use content refused, deferred until no
-  longer used, or allowed with the dependent packages marked unusable? No
-  public source covers this.)
+- Status: AUDITED for items 1 and 2; OPEN for item 3 (OPEN-IMG-D1)
 
 ### REQ-IMG-016: Package versions
 
@@ -401,18 +410,26 @@ An image file that the product cannot handle is refused with a reason
 that names the problem. This covers at least: a compression method the
 product does not support, one part of a split (spanned) set, a file that
 holds only file data or only metadata, and files in Microsoft's
-recovery (`.esd`) compression. Image files that use LZMS ("solid")
-compression are refused in M2. Which of the others the product will
-later accept is not settled.
+recovery (`.esd`) compression.
+
+In M2 the product accepts only image files whose stored data is
+uncompressed or XPRESS-compressed, XPRESS being the format Microsoft
+publishes in [MS-XCA] (`specs/standards/wim-compression.md` §3). It
+refuses, each with a reason that names the variant: LZX-compressed
+files; LZMS ("solid") files; `.esd` files; split-set parts (`.swm`);
+and files that hold only file data or only metadata. Which of these the
+product will accept after M2 is not settled (OPEN-IMG-C1).
 
 - Priority: MUST
 - Source: SRC-047 (header flags), SRC-048, SRC-049 (split sets and
   recovery compression), SRC-056 (LZMS has no published format)
-- Basis: DEC-0006 item 4 for refusing LZMS in M2 (project decision, not
-  described product behaviour)
+- Basis: the M2 accepted and refused set is DEC-0014 (refining DEC-0006
+  item 4); project decision, not described product behaviour
 - Standards: `specs/standards/wim.md` §2, §10;
-  `specs/standards/wim-compression.md` §5, §7
-- Status: AUDITED (which compression methods M2 supports is OPEN-IMG-C1)
+  `specs/standards/wim-compression.md` §3, §5, §7
+- Status: AUDITED (M2 scope settled by DEC-0014; how WIM applies XPRESS,
+  OPEN-WIMC-1, is confirmed for R1 by observation (OBS-012, OBS-013);
+  what is accepted after M2 is OPEN-IMG-C1)
 
 ### REQ-IMG-039: Split image sets
 
@@ -422,8 +439,9 @@ a single image file.
 - Priority: MAY
 - Source: SRC-049 (Microsoft splits images for FAT32 and DVD limits)
 - Standards: `specs/standards/wim.md` §10
-- Status: OPEN (Must split sets be accepted? No public source says the
-  product accepts them.)
+- Status: OPEN (Must split sets be accepted after M2? No public source
+  says the product accepts them. In M2 they are refused, REQ-IMG-038,
+  DEC-0014.)
 
 ### Editions
 
@@ -466,19 +484,42 @@ can be chosen.
 - Standards: none
 - Status: AUDITED
 
-### REQ-IMG-043: Show what an edition contains
+### REQ-IMG-043: Learn and show what an edition contains
 
 For the chosen image the operator can see which Windows release, edition,
 processor architecture and languages it holds, so that they can tell
-whether it is supported (`specs/os-support.md`).
+whether it is supported (`specs/os-support.md`). In M2 the product
+learns these facts as follows.
 
-- Priority: SHOULD
+1. **Declared.** When uploading an image file, the operator declares,
+   for each edition they will use, its Windows release, edition and
+   processor architecture.
+2. **Cross-checked.** The product reads the same facts from the image
+   information inside the file, as far as Microsoft documents where
+   that information records them (`specs/standards/wim.md` §7;
+   OPEN-WIM-8 limits what is documented). If a declared fact contradicts
+   a fact read from the file, the product refuses the upload or the
+   choice of that edition, with a reason that names the fact. The
+   refusal is audited (`specs/operator-access.md` REQ-AUD-001).
+3. **Marked.** A fact that the file does not state is taken from the
+   declaration. Wherever it is shown or recorded it is marked as
+   declared, as distinct from a fact read from the file and found to
+   agree, which is marked as verified.
+4. **Audited.** Each declaration is audited with the identity of the
+   operator who made it (REQ-AUD-001).
+5. **Languages** are shown where the file states them. Whether the
+   operator also declares them is OPEN-IMG-F1.
+
+After M2, whether the product reads all of these facts from the file
+without a declaration is OPEN-IMG-F1.
+
+- Priority: MUST (items 1 to 4, M2); SHOULD (showing languages)
 - Source: SRC-050 (Microsoft's tools report these per image)
+- Basis: items 1 to 4 are DEC-0013 items 1, 2 and 4 (project design,
+  not described product behaviour); auditing also follows DEC-0010
 - Standards: `specs/standards/wim.md` §7
-- Status: OPEN (Where does this information come from? Microsoft does not
-  publish the layout of the image metadata that holds it (OPEN-WIM-8). Is
-  it read from the file by a documented means, or entered and confirmed
-  by the operator?)
+- Status: AUDITED for M2 (items 1 to 4); OPEN-IMG-F1 for item 5 and for
+  the rule after M2
 
 ### REQ-IMG-044: One image file in several packages
 
@@ -573,15 +614,15 @@ revealing it.
 (REQ-IMG-037). *Ready*: checked and recorded with its digest
 (REQ-IMG-050); its editions can be listed and chosen. *Failed*: the
 upload was interrupted (REQ-IMG-035) or the check failed; a reason is
-shown (REQ-IMG-022). *Deleted*: removed by an operator (rules for content
-in use are OPEN, REQ-IMG-015). Receiving and Checking always end in Ready
-or Failed (REQ-IMG-021).
+shown (REQ-IMG-022). *Deleted*: removed by an operator; in M2 an image
+file that a package uses cannot be deleted (REQ-IMG-015). Receiving and
+Checking always end in Ready or Failed (REQ-IMG-021).
 
 **Package.** *Being created or edited*: changes are being applied.
 *Ready*: all content it refers to is ready (REQ-IMG-020). *Failed*: a
 change could not be applied; the package keeps its previous contents
 (REQ-IMG-012). *Not usable*: content it refers to is missing or failed
-(REQ-IMG-015). *Deleted*.
+(REQ-IMG-015, REQ-IMG-050). *Deleted*.
 
 ## Limits
 
@@ -599,6 +640,10 @@ change could not be applied; the package keeps its previous contents
   (REQ-IMG-037, REQ-IMG-022). Nothing becomes ready.
 - **Unsupported variant** (compression, split part, `.esd`): refused with
   a reason that names the variant (REQ-IMG-038).
+- **Declared fact contradicts the file**: upload or edition choice
+  refused with a reason naming the fact; audited (REQ-IMG-043).
+- **Deleting content in use**: refused in M2, naming the items that
+  depend on it; audited (REQ-IMG-015).
 - **Upload interrupted**: shown as not completed; nothing becomes ready
   (REQ-IMG-035).
 - **Too large**: refused at or before the start, with the limit stated
@@ -652,15 +697,25 @@ Out of scope for M2 (see `specs/INDEX.md`):
 Unknown (OPEN):
 
 - **OPEN-IMG-L1**: see Limits.
-- **OPEN-IMG-C1**: which WIM compression methods the product supports in
-  M2. Microsoft publishes the XPRESS Huffman and Cabinet LZX formats, but
-  not how WIM applies them (`specs/standards/wim-compression.md`
-  OPEN-WIMC-1, OPEN-WIMC-2), and LZMS is not published at all. LZMS is
-  refused in M2 (DEC-0006 item 4, REQ-IMG-038). Gaps in the published
+- **OPEN-IMG-C1**: settled for M2 by DEC-0014 (REQ-IMG-038):
+  uncompressed and XPRESS files are accepted; LZX, LZMS, `.esd`, split
+  parts, and data-only or metadata-only files are refused. Still open:
+  which of the refused variants are accepted after M2. The format
+  questions also stay open: Microsoft publishes the XPRESS Huffman and
+  Cabinet LZX formats, but not how WIM applies them
+  (`specs/standards/wim-compression.md` OPEN-WIMC-1, OPEN-WIMC-2), and
+  LZMS is not published at all (OPEN-WIMC-3). Gaps in the published
   formats are filled only by observing WIM files the project makes with
-  Microsoft's own tools (DEC-0006). Which of XPRESS and LZX M2 supports
-  still needs a product decision.
-- REQ-IMG-002, 015, 016, 018, 034, 036, 039, 043, 044: see the question
-  in each Status line.
+  Microsoft's own tools (DEC-0006).
+- **OPEN-IMG-D1**: whether deletion of content in use stays refused after
+  M2 (REQ-IMG-015 item 1, DEC-0015 item 2), or is deferred until the
+  content is no longer used, or allowed with dependants marked unusable;
+  in particular for a package that a device is being installed from.
+- **OPEN-IMG-F1**: whether, after M2, the product reads an edition's
+  release, edition and architecture from the file without an operator
+  declaration (REQ-IMG-043; depends on OPEN-WIM-8), and whether
+  languages are declared.
+- REQ-IMG-002, 016, 018, 034, 036, 039, 044: see the question in each
+  Status line.
 - Whether the product's operator interface is a web console, an API, a
   command-line tool, or several (`specs/operator-access.md` OPEN-ACC-3).

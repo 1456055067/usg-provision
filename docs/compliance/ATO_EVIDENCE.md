@@ -26,6 +26,14 @@ runner image 20261012.334, fuzz toolchain from `fuzz/rust-toolchain.toml`,
 `fuzz-smoke-<target>` artifacts (30-day retention) each hold only the
 job's `fuzz.log`.
 
+M2 entries (run `20261026-225553-m2-content-store`, 2026-10-27) ran on the
+macOS arm64 development host against the uncommitted M2 work tree on base
+commit 55bd6a1, and are functional evidence only (POAM-2). No M2 CI run
+exists yet: every PostgreSQL, large-upload, Linux DISM-sample and 600 s
+fuzz entry is NOT RUN until CI runs on a commit (POAM-34). The DISM sample
+method awaits counsel (OPEN-PE-LIC, POAM-35). The one CI run that touched
+M2 is the sample generation run R1 below.
+
 | Date | Run | Command | Result |
 |------|-----|---------|--------|
 | 2026-10-26 | M1 WU-8 fuzz | `(cd fuzz) cargo fuzz run dhcp_packet <work> corpus/dhcp_packet -- -max_total_time=600 -max_len=1600` | PASS: 152,795,348 executions in 601 s, no crash, OOM or timeout |
@@ -57,11 +65,26 @@ job's `fuzz.log`.
 | 2026-10-27 | M1 CI 40439279903, fuzz (CI, Linux) | `(cd fuzz) cargo fuzz run dhcp_packet <work> corpus/dhcp_packet -- -max_total_time=600 -max_len=1600 -print_final_stats=1` (`fuzz-smoke` job) | PASS: `Done 62568898 runs in 601 second(s)`, no crash, OOM or timeout. Artifact `fuzz-smoke-dhcp_packet` (log only) SHA-256 `4d70f0e1fa30737c9714564f6b8b6767dd2cb5b2e95842b9b4865fb76dd3da51` |
 | 2026-10-27 | M1 CI 40439279903, fuzz (CI, Linux) | `(cd fuzz) cargo fuzz run tftp_packet <work> corpus/tftp_packet -- -max_total_time=600 -max_len=4096 -print_final_stats=1` (`fuzz-smoke` job) | PASS: `Done 9715509 runs in 601 second(s)`, no crash, OOM or timeout. Artifact `fuzz-smoke-tftp_packet` (log only) SHA-256 `fc6171f78b2c07d8a8ddbd8c920a814d6359d35f3289ffa4b67d27655f259cd3` |
 | 2026-10-27 | M1 CI 40439279903 | `sudo -E scripts/boot-smoke.sh all` (`boot-smoke` job, re-run) | PASS: `pass=9 fail=0 not_run=0`, preflight OK (relay uid 65534, `accel=kvm`); payload sha256 `2a412529…ec241c9a` as before. From the job log; the environment and digest rows above are from run 40438138720 |
+| 2026-10-27 | M2 `wim-samples` R1 (GitHub run 40535666995, attempt 1, commit ba23bed on branch `m2-wim-samples`) | `generate` job on `windows-2025` (`win25-vs2026` 20261021.278.1; Windows build 26100.33650; `Dism.exe` 10.0.26100.32860) | Samples S01 to S07 and S09 produced, every DISM command exit 0, 14 files with SHA-256 in `SHA256SUMS` (verified on macOS). Basis of OBS-001 to OBS-017 in `docs/formats/wim-observed.md`. No S08 (large job not run); S10 to S12 not yet in the scripts at R1. Artifact retention 14 days; keeping it is an owner action subject to OPEN-PE-LIC. The `verify` job result of that run was not reviewed and is not counted as evidence |
+| 2026-10-27 | M2 QA gate run | `USGP_WIM_SAMPLES=<local copy of R1> GATES_FUZZ_SECONDS=60 scripts/gates.sh` | Exit 1 (not a PASS): 57 PASS, 1 FAIL, 3 NOT RUN. FAIL: `tftp_packet` libFuzzer timeout during host sleep (environmental; input replays in 0 ms; 60 s re-run PASS, QA-003). NOT RUN: PostgreSQL tests (no database), large upload (`GATES_LARGE` unset; needs Linux and PostgreSQL), boot smoke S1 to S8 (Darwin) |
+| 2026-10-27 | M2 QA gate run | `cargo test --locked --workspace`; `--doc`; `cargo test --workspace --release` | PASS: 1054 passed, 0 failed, 0 ignored; 2 doc tests; release 1055 passed after QA's last test |
+| 2026-10-27 | M2 QA gate run | `cargo test --locked -p usgp-crypto --features test-pki`; `-p usgp-image --features testkit`; `-p usgp-image --features dism-samples` (local R1) | PASS: 85; 109; 112 (including 3 `dism_samples`) |
+| 2026-10-27 | M2 QA gate run | `cargo clippy` (default and all test features), `cargo fmt --check`, `scripts/check-pure-rust.sh`, `scripts/check-names.sh`, `cargo deny --locked check`, `cargo audit`, `scripts/check-fips-linkage.sh debug`, `no_test_features_shipped`, markdownlint, release build with `scripts/check-artifact-names.sh` | PASS. FIPS linkage on macOS is functional only |
+| 2026-10-27 | M2 QA gate run | fuzz 60 s per target via `gates.sh` | `wim_header` 1,033,001, `wim_xml` 757,271, `xpress_chunk` 64,749, `wim_lookup` 861,119, `wim_check` 512,166, `api_json` 2,042,420, `dhcp_packet` 9,118,931 runs, no crash; `tftp_packet` environmental FAIL, re-run PASS (1,495,382 runs). Smoke only: the 10-minute runs of M2 exit 2 are NOT RUN |
+| 2026-10-27 | M2 QA gate run | spec traceability check | NOT RUN at QA time (QA-002); the M2 section of `SPEC_TRACEABILITY.md` was added afterwards in this documentation change |
+| 2026-10-27 | M2 fix round 1 (coders, local) | `scripts/check-pe-files.sh repo`; `scripts/test-check-pe-files.sh`; `USGP_WIM_SAMPLES=<R1> cargo test -p usgp-image --features dism-samples` | PASS: 508 files OK (22 WIM-signature files, all builder seeds); 43 cases OK; 4 `dism_samples` tests, every compressed R1 resource decodes (83 resources, 369 chunks). Not QA-confirmed |
+| 2026-10-27 | M2 re-verify round 2 (reviewers, local) | `cargo test --offline -p usgp-audit -p usgp-api -p usgp-server -p usgp-crypto --features usgp-crypto/test-pki`; `cargo test -p usgp-image --features testkit` | PASS: 307 passed, 0 failed; 46 unit, 14 check, 35 negative, 28 xpress_vectors. Not QA-confirmed |
+| 2026-10-27 | M2, PostgreSQL | `cargo test --workspace --features pg-integration` (CI `pg-integration`) | NOT RUN. Locally, without `USGP_TEST_PG_*`, the PostgreSQL targets fail by design (fail, not skip) |
+| 2026-10-27 | M2, large upload | `cargo test -p usgp-server --release --features pg-integration,large-tests --test large_upload_pg` (CI `large-upload`) | NOT RUN (exit 1b) |
+| 2026-10-27 | M2, DISM samples on Linux | `wim-samples` `verify` job | NOT RUN on the M2 code |
+| 2026-10-27 | M2, fuzz 600 s | CI `fuzz-smoke` for `wim_header`, `wim_xml`, `xpress_chunk` | NOT RUN (exit 2b). Whether AWS-LC FIPS builds under the fuzz sanitizer on Linux is unproven (REL-M2-CI-002) |
+| 2026-10-27 | M2, real media | MT-1 | NOT RUN (owner action with licensed media; exit 1c) |
 
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-27 | M2 (content store, uncommitted on 55bd6a1): recorded the `wim-samples` generation run R1 (40535666995), the M2 QA gate run (exit 1: 57 PASS, 1 environmental FAIL, 3 NOT RUN; 1054 tests passed), the fix-round and re-verify local runs (not QA-confirmed), and NOT RUN entries for PostgreSQL, large upload, Linux DISM-sample verification, 600 s fuzzing and MT-1. Flagged OPEN-PE-LIC against the DISM sample method. |
 | 2026-10-27 | M1 CI fuzz evidence: recorded dispatched run 40439279903 (all jobs success), its two 600 s `fuzz-smoke` results on Linux beside the local 600 s runs, the artifact digests, and the boot smoke re-run (9 PASS, 0 FAIL, 0 NOT RUN). Replaced the pending `fuzz-smoke` row; no CI rows remain pending. |
 | 2026-10-27 | M1 CI evidence: recorded run 40438138720 (all jobs success, boot smoke 9 PASS, 0 FAIL, 0 NOT RUN), its environment, firmware and binary digests, the first Linux `fips-linkage` PASS, and the superseded run 40434148508. Replaced the pending `boot-smoke` row; `fuzz-smoke` stays pending. |
 | 2026-10-26 | M1 final pass: recorded QA's final gate run, test totals, 60 s fuzz runs and the passing traceability check. |

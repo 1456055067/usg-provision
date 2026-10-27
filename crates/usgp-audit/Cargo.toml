@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 usgp-common.workspace = true
 usgp-crypto.workspace = true
+# M2 (plan WU-0, section 4)
+serde_json.workspace = true
 
 [lints]
 workspace = true

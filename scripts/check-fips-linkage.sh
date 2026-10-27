@@ -7,8 +7,9 @@
 #   - no non-FIPS AWS-LC shared library is among its dynamic dependencies,
 #   - running it exits 0, i.e. FIPS mode reports active at start-up. Each
 #     binary runs with its own FIPS-check-only arguments (bin_args below):
-#     usgp-relay needs `--self-check`, because with no arguments it prints
-#     usage and exits 2 (plan section 3.6); the others take none.
+#     usgp-relay and usgp-server need `--self-check`, because with no
+#     arguments they print usage and exit 2 (M1 plan section 3.6; M2 plan
+#     WU-7); the others take none.
 #
 # Linux (the shipped and authoritative FIPS platform): the module must be
 # linked statically. The script fails if any libaws_lc* shared library is a
@@ -70,7 +71,7 @@ bins=(usgp-server usgp-relay usgp-preboot-agent usgp-cli)
 # Arguments that make a binary run its FIPS start-up check and exit.
 bin_args() {
   case "$1" in
-    usgp-relay) args=(--self-check) ;;
+    usgp-relay | usgp-server) args=(--self-check) ;;
     *) args=() ;;
   esac
 }

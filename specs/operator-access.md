@@ -1,8 +1,9 @@
 # Operator access and audit for content management (milestone M2)
 
 Status: AUDITED, partial (spec run M2, 2026-10-26; re-audit round 1
-approved). OPEN: REQ-RBAC-002, REQ-AUD-004. REQ ranges in use:
-`REQ-RBAC-001` to `REQ-RBAC-006` and `REQ-AUD-001` to `REQ-AUD-005`.
+approved). REQ-AUD-006 and REQ-AUD-007 (M2) AUDITED 2026-10-27 after
+the decisions 0012-0015 check. OPEN: REQ-RBAC-002, REQ-AUD-004. REQ ranges in use:
+`REQ-RBAC-001` to `REQ-RBAC-006` and `REQ-AUD-001` to `REQ-AUD-007`.
 Numbers up to 019 in each range are reserved for this file; INDEX rows
 RBAC-1 and AUD-1 (device retirement, P2) will use later numbers.
 
@@ -42,12 +43,18 @@ not described product behaviour.
 - **DEC-0011**: secrets are never logged, are protected at rest, and
   travel only over authenticated, encrypted channels; operator channels
   use TLS per NIST SP 800-52 Rev. 2.
+- **DEC-0015** (accepted 2026-10-27), for M2: an action whose audit
+  record cannot be written is refused; deleting content that other
+  content depends on is refused; audit records are read only with a
+  local administrative command on the server host.
 
 ## Actors and roles
 
 - **Operator**: an individual person using the operator interface.
 - **Administrator**: an operator whose role lets them assign roles.
-- **Auditor**: anyone allowed to read audit records (OPEN-ACC-2).
+- **Auditor**: anyone allowed to read audit records. In M2 this is a
+  person with administrative access to the server host (REQ-AUD-007);
+  any operator role for it is later (OPEN-ACC-2).
 
 ## Requirements
 
@@ -201,7 +208,9 @@ the product.
 - Source: SRC-004 (outcome only: the retirement log can be exported)
 - Standards: none
 - Status: OPEN (Is export provided for all audit records, in what form,
-  and who may export? No public source covers content actions.)
+  and who may export? No public source covers content actions. In M2
+  no operator can reach audit records through the operator interface;
+  see REQ-AUD-007.)
 
 ### REQ-AUD-005: Audit records show tampering
 
@@ -214,7 +223,41 @@ among existing records can be detected.
   described product behaviour
 - Standards: none
 - Status: AUDITED (how long records are kept is OPEN-AUD-L1; behaviour when
-  a record cannot be written is OPEN-AUD-1)
+  a record cannot be written is REQ-AUD-006)
+
+### REQ-AUD-006: No action without its audit record
+
+If the product cannot write the audit record for an operator action,
+the action is refused: nothing changes, and the operator is told that
+the action failed because it could not be recorded. An action that was
+going to be refused anyway stays refused. Likewise, a content state
+change under REQ-AUD-002 does not make content ready unless its record
+is written.
+
+- Priority: MUST
+- Source: none
+- Basis: DEC-0015 item 1 (fail closed), project requirement, not
+  described product behaviour. The sentence on state changes is derived
+  from it and from REQ-AUD-002. Telling the operator why follows the
+  refuse-with-a-reason pattern of REQ-RBAC-003 and `specs/os-images.md`
+  REQ-IMG-022.
+- Standards: none
+- Status: AUDITED
+
+### REQ-AUD-007: Reading audit records in M2
+
+In M2 the product offers no way to read audit records through the
+operator interface. Audit records are read, and checked for tampering
+(REQ-AUD-005), only with a local administrative command run on the
+server host. Whether an operator role for viewing audit records is
+added later is OPEN-ACC-2.
+
+- Priority: MUST
+- Source: none
+- Basis: DEC-0015 item 3, project design, not described product
+  behaviour
+- Standards: none
+- Status: AUDITED (M2 only; any later operator role is OPEN-ACC-2)
 
 ## States and transitions
 
@@ -233,8 +276,8 @@ changes in `specs/os-images.md`, `specs/preinstall-env.md` and
   REQ-AUD-001).
 - Action not permitted: refused, nothing changed, operator told
   (REQ-RBAC-003), and an audit record made (REQ-AUD-001).
-- Audit record cannot be written: OPEN-AUD-1 (must the action then be
-  refused?).
+- Audit record cannot be written: the action is refused, nothing
+  changes, and the operator is told why (REQ-AUD-006).
 
 ## Security expectations
 
@@ -244,7 +287,9 @@ changes in `specs/os-images.md`, `specs/preinstall-env.md` and
   (REQ-RBAC-005); sessions use TLS per NIST SP 800-52 Rev. 2
   (`specs/os-images.md` REQ-IMG-053).
 - Audit records hold no secrets (REQ-AUD-003) and show tampering
-  (REQ-AUD-005).
+  (REQ-AUD-005). No action proceeds unrecorded (REQ-AUD-006). In M2
+  audit records cannot be read through the operator interface
+  (REQ-AUD-007).
 
 ## Standards relied on
 
@@ -260,13 +305,18 @@ changes in `specs/os-images.md`, `specs/preinstall-env.md` and
   TLS; REQ-RBAC-005). Still open: the revocation-checking method and the
   certificate-to-operator mapping (clean-side design), and whether
   another method is added later.
-- **OPEN-ACC-2**: the permission set, the default roles, and who may read
-  audit records.
+- **OPEN-ACC-2**: the permission set and the default roles. Who may read
+  audit records is settled for M2 by DEC-0015 item 3 (REQ-AUD-007: only
+  through a local administrative command on the server host). Still
+  open: whether and when an operator role for viewing audit records is
+  added.
 - **OPEN-ACC-3**: the form of the operator interface (web console, API,
   command-line tool). No public source describes a general operator API.
   DEC-0007 speaks of an operator API for M2; whether other forms are
   offered is not settled.
-- **OPEN-AUD-1**: behaviour when an audit record cannot be written.
+- **OPEN-AUD-1**: settled by DEC-0015 item 1 (REQ-AUD-006: fail closed).
+  DEC-0015 is titled as an M2 rule; whether it is revisited later is
+  for the owner.
 - **OPEN-AUD-2**: tamper evidence is settled by DEC-0010 (REQ-AUD-005).
   Still open: who, if anyone, may delete records, and when.
 - RBAC-1 and AUD-1 in the INDEX (device retirement roles and log): later.

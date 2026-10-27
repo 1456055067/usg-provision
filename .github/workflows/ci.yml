@@ -13,7 +13,7 @@ on:
   pull_request:
   schedule:
     # Weekly re-run so new RustSec advisories surface without a code change.
-    # Also the trigger for the 10-minute fuzz-smoke job.
+    # Also the trigger for the fuzz-smoke and large-upload jobs.
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
@@ -56,30 +56,102 @@ jobs:
           key: gates-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy with the test-only features (lint only, never run here)
+        # Lints the code behind test-pki, testkit, dism-samples,
+        # pg-integration and large-tests. The dism-samples and pg tests fail
+        # by design without their data, so this job never runs them.
+        run: >-
+          cargo clippy --workspace --all-targets --locked
+          --features test-pki,testkit,dism-samples,pg-integration,large-tests
+          -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo test --workspace --doc --locked
+      - name: Feature-gated test evidence (usgp-crypto test-pki, usgp-image testkit)
+        # Per package, so the mTLS (REQ-RBAC-005, REQ-IMG-053) and WIM
+        # negative/XPRESS (REQ-IMG-037/038) tests do not depend on another
+        # crate's dev-dependency features. Each named test binary must run
+        # at least one test with none ignored. Never --all-features for
+        # usgp-image here: dism-samples fails without USGP_WIM_SAMPLES.
+        run: |
+          set -uo pipefail
+          bad=0
+          # require <log> <test file stem>...
+          require() {
+            local log=$1 t line passed ignored
+            shift
+            for t in "$@"; do
+              line="$(awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
+              passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
+              ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
+              if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
+                echo "::error::tests/$t.rs did not run as required (result: '${line:-none}')"
+                bad=1
+              else
+                echo "ok: $t: $line"
+              fi
+            done
+          }
+          # run_feature <log name> <cargo test args...>
+          run_feature() {
+            local log="$RUNNER_TEMP/$1.log" status=0
+            shift
+            cargo test --locked "$@" 2>&1 | tee "$log" || status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "::error::cargo test $* exited $status"
+              bad=1
+            fi
+          }
+          run_feature crypto-test-pki -p usgp-crypto --features test-pki
+          require "$RUNNER_TEMP/crypto-test-pki.log" tls_mtls envelope sign
+          run_feature image-testkit -p usgp-image --features testkit
+          require "$RUNNER_TEMP/image-testkit.log" check negative xpress_vectors
+          exit "$bad"
+      - name: Shipped builds enable no test-only feature (SI-7, CM-7)
+        # The graph `cargo build --workspace --bins --release` resolves
+        # (normal and build edges, no dev) must not turn on test-pki (and
+        # its x509-cert builder), testkit, dism-samples, pg-integration or
+        # large-tests.
+        run: |
+          set -euo pipefail
+          hits="$(cargo tree --locked --workspace -e features,normal,build --target all --prefix none \
+            | grep -E '(feature "(test-pki|testkit|dism-samples|pg-integration|large-tests)"|^x509-cert feature "builder")' \
+            | sort -u)" || true
+          if [ -n "$hits" ]; then
+            echo "::error::test-only features reach the shipped build graph:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "test-only features: none in the shipped build graph"
       - run: scripts/check-pure-rust.sh
       - run: scripts/check-names.sh
       - run: NAMES_FORCE_GREP=1 scripts/check-names.sh
       - run: scripts/test-check-names.sh
+      # REQ-PE-001 (finding QA-001): no Windows PE / ADK file or WIM image in
+      # the repository, and the gate's own 43 positive/negative cases. The
+      # shipped-artifact half runs in fips-linkage and boot-smoke.
+      - run: scripts/check-pe-files.sh repo
+      - run: scripts/test-check-pe-files.sh
       - name: Binaries start in FIPS mode (fail closed, SC-13; start-up contract, plan section 3.6)
         run: |
           set -euo pipefail
           cargo build --workspace --bins --locked
           # Run the artifacts directly (not via cargo run) so a missing
           # runtime library fails here.
-          for b in usgp-server usgp-preboot-agent usgp-cli; do
+          for b in usgp-preboot-agent usgp-cli; do
             "target/debug/$b"
           done
-          # The relay's FIPS-check-only mode; with no arguments it prints
-          # usage and exits 2, which must not be mistaken for a pass.
-          target/debug/usgp-relay --self-check
-          status=0
-          target/debug/usgp-relay 2> /dev/null || status=$?
-          if [ "$status" -ne 2 ]; then
-            echo "::error::usgp-relay with no arguments exited $status, expected 2 (usage)"
-            exit 1
-          fi
+          # The relay's and the server's FIPS-check-only mode; with no
+          # arguments each prints usage and exits 2, which must not be
+          # mistaken for a pass.
+          for b in usgp-relay usgp-server; do
+            "target/debug/$b" --self-check
+            status=0
+            "target/debug/$b" 2> /dev/null || status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "::error::$b with no arguments exited $status, expected 2 (usage)"
+              exit 1
+            fi
+          done
 
   fips-linkage:
     # Decision 0001 Amendment 1: shipped binaries link the FIPS module, do not
@@ -116,7 +188,24 @@ jobs:
       - run: scripts/check-fips-linkage.sh release
       - name: Name scan of the release binaries and staged payloads (CR-303)
         # No exclusions; exit 1 on a hit, exit 2 if an artifact is missing.
+        # Also runs check-pe-files.sh (REQ-PE-001) on the relay, the cli and
+        # the payloads.
         run: scripts/check-artifact-names.sh
+      - name: Every shipped binary, name scan and REQ-PE-001 (CR-303, QA-001)
+        # check-artifact-names.sh lists only the relay and the cli
+        # (REL-M2-P6-001); this covers all four release binaries. Fails
+        # closed: a missing binary is exit 2 from check-pe-files.sh.
+        run: |
+          set -euo pipefail
+          bins=(target/release/usgp-server target/release/usgp-relay
+            target/release/usgp-preboot-agent target/release/usgp-cli)
+          scripts/check-pe-files.sh files "${bins[@]}"
+          hits="$(LC_ALL=C grep -a -i -l -E -e 'tan[i]um' -- "${bins[@]}" || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::clean-room name in: $hits"
+            exit 1
+          fi
+          echo "shipped binaries: name scan and REQ-PE-001 OK (${#bins[@]} files)"
 
   testing-workspaces:
     # Test-only workspaces (plan WU-9, WU-10): excluded from the product
@@ -266,6 +355,290 @@ jobs:
             cargo audit --file "$ws/Cargo.lock"
           done
 
+  pg-integration:
+    # Plan WU-3b; decisions 0008 and 0012. The `pg-integration` tests against
+    # PostgreSQL 16 over TLS with certificate-only login. Locally these gates
+    # are NOT RUN unless a developer runs scripts/pg-test-setup.sh.
+    #
+    # The database runs in a digest-pinned postgres:16 container that
+    # scripts/pg-test-setup.sh starts, rather than a `services:` entry: a
+    # service starts before any step, so it cannot use certificates made in
+    # the job, and the image's own entrypoint needs a superuser password or
+    # `trust` host access to initialise. Here the test PKI is made in
+    # $RUNNER_TEMP (never in the work tree), no role has a password, and TCP
+    # opens only once pg_hba.conf is certificate-only. The port is published
+    # on 127.0.0.1 only.
+    #
+    # COMPLIANCE MAPPING:
+    # - NIST 800-53: IA-5(2), SC-8(1), CM-6 (checked database configuration),
+    #   AU-9 (audit store tests), SI-7 (digest-pinned image)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # <package>:<integration test>. Each must run at least one test, with
+      # none ignored, and must fail without the database variables.
+      # usgp-server:e2e_pg is the M2 end-to-end flow (plan WU-7). The large
+      # upload test is not here: it needs large-tests and its own job.
+      PG_REQUIRED_TESTS: usgp-db:migrate_pg usgp-db:repo_pg usgp-db:audit_pg usgp-server:e2e_pg
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tests run as a non-root user (SEC-011, decision 0016)
+        # `serve` refuses to start if it can open the usgp_admin client key.
+        # The tests make that key mode 0000 while `serve` runs and 0600 for
+        # the admin commands. Root opens a 0000 file anyway, so as root
+        # every `serve` in e2e_pg would be refused (exit 78). Hosted runners
+        # run steps as the unprivileged `runner` user; only the container
+        # and the scratch directory use sudo. Never run the cargo steps of
+        # this job under sudo.
+        run: |
+          uid="$(id -u)"
+          if [ "$uid" -eq 0 ]; then
+            echo "::error::pg-integration runs as root (uid 0); the admin-key rule cannot be tested"
+            exit 1
+          fi
+          echo "ok: tests run as $(id -un) (uid $uid)"
+      - uses: ./.github/actions/fips-toolchain
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install && rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-integration-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Build the pg-integration tests
+        run: cargo test --workspace --locked --features pg-integration --no-run
+      - name: Without the database variables the pg tests fail, not skip
+        run: |
+          set -uo pipefail
+          if env | grep -q '^USGP_TEST_PG_'; then
+            echo "::error::USGP_TEST_PG_* is already set; this step must run without it"
+            exit 1
+          fi
+          bad=0
+          for entry in $PG_REQUIRED_TESTS; do
+            pkg="${entry%%:*}"
+            t="${entry#*:}"
+            log="$RUNNER_TEMP/no-db-$t.log"
+            status=0
+            cargo test -p "$pkg" --locked --features pg-integration --test "$t" > "$log" 2>&1 || status=$?
+            if [ "$status" -ne 0 ] && grep -q '^test result: FAILED' "$log"; then
+              echo "ok: $pkg $t fails without a database (exit $status)"
+            else
+              echo "::error::$pkg $t exited $status without a database; it must run and fail (plan WU-3b)"
+              tail -n 40 "$log"
+              bad=1
+            fi
+          done
+          exit "$bad"
+      - name: Start PostgreSQL 16 (TLS, certificate-only login, checked)
+        id: pg
+        run: |
+          set -euo pipefail
+          scripts/pg-test-setup.sh up 2>&1 | tee "$RUNNER_TEMP/pg-setup.log"
+          # Decision 0016: the admin role's login material must be exported
+          # with the owner's and the application role's.
+          for v in USGP_TEST_PG_ADMIN_USER USGP_TEST_PG_ADMIN_CERT USGP_TEST_PG_ADMIN_KEY; do
+            grep -q "^$v=" "$RUNNER_TEMP/usgp-pg-test/pg-test.env" \
+              || { echo "::error::$v missing from pg-test.env"; exit 1; }
+          done
+          cat "$RUNNER_TEMP/usgp-pg-test/pg-test.env" >> "$GITHUB_ENV"
+          {
+            echo '### PostgreSQL for pg-integration'
+            echo '```text'
+            cat "$RUNNER_TEMP/pg-setup.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: pg-integration tests
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/pg-tests.log"
+          status=0
+          cargo test --workspace --locked --features pg-integration 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::cargo test --features pg-integration exited $status"
+            exit 1
+          fi
+          # A green run must include every required test binary, each with
+          # at least one passing test and none ignored.
+          bad=0
+          for entry in $PG_REQUIRED_TESTS; do
+            t="${entry#*:}"
+            line="$(awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
+            passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
+            ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
+            if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
+              echo "::error::$entry did not run as required (result: '${line:-none}')"
+              bad=1
+            else
+              echo "ok: $entry: $line"
+            fi
+          done
+          exit "$bad"
+      - name: Re-check the database configuration after the tests (decision 0012)
+        if: ${{ !cancelled() && steps.pg.outcome == 'success' }}
+        run: scripts/pg-test-setup.sh check
+      - name: PostgreSQL server log (on failure)
+        if: ${{ failure() && steps.pg.outcome != 'skipped' }}
+        run: docker logs usgp-pg-test 2>&1 | tail -n 200 || true
+      - name: Remove the container and the test keys
+        if: ${{ always() }}
+        run: scripts/pg-test-setup.sh down
+
+  large-upload:
+    # Plan WU-10 and section 10 "Large": the M2 exit-1 flow on a synthetic
+    # 10.5 GiB, 12-image WIM against PostgreSQL (upload, check, editions,
+    # declaration, PE import, package Ready, signed manifests, verified
+    # re-download, RSS bound). Scheduled and manual only: it needs about
+    # 14 GiB of disk and a long run, so it does not run on every push.
+    #
+    # Result rule: NOT RUN (test file missing, too little disk, or the
+    # test's own NOT RUN marker) fails this job with a "large-upload NOT
+    # RUN" annotation. It is never reported as PASS.
+    #
+    # COMPLIANCE MAPPING:
+    # - NIST 800-53: SI-7 (integrity on upload and re-download), SC-5
+    #   (bounded memory on large bodies), AU-9, SA-11
+    # - Plan WU-10; decisions 0008, 0011, 0012
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      LARGE_MIN_FREE_GIB: "14"
+      # The failure message large_upload_pg.rs starts with when the only
+      # problem is disk space (its NOT_RUN_DISK constant). Any other failure
+      # is FAIL; a run that passes no test is also NOT RUN.
+      LARGE_NOT_RUN_MARKER: "NOT RUN: insufficient disk"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the large upload test (absent is NOT RUN, which fails)
+        # Also requires a non-root user, as pg-integration does (SEC-011:
+        # root can open the 0000 admin key, so `serve` would refuse).
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "::error::large-upload runs as root (uid 0); the admin-key rule cannot be tested"
+            exit 1
+          fi
+          if [ ! -f services/usgp-server/tests/large_upload_pg.rs ]; then
+            echo "::error title=large-upload NOT RUN::services/usgp-server/tests/large_upload_pg.rs does not exist yet (plan WU-10). The large upload did not run. This is not a PASS."
+            exit 1
+          fi
+      - name: Free-disk preflight (too little space is NOT RUN, which fails)
+        # Content root: the larger of the $RUNNER_TEMP file system and /mnt
+        # (plan WU-10). Exported as TMPDIR, where the test puts its source
+        # image and the server's content root, and checks free space.
+        id: disk
+        run: |
+          set -euo pipefail
+          free_gib() { df -P -k "$1" | awk 'NR == 2 { printf "%d", $4 / 1048576 }'; }
+          df -h "$RUNNER_TEMP" /mnt 2> /dev/null || true
+          root_free="$(free_gib "$RUNNER_TEMP")"
+          mnt_free=0
+          if [ -d /mnt ]; then mnt_free="$(free_gib /mnt)"; fi
+          if [ "$mnt_free" -gt "$root_free" ]; then
+            dir=/mnt/usgp-large
+            sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$dir"
+            free="$mnt_free"
+          else
+            dir="$RUNNER_TEMP/usgp-large"
+            install -d -m 0700 "$dir"
+            free="$root_free"
+          fi
+          echo "content root $dir: $free GiB free (need $LARGE_MIN_FREE_GIB GiB)"
+          if [ "$free" -lt "$LARGE_MIN_FREE_GIB" ]; then
+            echo "::error title=large-upload NOT RUN::$free GiB free under $dir, $LARGE_MIN_FREE_GIB GiB needed. The large upload did not run. This is not a PASS."
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$dir" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/fips-toolchain
+      - name: Install Rust from rust-toolchain.toml
+        run: rustup toolchain install && rustup show
+      # Registry only: a cached release target/ would take the disk the
+      # test needs when the content root shares the root file system.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: large-upload-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Build the large upload test (release)
+        run: cargo test -p usgp-server --release --locked --features pg-integration,large-tests --test large_upload_pg --no-run
+      - name: Re-check free disk after the build
+        env:
+          CONTENT_DIR: ${{ steps.disk.outputs.dir }}
+        run: |
+          set -euo pipefail
+          free="$(df -P -k "$CONTENT_DIR" | awk 'NR == 2 { printf "%d", $4 / 1048576 }')"
+          echo "content root $CONTENT_DIR: $free GiB free after the build"
+          if [ "$free" -lt "$LARGE_MIN_FREE_GIB" ]; then
+            echo "::error title=large-upload NOT RUN::$free GiB free under $CONTENT_DIR after the build, $LARGE_MIN_FREE_GIB GiB needed. The large upload did not run. This is not a PASS."
+            exit 1
+          fi
+      - name: Start PostgreSQL 16 (TLS, certificate-only login, checked)
+        id: pg
+        run: |
+          set -euo pipefail
+          scripts/pg-test-setup.sh up 2>&1 | tee "$RUNNER_TEMP/pg-setup.log"
+          # Decision 0016: the admin role's login material (large_upload_pg
+          # enrols the operator and verifies the audit chain as usgp_admin).
+          for v in USGP_TEST_PG_ADMIN_USER USGP_TEST_PG_ADMIN_CERT USGP_TEST_PG_ADMIN_KEY; do
+            grep -q "^$v=" "$RUNNER_TEMP/usgp-pg-test/pg-test.env" \
+              || { echo "::error::$v missing from pg-test.env"; exit 1; }
+          done
+          cat "$RUNNER_TEMP/usgp-pg-test/pg-test.env" >> "$GITHUB_ENV"
+      - name: Large upload test (exit-1 flow; NOT RUN is never PASS)
+        timeout-minutes: 180
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/large-upload.log"
+          status=0
+          cargo test -p usgp-server --release --locked --features pg-integration,large-tests \
+            --test large_upload_pg -- --nocapture 2>&1 | tee "$log" || status=$?
+          line="$(awk '$1 == "Running" && $2 == "tests/large_upload_pg.rs" { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
+          passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
+          ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
+          {
+            echo '### large-upload result'
+            echo '```text'
+            echo "exit $status; ${line:-no test result line}"
+            df -h "$TMPDIR" | tail -n 1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -qF -- "$LARGE_NOT_RUN_MARKER" "$log"; then
+            echo "::error title=large-upload NOT RUN::the test reported NOT RUN ($LARGE_NOT_RUN_MARKER). This is not a PASS."
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=large-upload FAIL::cargo test exited $status"
+            exit 1
+          fi
+          if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
+            echo "::error title=large-upload NOT RUN::large_upload_pg did not pass a test (result: '${line:-none}'). This is not a PASS."
+            exit 1
+          fi
+          echo "large-upload: PASS ($line)"
+      - name: Re-check the database configuration after the test (decision 0012)
+        if: ${{ !cancelled() && steps.pg.outcome == 'success' }}
+        run: scripts/pg-test-setup.sh check
+      - name: PostgreSQL server log (on failure)
+        if: ${{ failure() && steps.pg.outcome != 'skipped' }}
+        run: docker logs usgp-pg-test 2>&1 | tail -n 200 || true
+      - name: Remove the container, the test keys and the content root
+        if: ${{ always() }}
+        env:
+          CONTENT_DIR: ${{ steps.disk.outputs.dir }}
+        run: |
+          scripts/pg-test-setup.sh down || true
+          if [ -n "$CONTENT_DIR" ]; then
+            rm -rf -- "$CONTENT_DIR" 2> /dev/null || sudo rm -rf -- "$CONTENT_DIR"
+          fi
+
   markdown:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -312,12 +685,17 @@ jobs:
 
   fuzz-build:
     # Separate workspace; libFuzzer allowed only here (decision 0002).
+    # Build output is target/fuzz (fuzz/.cargo/config.toml, decision 0005).
+    # Since M2 the fuzz workspace links usgp-crypto (through usgp-image and
+    # usgp-proto), so it builds the AWS-LC FIPS module and needs the pinned
+    # FIPS toolchain like every other job that builds usgp-crypto.
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/fips-toolchain
       - name: Install pinned nightly from fuzz/rust-toolchain.toml
         working-directory: fuzz
         run: rustup toolchain install && rustup show
@@ -326,8 +704,8 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-fuzz
             ~/.cargo/registry
-            fuzz/target
-          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml') }}
+            target/fuzz
+          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml', 'fuzz/.cargo/config.toml') }}
       - name: Install cargo-fuzz
         run: command -v cargo-fuzz || cargo install --locked cargo-fuzz@0.13.2
       - name: Check fuzz/Cargo.lock is up to date (REL-008)
@@ -342,34 +720,70 @@ jobs:
         working-directory: fuzz
         run: cargo fuzz build
       - name: Replay the committed seeds (regression, no new inputs)
+        # Every target in fuzz/fuzz_targets/ must be listed here; a target
+        # without a replay fails this step.
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for t in dhcp_packet tftp_packet; do
-            cargo fuzz run "$t" "corpus/$t" -- -runs=0
+          targets="dhcp_packet tftp_packet wim_header wim_xml wim_lookup wim_check xpress_chunk api_json"
+          for f in fuzz_targets/*.rs; do
+            t="$(basename "$f" .rs)"
+            case " $targets " in
+              *" $t "*) ;;
+              *) echo "::error::fuzz target $t has no seed replay in ci.yml"; exit 1 ;;
+            esac
+          done
+          for t in $targets; do
+            cargo fuzz run "$t" "corpus/$t" -- -runs=0 -rss_limit_mb=2048 -timeout=10
           done
 
   fuzz-smoke:
-    # M1 exit criterion 3 (plan section 10.4): each target runs 600 s with no
-    # crash. Scheduled and manual only; fuzz-build replays the seeds on every
-    # change.
+    # Each target runs for its plan length with no crash, OOM or timeout:
+    # M1 exit criterion 3 (dhcp_packet, tftp_packet, 600 s) and M2 plan
+    # section 10 (wim_header, wim_xml, xpress_chunk 600 s; wim_lookup,
+    # wim_check, api_json 60 s smoke), all with -rss_limit_mb=2048
+    # -timeout=10 (impl-notes-wu9). Scheduled and manual only; fuzz-build
+    # replays the seeds on every change. Each matrix job builds the FIPS
+    # module too, hence the toolchain step and the longer timeout.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
           # -max_len lets the DHCP fuzzer reach the over-length (> 1472 octet)
-          # path; TFTP transfer scripts need more room (impl-notes-wu8).
+          # path; TFTP transfer scripts need more room (impl-notes-wu8). The
+          # M2 lengths are from impl-notes-wu9 (wim_check seeds reach 213 KB).
           - target: dhcp_packet
             max_len: 1600
+            secs: 600
           - target: tftp_packet
             max_len: 4096
+            secs: 600
+          - target: wim_header
+            max_len: 1024
+            secs: 600
+          - target: wim_xml
+            max_len: 16384
+            secs: 600
+          - target: xpress_chunk
+            max_len: 70000
+            secs: 600
+          - target: wim_lookup
+            max_len: 4096
+            secs: 60
+          - target: wim_check
+            max_len: 262144
+            secs: 60
+          - target: api_json
+            max_len: 70000
+            secs: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/fips-toolchain
       - name: Install pinned nightly from fuzz/rust-toolchain.toml
         working-directory: fuzz
         run: rustup toolchain install && rustup show
@@ -378,15 +792,16 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-fuzz
             ~/.cargo/registry
-            fuzz/target
-          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml') }}
+            target/fuzz
+          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml', 'fuzz/.cargo/config.toml') }}
       - name: Install cargo-fuzz
         run: command -v cargo-fuzz || cargo install --locked cargo-fuzz@0.13.2
-      - name: Fuzz ${{ matrix.target }} for 600 s
+      - name: Fuzz ${{ matrix.target }} for ${{ matrix.secs }} s
         working-directory: fuzz
         env:
           TARGET: ${{ matrix.target }}
           MAX_LEN: ${{ matrix.max_len }}
+          RUN_SECS: ${{ matrix.secs }}
         run: |
           set -euo pipefail
           cargo fetch --locked
@@ -394,17 +809,18 @@ jobs:
           # Scratch working corpus first, so new inputs (no recorded origin)
           # never land in fuzz/corpus/ (CONTRIBUTING.md test-data rule).
           cargo fuzz run "$TARGET" "$RUNNER_TEMP/work/$TARGET" "corpus/$TARGET" -- \
-            -max_total_time=600 -max_len="$MAX_LEN" -print_final_stats=1 \
+            -max_total_time="$RUN_SECS" -max_len="$MAX_LEN" -rss_limit_mb=2048 -timeout=10 \
+            -print_final_stats=1 \
             2>&1 | tee "artifacts/$TARGET/fuzz.log"
-          # libFuzzer exits 0 when time runs out. Require the full 600 s, so
-          # an early stop is never reported as a pass.
+          # libFuzzer exits 0 when time runs out. Require the full run
+          # length, so an early stop is never reported as a pass.
           secs="$(sed -n 's/^Done [0-9]* runs in \([0-9]*\) second.*/\1/p' "artifacts/$TARGET/fuzz.log" | tail -n 1)"
-          if [ -z "$secs" ] || [ "$secs" -lt 600 ]; then
-            echo "::error::$TARGET ran ${secs:-unknown} s, expected at least 600 s"
+          if [ -z "$secs" ] || [ "$secs" -lt "$RUN_SECS" ]; then
+            echo "::error::$TARGET ran ${secs:-unknown} s, expected at least $RUN_SECS s"
             exit 1
           fi
           {
-            echo "### fuzz-smoke $TARGET"
+            echo "### fuzz-smoke $TARGET ($RUN_SECS s, -max_len=$MAX_LEN)"
             echo '```text'
             grep -E '^(Done|stat::)' "artifacts/$TARGET/fuzz.log" || true
             echo '```'

@@ -1,10 +1,12 @@
 # Supported operating systems (OS-1, image-content part for milestone M2)
 
 Status: AUDITED, partial (spec run M2, 2026-10-26; re-audit round 1
-approved; CR-511 applied in finalisation). OPEN: REQ-OS-003, 005, 006,
-010. REQ range in use: `REQ-OS-001` to `REQ-OS-010`. Installing
-and refreshing devices are later milestones and have no REQs here (see
-"Later sections").
+approved; CR-511 applied in finalisation). REQ-OS-004 and REQ-OS-005
+(M2) AUDITED 2026-10-27 after the decisions 0012-0015 check.
+REQ-OS-011 (CR-516) AUDITED 2026-10-27 after the diff check, text
+unchanged. OPEN: REQ-OS-003, 006, 010 (in part). REQ range in use:
+`REQ-OS-001` to `REQ-OS-011`. Installing and refreshing devices are
+later milestones and have no REQs here (see "Later sections").
 
 ## Purpose
 
@@ -95,14 +97,17 @@ In M2 they are refused (REQ-OS-002).
 
 In M2 the product accepts only the Windows 11 Enterprise edition. Images
 of other editions (for example Home, Pro or Education) are refused with
-a reason that names the edition (REQ-OS-005).
+a reason that names the edition (REQ-OS-005). In M2 only the plain
+Enterprise edition counts: variants such as Enterprise LTSC and IoT
+Enterprise are refused in the same way.
 
 - Priority: MUST
 - Source: none
-- Basis: DEC-0009 (project decision, not described product behaviour)
+- Basis: DEC-0009; the M2 refusal of Enterprise variants is DEC-0013
+  item 3 (project decisions, not described product behaviour)
 - Standards: none
-- Status: AUDITED (OPEN-OS-2: whether Enterprise LTSC and IoT Enterprise
-  images count as Enterprise for this rule)
+- Status: AUDITED (whether Enterprise variants are accepted after M2
+  is OPEN-OS-2)
 
 ### REQ-OS-005: Refuse out-of-scope images clearly
 
@@ -113,14 +118,21 @@ three is the problem, and does not let a package using the image become
 ready. The refusal is recorded for audit (`specs/operator-access.md`
 REQ-AUD-001).
 
+In M2 the rule applies to the facts established under
+`specs/os-images.md` REQ-IMG-043, whether they were read from the file
+(verified) or only declared by the operator. Either kind can cause a
+refusal, and only an image whose facts, declared and read, are all
+within scope can make a package ready.
+
 - Priority: MUST
 - Source: SRC-004 (incompatible files are blocked when added, rather than
   failing later)
-- Basis: DEC-0009 (refusal with a clear, audited error); derived from
-  REQ-IMG-022
+- Basis: DEC-0009 (refusal with a clear, audited error); DEC-0013 item 3
+  (the scope applies to declared and read facts); project decisions, not
+  described product behaviour; derived from REQ-IMG-022
 - Standards: none
-- Status: OPEN (Depends on REQ-IMG-043: how the product learns an image's
-  release, edition and architecture.)
+- Status: AUDITED (M2; how facts are learned after M2 is
+  `specs/os-images.md` OPEN-IMG-F1)
 
 ### REQ-OS-006: Show what is supported
 
@@ -188,9 +200,29 @@ release in its image.
 - Source: SRC-058 (32-bit WinPE cannot deploy Windows 11; use the kit
   matching the newest Windows version deployed)
 - Standards: `specs/standards/winpe.md` §2
-- Status: OPEN for the second sentence (needs REQ-PE-005: how the product
-  learns the kit version of a preinstall environment). In M2 the first
-  sentence is also met by REQ-PE-005, which accepts only an x64 PE.
+- Status: OPEN for the second sentence (for M2, REQ-PE-005 now says how
+  the kit version is learned: declared and cross-checked, DEC-0013; not
+  yet settled is whether a declared-only version is enough to warn on,
+  and how kit versions are compared with Windows releases). In M2 the
+  first sentence is also met by REQ-PE-005, which accepts only an x64
+  PE.
+
+### REQ-OS-011: When a fact counts as unknown in M2
+
+In M2 a Windows release, edition or architecture fact of an image
+counts as unknown for REQ-OS-009 only if the operator did not declare
+it and the product did not read it from the file (`specs/os-images.md`
+REQ-IMG-043). A fact that was declared but not read is not unknown; it
+is judged against REQ-OS-001, REQ-OS-002 and REQ-OS-004 like a read
+fact (REQ-OS-005).
+
+- Priority: MUST
+- Source: none
+- Basis: derived from DEC-0013 items 1 to 3 (project decision, not
+  described product behaviour)
+- Standards: none
+- Status: AUDITED (M2; how facts are learned after M2 is
+  `specs/os-images.md` OPEN-IMG-F1)
 
 ## Later sections (no REQs in M2)
 
@@ -206,7 +238,8 @@ release in its image.
 ## States and transitions
 
 An image's support status is one of: *supported*, *not supported (with a
-reason)*, or *unknown* (the product could not tell; REQ-IMG-043). A
+reason)*, or *unknown* (the product could not tell; REQ-IMG-043; what
+counts as unknown in M2 is REQ-OS-011). A
 not-supported image is refused (REQ-OS-005). An unknown image is held
 back from readiness (REQ-OS-009). Only a supported image can make a
 package ready.
@@ -238,9 +271,10 @@ No security requirements specific to this area. Content integrity is in
 
 ## Out of scope / unknown
 
-- REQ-OS-003, 005, 006, 010: see each Status line.
+- REQ-OS-003, 006, 010: see each Status line.
 - **OPEN-OS-1**: whether support after M2 is tied to Microsoft's
   servicing dates and is updated as Microsoft releases new Windows
   versions, and who decides.
-- **OPEN-OS-2**: whether Windows 11 Enterprise LTSC and IoT Enterprise
-  images fall within "Enterprise" for REQ-OS-004. DEC-0009 does not say.
+- **OPEN-OS-2**: settled for M2 by DEC-0013 item 3: Windows 11
+  Enterprise LTSC and IoT Enterprise images are refused (REQ-OS-004).
+  Still open: whether they are accepted after M2.

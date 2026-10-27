@@ -11,6 +11,12 @@ name = "usgp-server"
 path = "src/main.rs"
 
 [dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "sync", "signal", "macros"] }
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 usgp-api.workspace = true
 usgp-audit.workspace = true
 usgp-db.workspace = true
@@ -19,6 +25,19 @@ usgp-wincfg.workspace = true
 usgp-proto.workspace = true
 usgp-crypto.workspace = true
 usgp-common.workspace = true
+# M2 (plan WU-0, section 4)
+zeroize.workspace = true
+
+[features]
+large-tests = []
+# PostgreSQL end-to-end test (tests/e2e_pg.rs, plan WU-3b/WU-7). Without
+# the USGP_TEST_PG_* variables the test fails; it never skips.
+pg-integration = []
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+usgp-image = { workspace = true, features = ["testkit"] }
+usgp-crypto = { workspace = true, features = ["test-pki"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros", "test-util"] }

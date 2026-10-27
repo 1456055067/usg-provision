@@ -51,6 +51,12 @@ cargo fuzz run <target> /tmp/work/<target> corpus/<target> -- -max_total_time=60
 |--------|-------|------------|
 | `dhcp_packet` | one DHCP/PXE message (`usgp-dhcp`) | no panic; every reply re-parses as a BOOTREPLY with `yiaddr` 0, none of options 1, 3, 51, 58, 59, xid and chaddr echoed, within the size limit, option 82 echoed byte-for-byte or absent |
 | `tftp_packet` | selector octet, then one packet or a transfer script (`usgp-tftp`) | no panic; parse/encode round trip; DATA blocks strictly increasing and never past the final block; no `Send` on a duplicate ACK; any opcode-5 datagram of 4 or more octets from the client TID ends the transfer (BOOT-005); retries within the cap; `Done` is final; DATA payload equals the file |
+| `wim_header` | the first bytes of a WIM file (`usgp-image` `parse_header`, `check_header`) | no panic; listed reason code on every refusal; accepted only with signature and `cbSize` 208; every field equals an independent LE read and resource headers re-encode; `check_header` keeps image count, boot index, part and chunk-size rules and agrees with `classify_flags`; `check_within` never accepts a range outside the file |
+| `wim_xml` | WIM XML resource, UTF-16LE + BOM; also as UTF-8 text (`parse_xml`, `parse_xml_str`) | no panic; listed reason code; `parse_xml` = decode + parse, accepted bytes re-encode; accepted result within every limit, indexes ≥ 1 and increasing, `NAME`/`DESCRIPTION` match their leaves; tighter limits never accept more |
+| `wim_lookup` | a lookup table (`parse_table`) for both compressions, three file lengths, two image limits | no panic; result and refusal equal an independent `check_entry` walk; entries re-encode; acceptance monotone in file length |
+| `wim_check` | a whole WIM file in memory (`check_wim` with the FIPS provider, `check_pe`) | no panic; listed reason code and operator text on every refusal; no `wim_check_stalled` unless progress stops it, and a stop at the first report never accepts; accepted: 1 to limit images, editions 1..N, boot index ≤ N, `check_pe` index in 1..N or `pe_no_usable_image` |
+| `xpress_chunk` | selector octet; decode (expected length + chunk) or round trip (`XpressDecoder`, `decode_xpress_chunk`, test encoder) | no panic; never writes past the expected length (sentinel); exact length (n - 1 and n + 1 fail); reused decoder equals a fresh one; own encoder output round-trips |
+| `api_json` | selector octet, then a JSON body, envelope, manifest payload or `If-Match` value (`usgp-proto`) | no panic; `body_too_large` exactly over the cap; parser detail ≤ 200 chars; requests, envelopes and manifests round-trip; validated requests are stable; `If-Match` accepted only in the canonical `"r<n>"` form |
 
 ## M1 run length
 
@@ -65,5 +71,31 @@ mkdir -p /tmp/work/dhcp_packet /tmp/work/tftp_packet
 cargo fuzz run dhcp_packet /tmp/work/dhcp_packet corpus/dhcp_packet -- -max_total_time=600 -max_len=1600
 cargo fuzz run tftp_packet /tmp/work/tftp_packet corpus/tftp_packet -- -max_total_time=600 -max_len=4096
 ```
+
+## M2 run length
+
+Milestone M2 (plan WU-9, §10; exit criterion 2) runs `wim_header`,
+`wim_xml` and `xpress_chunk` for 10 minutes each and `wim_lookup`,
+`wim_check` and `api_json` for 60 seconds, all with no crash, OOM or
+timeout:
+
+```sh
+cd fuzz
+cargo fuzz build
+for t in wim_header wim_xml xpress_chunk wim_lookup wim_check api_json; do mkdir -p /tmp/work/$t; done
+L='-rss_limit_mb=2048 -timeout=10 -print_final_stats=1'
+cargo fuzz run wim_header   /tmp/work/wim_header   corpus/wim_header   -- -max_total_time=600 -max_len=1024   $L
+cargo fuzz run wim_xml      /tmp/work/wim_xml      corpus/wim_xml      -- -max_total_time=600 -max_len=16384  $L
+cargo fuzz run xpress_chunk /tmp/work/xpress_chunk corpus/xpress_chunk -- -max_total_time=600 -max_len=70000  $L
+cargo fuzz run wim_lookup   /tmp/work/wim_lookup   corpus/wim_lookup   -- -max_total_time=60  -max_len=4096   $L
+cargo fuzz run wim_check    /tmp/work/wim_check    corpus/wim_check    -- -max_total_time=60  -max_len=262144 $L
+cargo fuzz run api_json     /tmp/work/api_json     corpus/api_json     -- -max_total_time=60  -max_len=70000  $L
+```
+
+The WIM and XPRESS targets link the AWS-LC crypto module through
+`usgp-image` and `usgp-crypto` (decision 0001 and its Amendment 1, the
+same tree as the main workspace); `wim_check` uses it for the WIM format
+SHA-1. Besides that, the only native code in the fuzz workspace is
+libFuzzer (decision 0002). No shipped crate changes for fuzzing.
 
 Seeds are regenerated with the commands in each `corpus/<target>/SOURCE.md`.

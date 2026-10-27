@@ -87,24 +87,30 @@ for b in "${bins[@]}"; do
     failures+=("$b: not built at $path")
     continue
   fi
+  # Capture each tool's full output first and match with here-strings. A
+  # `producer | grep -q` pipeline under `set -o pipefail` reports failure when
+  # grep exits on the first match and the producer then dies of SIGPIPE, which
+  # turned real matches into false negatives.
   syms="$(nm "$path" 2> /dev/null || true)"
-  if ! echo "$syms" | grep -qE "$fips_re"; then
+  deps="$(dynamic_deps "$path" 2> /dev/null || true)"
+  if ! grep -qE "$fips_re" <<< "$syms"; then
     failures+=("$b: no FIPS module symbols (aws_lc_fips_*) found")
   fi
-  if echo "$syms" | grep -qE "$nonfips_re"; then
+  if grep -qE "$nonfips_re" <<< "$syms"; then
     failures+=("$b: links non-FIPS AWS-LC (aws_lc_<ver>_* symbols)")
   fi
-  if dynamic_deps "$path" | grep -qE 'libaws_lc_[0-9]'; then
+  if grep -qE 'libaws_lc_[0-9]' <<< "$deps"; then
     failures+=("$b: dynamically links non-FIPS AWS-LC")
   fi
   case "$host_os" in
     Linux)
       # Static linkage: no AWS-LC shared library at all, and the FIPS module
       # symbols are defined in the binary (not merely referenced).
-      if dynamic_deps "$path" | grep -qE 'libaws_lc'; then
+      if grep -qE 'libaws_lc' <<< "$deps"; then
         failures+=("$b: AWS-LC linked dynamically; the Linux build must be static")
       fi
-      if ! nm --defined-only "$path" 2> /dev/null | grep -qE "$fips_re"; then
+      defined="$(nm --defined-only "$path" 2> /dev/null || true)"
+      if ! grep -qE "$fips_re" <<< "$defined"; then
         failures+=("$b: FIPS module symbols not defined in the binary (not statically linked)")
       fi
       run=("$path")

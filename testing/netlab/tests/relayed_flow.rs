@@ -105,7 +105,7 @@ fn relayed_discover_offer_request_ack() -> TestResult {
 }
 
 #[test]
-fn every_negative_vector_survives_both_tools() -> TestResult {
+fn every_vector_survives_both_tools() -> TestResult {
     // The lab tools must not panic on the probe's own hostile input.
     let (agent, mut site) = lab()?;
     let src = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 68);

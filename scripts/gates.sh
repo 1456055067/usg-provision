@@ -85,6 +85,7 @@ expect_exit() {
 # Pure-Rust check for the separate testing/ workspaces: the same crate
 # pattern and allowlist as scripts/check-pure-rust.sh (REL-M1-003 tracks
 # moving this into that script).
+# shellcheck disable=SC2317 # invoked indirectly, through `run pure_rust_ws`
 pure_rust_ws() {
   local dir=$1 hits h bad=0
   local pattern='^([A-Za-z0-9_-]+-sys|cc|bindgen|cmake|pkg-config|vcpkg|cxx|cxx-build|link-cplusplus|nasm-rs|openssl-src|autotools) v'
@@ -140,7 +141,9 @@ run_in testing/uefi-payload cargo test --locked --target "$host_triple" --lib
 run_in testing/netlab cargo fmt --all --check
 run_in testing/netlab cargo clippy --locked --all-targets -- -D warnings
 if [ "$(uname -s)" != Linux ]; then
-  if (cd testing/netlab && rustup target list --installed | grep -qx x86_64-unknown-linux-gnu); then
+  # Here-string, not a pipe: `grep -q` exiting early must not SIGPIPE rustup
+  # under pipefail and turn a match into a miss.
+  if grep -qx x86_64-unknown-linux-gnu <<< "$(cd testing/netlab && rustup target list --installed)"; then
     run_in testing/netlab cargo clippy --locked --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
   else
     skip "rustup target x86_64-unknown-linux-gnu not installed" "netlab clippy for Linux"

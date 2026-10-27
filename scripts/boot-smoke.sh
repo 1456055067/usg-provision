@@ -39,6 +39,9 @@
 #   USGP_QEMU_USER                          user for QEMU (default $SUDO_USER)
 #   USGP_ACCEL                              kvm or tcg (default: detect)
 #   USGP_BOOT_DEADLINE                      seconds per boot (120 KVM, 300 TCG)
+#   USGP_FALLTHROUGH_DEADLINE               seconds for a boot that must fall
+#                                           through to the disk (S6, S7;
+#                                           default 2 x boot deadline + 180)
 #   USGP_PREFLIGHT_DEADLINE                 PXE check seconds (60 KVM, 150 TCG)
 #   USGP_SB_REFUSAL_PATTERN                 optional extended regex; a serial
 #                                           line matching it also counts as
@@ -123,6 +126,7 @@ CONTENT_BROKEN=""
 ACCEL=""
 BASE_DEADLINE=0
 LONG_DEADLINE=0
+FALL_DEADLINE=0
 QEMU_USER=""
 QEMU_UID=""
 QEMU_GID=""
@@ -133,17 +137,35 @@ RELAY_LOG=""
 DHCPD_LOG=""
 AGENT_LOG=""
 DROP=(setpriv --reuid=65534 --regid=65534 --clear-groups
-  --inh-caps=-all,+net_bind_service,+net_raw
-  --ambient-caps=-all,+net_bind_service,+net_raw
-  --bounding-set=-all,+net_bind_service,+net_raw
+  "--inh-caps=-all,+net_bind_service,+net_raw"
+  "--ambient-caps=-all,+net_bind_service,+net_raw"
+  "--bounding-set=-all,+net_bind_service,+net_raw"
   --no-new-privs)
 P_REL=(--iface p0 --local "$PROBE_ADDR" --server "$RELAY_ADDR")
+# Fall-through guests (S5, S6, S7) run with the firmware's IPv6 network
+# stack switched off through this fw_cfg item, so after IPv4 PXE the only
+# network option left on a NIC is IPv4 HTTP boot and the next NIC or the
+# disk follows. Checked against Ubuntu 24.04 ovmf 2024.02-2ubuntu0.10
+# (OVMF_CODE_4M.fd and OVMF_CODE_4M.secboot.fd, the hashes recorded in
+# environment.txt): the item name is in the firmware, and a guest started
+# with it tries PXEv4, HTTPv4, then the disk instead of PXEv4, PXEv6,
+# HTTPv4, HTTPv6, then the disk (each failed network option costs about
+# 60 s of firmware timeouts). Firmware without the item ignores it; the
+# fall-through deadline still covers the full sequence.
+FW_IPV6_OFF="name=opt/org.tianocore/IPv6Support,string=no"
+# OVMF serial line for a failed IPv4 PXE boot option.
+PXE4_FAIL_RE='failed to load Boot[0-9A-Fa-f]+ "UEFI PXEv4'
 
 usage() {
   sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # ------------------------------------------------------------ utilities --
+
+# Matching rule: `grep -q` never reads from a pipe in this script. Under
+# `set -o pipefail`, grep exiting on the first match can kill the producer
+# with SIGPIPE and turn a match into a failure; outputs are captured first
+# and matched through here-strings instead.
 
 say() { printf '%s\n' "$*"; }
 progress() { printf 'boot-smoke: %s\n' "$*" >&2; }
@@ -354,7 +376,7 @@ cleanup() {
   if [ "$HOST_OS" = Linux ] && [ "$(id -u)" -eq 0 ]; then
     local ns
     for ns in "${NAMESPACES[@]}"; do
-      if ip netns list 2> /dev/null | grep -q -w -- "$ns"; then
+      if grep -q -w -- "$ns" <<< "$(ip netns list 2> /dev/null)"; then
         ip netns pids "$ns" 2> /dev/null | xargs -r kill -KILL 2> /dev/null || true
         ip netns delete "$ns" 2> /dev/null || true
       fi
@@ -461,15 +483,24 @@ pick_accel() {
   BASE_DEADLINE="${USGP_BOOT_DEADLINE:-$base}"
   PREFLIGHT_DEADLINE="${USGP_PREFLIGHT_DEADLINE:-$pre}"
   LONG_DEADLINE=$((BASE_DEADLINE * 2))
+  # Firmware network timeouts, not CPU speed, dominate a fall-through
+  # boot: about 60 s per failed network boot option, four options per NIC
+  # if the IPv6 switch above is not honoured.
+  FALL_DEADLINE="${USGP_FALLTHROUGH_DEADLINE:-$((LONG_DEADLINE + 180))}"
 }
 
 # ------------------------------------------------------------------ VMs --
 
-# vm_start <label> <normal|secure> <none|disk> <tap=mac> [<tap=mac>]
-# Starts QEMU in the background; sets VM_PID and VM_SERIAL.
+# vm_start <label> <normal|secure> <none|disk> [--ipv4-only] <tap=mac> [<tap=mac>]
+# Starts QEMU in the background; sets VM_PID and VM_SERIAL. --ipv4-only
+# passes FW_IPV6_OFF to the firmware (fall-through scenarios).
 vm_start() {
-  local label="$1" fw="$2" disk="$3"
+  local label="$1" fw="$2" disk="$3" v4only=0
   shift 3
+  if [ "${1:-}" = --ipv4-only ]; then
+    v4only=1
+    shift
+  fi
   local code vars machine
   if [ "$fw" = secure ]; then
     code="$OVMF_SB_CODE"
@@ -489,11 +520,16 @@ vm_start() {
   local args=(-machine q35 -m 512 -display none -no-reboot
     -serial "file:$VM_SERIAL" -accel "$ACCEL")
   if [ "$fw" = secure ]; then
-    args=(-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on
+    args=(-machine "q35,smm=on" -global "driver=cfi.pflash01,property=secure,value=on"
       -m 512 -display none -no-reboot -serial "file:$VM_SERIAL" -accel "$ACCEL")
   fi
   args+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
     -drive "if=pflash,format=raw,unit=1,file=$vcopy")
+  local fwopt=""
+  if [ "$v4only" -eq 1 ]; then
+    args+=(-fw_cfg "$FW_IPV6_OFF")
+    fwopt=" fw_cfg=$FW_IPV6_OFF"
+  fi
   local idx=1 nic tap mac
   if [ "$#" -eq 0 ]; then
     args+=(-nic none)
@@ -522,7 +558,7 @@ vm_start() {
   ${pre[@]+"${pre[@]}"} qemu-system-x86_64 "${args[@]}" > "$qlog" 2>&1 &
   VM_PID=$!
   PIDS+=("$VM_PID")
-  evidence "qemu $label: pid=$VM_PID machine=$machine accel=$ACCEL firmware=$fw nics=$* disk=$disk"
+  evidence "qemu $label: pid=$VM_PID machine=$machine accel=$ACCEL firmware=$fw nics=$* disk=$disk$fwopt"
   return 0
 }
 
@@ -783,7 +819,7 @@ wait_log() { # <file> <offset> <fixed string> <secs> <pid>
   local dl
   dl=$(($(now) + $4))
   while [ "$(now)" -lt "$dl" ]; do
-    since "$1" "$2" | grep -q -F -- "$3" && return 0
+    grep -q -F -- "$3" <<< "$(since "$1" "$2")" && return 0
     kill -0 "$5" 2> /dev/null || return 1
     sleep 0.5
   done
@@ -892,7 +928,7 @@ lab_up() {
   # Remove leftovers of an interrupted earlier run (our names only).
   local ns
   for ns in "${NAMESPACES[@]}"; do
-    if ip netns list 2> /dev/null | grep -q -w -- "$ns"; then
+    if grep -q -w -- "$ns" <<< "$(ip netns list 2> /dev/null)"; then
       ip netns pids "$ns" 2> /dev/null | xargs -r kill -KILL 2> /dev/null || true
       ip netns delete "$ns" 2> /dev/null || true
     fi
@@ -1119,7 +1155,7 @@ s3() {
   cp "$LAB/payload.orig" "$f"
   rdl=$(($(now) + RECHECK_SECS * 4 + 10))
   while [ "$(now)" -lt "$rdl" ]; do
-    if relay_find "$roff2" relay.state.changed | grep -q -E '(^|[^a-z_])to[^a-z_]+running([^_a-z]|$)'; then
+    if grep -q -E '(^|[^a-z_])to[^a-z_]+running([^_a-z]|$)' <<< "$(relay_find "$roff2" relay.state.changed)"; then
       rec=0
       break
     fi
@@ -1141,9 +1177,9 @@ s4() {
   probe offer-4011 dhcp-offer "${P_REL[@]}" --port 4011 --expect-file "$PAYLOAD_NAME" --seed 42 > /dev/null
   probe vectors dhcp-vectors "${P_REL[@]}" --expect-file "$PAYLOAD_NAME" --seed 43 > /dev/null
   vlog="$OUT/probe/vectors.log"
-  for x in non-pxe arch-0-bios; do
-    line="$(grep -F "check=vector:" "$vlog" | grep -F -- "$x" | sed -n 1p)"
-    echo "$line" | grep -q 'result=PASS'
+  for x in opt60-non-pxe arch-0-bios; do
+    line="$(grep -F -- "check=vector:$x result=" "$vlog" | sed -n 1p)"
+    grep -q 'result=PASS' <<< "$line"
     note $? "vector $x got no reply: $(short "$line")"
   done
   # The giaddr-* vectors' replies would go to that giaddr, which the probe
@@ -1176,7 +1212,7 @@ s4() {
   ip netns exec "$NS_RELAY" ss -H -ulpn > "$ss_out" 2>&1
   mine="$(grep -F "pid=$RELAY_PID," "$ss_out")"
   for x in "0.0.0.0%relay0:67" "$RELAY_ADDR%relay0:4011" "$RELAY_ADDR%relay0:69"; do
-    printf '%s\n' "$mine" | awk '{print $4}' | grep -q -x -F -- "$x"
+    grep -q -x -F -- "$x" <<< "$(printf '%s\n' "$mine" | awk '{print $4}')"
     note $? "relay socket bound at $x"
   done
   bad="$(printf '%s\n' "$mine" | awk 'NF {print $4}' | grep -v -F '%relay0:')"
@@ -1203,7 +1239,7 @@ s5() {
   roff="$(lines "$RELAY_LOG")"
   doff="$(lines "$DHCPD_LOG")"
   evidence "firmware $OVMF_SB_CODE sha256=$(sha256_of "$OVMF_SB_CODE"); vars $OVMF_SB_VARS sha256=$(sha256_of "$OVMF_SB_VARS")"
-  vm_start s5 secure none "tapA=$mac1" "tapA2=$mac2" || {
+  vm_start s5 secure none --ipv4-only "tapA=$mac1" "tapA2=$mac2" || {
     record S5 FAIL "QEMU did not start"
     return
   }
@@ -1257,6 +1293,10 @@ s5() {
   note "$done_tx" "relay delivered the verified payload to the Secure Boot guest (tftp.transfer.completed to ${ip1:-no lease})"
   [ -n "$line_tx" ] && evidence "relay: $(short "$line_tx")"
   evidence "ok: no $MARK_NET in $path within the deadline"
+  local refused
+  if refused="$(first_match "$path" -E "$PXE4_FAIL_RE")"; then
+    evidence "serial: $(short "${refused#*:}")"
+  fi
   if [ "$fall" -eq 0 ]; then
     evidence "ok: firmware refused the image: boot manager moved to the next boot option after the download: $(short "$line_fall")"
   elif [ "$pat" -eq 0 ]; then
@@ -1267,13 +1307,40 @@ s5() {
   finish S5 "unsigned payload refused by Secure Boot firmware; relay does not weaken it (exit 5)"
 }
 
-# Network boot expected to fall through to the disk payload.
+# first_match <file> <-E|-F> <pattern>: "<line number>:<line>" of the first
+# matching line (carriage returns removed); status 1 if none.
+first_match() {
+  [ -f "$1" ] || return 1
+  grep -a -n -m 1 "$2" -- "$3" "$1" | tr -d '\r' | grep .
+}
+
+# Network boot expected to fall through to the disk payload. Positive
+# evidence of the fall-through: the firmware reports that the IPv4 PXE boot
+# option failed, and only after that does the disk payload print its
+# marker (uefi-boot-manager.md §5: on failure the boot manager tries the
+# next boot option).
 check_fallback() {
-  local serial="$1"
+  local serial="$1" pxe="" disk="" e16 st=1
   serial_has "$serial" "$MARK_DISK"
   note $? "serial $serial contains $MARK_DISK (disk fallback ran)"
   serial_has "$serial" "$MARK_NET"
   note_absent $? "no $MARK_NET in $serial"
+  pxe="$(first_match "$serial" -E "$PXE4_FAIL_RE")"
+  disk="$(first_match "$serial" -F "$MARK_DISK")"
+  if [ -n "$pxe" ] && [ -n "$disk" ] && [ "${pxe%%:*}" -lt "${disk%%:*}" ]; then
+    st=0
+  fi
+  note "$st" "serial shows the IPv4 PXE boot option failed (line ${pxe%%:*}) before $MARK_DISK (line ${disk%%:*})"
+  [ -n "$pxe" ] && evidence "serial: $(short "${pxe#*:}")"
+  if e16="$(first_match "$serial" -F "PXE-E16")"; then
+    evidence "serial: $(short "${e16#*:}")"
+  fi
+  # Informational: whether the firmware honoured FW_IPV6_OFF.
+  if grep -a -q -E 'UEFI (PXEv6|HTTPv6)' "$serial" 2> /dev/null; then
+    evidence "note: firmware still tried IPv6 boot options (fw_cfg IPv6Support not honoured)"
+  else
+    evidence "note: no IPv6 boot option tried (fw_cfg IPv6Support honoured)"
+  fi
 }
 
 s6() {
@@ -1283,13 +1350,13 @@ s6() {
   set_suppression "$(printf 'schema_version = 1\n\n[[device]]\nmac = "%s"\nnote = "boot smoke S6"\n' "$mac")"
   note $? "relay loaded a suppression list naming $mac (suppression.loaded)"
   roff="$(lines "$RELAY_LOG")"
-  vm_start s6-suppressed normal "$LAB/disk" "tapA=$mac" || {
+  vm_start s6-suppressed normal "$LAB/disk" --ipv4-only "tapA=$mac" || {
     record S6 FAIL "QEMU did not start"
     return
   }
   pid="$VM_PID"
   serial="$VM_SERIAL"
-  vm_wait "$pid" "$serial" "$LONG_DEADLINE" "$MARK_NET" "$MARK_DISK"
+  vm_wait "$pid" "$serial" "$FALL_DEADLINE" "$MARK_NET" "$MARK_DISK"
   vm_finish "$pid" s6-suppressed "$serial"
   path="$FIN_PATH"
   check_fallback "$path"
@@ -1303,7 +1370,7 @@ s6() {
   local doff
   roff="$(lines "$RELAY_LOG")"
   doff="$(lines "$DHCPD_LOG")"
-  vm_start s6-lifted normal "$LAB/disk" "tapA=$mac" || {
+  vm_start s6-lifted normal "$LAB/disk" --ipv4-only "tapA=$mac" || {
     record S6 FAIL "QEMU did not start (second boot)"
     return
   }
@@ -1325,14 +1392,14 @@ s7() {
   stop_pid "$DHCPD_PID"
   evidence "lab-dhcpd (pid $DHCPD_PID) stopped: no site DHCP on segment A"
   roff="$(lines "$RELAY_LOG")"
-  vm_start s7 normal "$LAB/disk" "tapA=$mac" || {
+  vm_start s7 normal "$LAB/disk" --ipv4-only "tapA=$mac" || {
     record S7 FAIL "QEMU did not start"
     start_dhcpd
     return
   }
   pid="$VM_PID"
   serial="$VM_SERIAL"
-  vm_wait "$pid" "$serial" "$LONG_DEADLINE" "$MARK_NET" "$MARK_DISK"
+  vm_wait "$pid" "$serial" "$FALL_DEADLINE" "$MARK_NET" "$MARK_DISK"
   vm_finish "$pid" s7 "$serial"
   path="$FIN_PATH"
   check_fallback "$path"

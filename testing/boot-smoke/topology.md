@@ -77,6 +77,40 @@ Effect on the scenarios (finding BOOT-007):
 Each scenario uses its own MAC, so per-client rate limits from one
 scenario do not affect the next.
 
+## Guest boot options in fall-through scenarios
+
+S6 and S7 expect a guest's network boot to fail and the boot manager to
+move on to the disk (`specs/standards/uefi-boot-manager.md` §5); S5 expects
+it to move on after the firmware refuses the image. OVMF creates four
+network boot options per NIC (IPv4 PXE, IPv6 PXE, IPv4 HTTP, IPv6 HTTP),
+and QEMU's `bootindex` on the NIC places all four ahead of the disk. Each
+failed network option costs about 60 s of firmware timeouts, so the disk
+came up only after about 250 s, past the first CI run's deadline.
+
+The harness therefore starts these guests with the fw_cfg item
+`opt/org.tianocore/IPv6Support=no` (`vm_start --ipv4-only`), which turns
+off the firmware's IPv6 network stack. The guest then tries IPv4 PXE, IPv4
+HTTP, and the disk (about 120 s). This was checked against Ubuntu 24.04's
+ovmf package 2024.02-2ubuntu0.10, the build the CI runner used (same
+SHA-256 for `OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`,
+`OVMF_CODE_4M.secboot.fd` and `OVMF_VARS_4M.ms.fd` as in the run's
+`environment.txt`): the item name is present in both firmware builds, and
+a guest started with it skipped both IPv6 options. Neither that build nor
+QEMU offers a switch for IPv4 HTTP boot, and `-boot strict=on` does not
+remove it (also checked). Firmware that does not know the item ignores it.
+
+As a fallback, the fall-through deadline (`USGP_FALLTHROUGH_DEADLINE`,
+default twice the boot deadline plus 180 s: 420 s with KVM, 780 s with
+TCG) covers the full four-option sequence. The wait ends as soon as a
+marker appears, so the longer deadline costs time only when a scenario is
+failing.
+
+Besides the disk marker, S6 and S7 require positive evidence of the
+fall-through on the serial console: the firmware's line reporting that the
+IPv4 PXE boot option failed (`failed to load Boot#### "UEFI PXEv4 ...`)
+must come before the disk payload's marker. The `PXE-E16` line and whether
+any IPv6 option was tried are recorded as evidence.
+
 ## Evidence
 
 Each run writes to `target/boot-smoke/run-<UTC time>/` (or

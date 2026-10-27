@@ -36,9 +36,9 @@ pattern='tan[i]um'
 export LC_ALL=C
 
 if [ "${NAMES_FORCE_GREP:-0}" != "1" ] && command -v rg > /dev/null 2>&1; then
-  matcher=rg
+  matcher="rg"
 else
-  matcher=grep
+  matcher="grep"
 fi
 
 errs="$(mktemp)"

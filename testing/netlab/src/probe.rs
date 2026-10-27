@@ -1,9 +1,15 @@
-//! Sans-IO parts of `lab-probe`: crafted DHCP requests, the negative vector
-//! set, random packets, and the checks applied to every reply.
+//! Sans-IO parts of `lab-probe`: crafted DHCP requests, the vector set,
+//! random packets, and the checks applied to every reply.
 //!
 //! The vector set follows the DHCP list in plan section 10.2, built with this
-//! crate's own codec. Every vector is a request the boot service must not
-//! answer (REQ-BOOT-004, 005, 006). Vectors that the plan expects to be
+//! crate's own codec. Almost every vector is a request the boot service must
+//! not answer (REQ-BOOT-004, 005, 006; [`Expect::NoReply`]). The exception is
+//! repeated options: a receiver joins every instance of a code into one value
+//! and judges the joined value (RFC 3396 §4, §7;
+//! `specs/standards/dhcp-long-options.md` §3). A request whose repeated or
+//! split options join into valid values is a normal PXE request and must get
+//! a normal lease-free reply ([`Expect::ProxyReply`]); one whose joined value
+//! is invalid must get none. Other vectors that the plan expects to be
 //! answered (for example option 57 = 575, or option 52 values 1 to 3 with a
 //! well-formed overload area) are not in this set; the product's unit tests
 //! cover them.
@@ -13,6 +19,7 @@
 //! - SPEC: specs/boot-network.md#REQ-BOOT-004, #REQ-BOOT-005, #REQ-BOOT-006,
 //!   #REQ-BOOT-010, #REQ-BOOT-044
 //! - RFC 2131 §2, RFC 2132 §2, §9.3, RFC 4578 §2.1 to §2.3
+//! - RFC 3396 §4 to §7 - repeated options are joined before validation
 
 use std::net::Ipv4Addr;
 
@@ -133,12 +140,31 @@ fn remove_option(m: &mut Message, code: u8) {
     m.options.retain(|o| o.code != code);
 }
 
-fn duplicate_option(m: &mut Message, code: u8, data: Vec<u8>) {
-    set_option(m, code, data.clone());
-    m.options.push(DhcpOption::new(code, data));
+/// Encodes `code` as one instance per piece, in order (an RFC 3396 §6
+/// split): the first piece replaces the existing instance in place, the
+/// rest are appended, so the pieces need not be adjacent (RFC 3396 §5).
+fn split_option(m: &mut Message, code: u8, pieces: &[&[u8]]) {
+    let mut rest = pieces.iter();
+    if let Some(first) = rest.next() {
+        set_option(m, code, first.to_vec());
+    }
+    for piece in rest {
+        m.options.push(DhcpOption::new(code, piece.to_vec()));
+    }
 }
 
-/// One negative vector.
+/// What the boot service must do with a vector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expect {
+    /// No reply of any kind (REQ-BOOT-004, 005, 006).
+    NoReply,
+    /// A normal ProxyDHCP reply that passes [`check_proxy_reply`] and
+    /// [`check_reply_options`]: the vector is a valid PXE request once its
+    /// repeated options are joined (RFC 3396 §7).
+    ProxyReply,
+}
+
+/// One vector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Vector {
     /// Stable name, printed with the result.
@@ -151,6 +177,8 @@ pub struct Vector {
     /// wrongly sent one (giaddr pointing elsewhere); the harness must then
     /// check the service's log for this xid instead.
     pub observable: bool,
+    /// The required outcome.
+    pub expect: Expect,
 }
 
 /// The BOOTP minimum message length a receiver enforces (pxe-dhcp.md
@@ -179,9 +207,12 @@ fn pad_options_then(mut b: Vec<u8>, tail: &[u8]) -> Vec<u8> {
     b
 }
 
-/// Builds the negative vector set (plan section 10.2, DHCP list).
-/// `service_addr` is the boot service's own address, for the "giaddr is
-/// ours" vector.
+/// Builds the vector set (plan section 10.2, DHCP list). `service_addr` is
+/// the boot service's own address, for the "giaddr is ours" vector.
+///
+/// Option 82 vectors are built only in relayed mode: option 82 is added by
+/// relay agents (RFC 3046 §2.1), and what a boot service does with a
+/// client-originated option 82 (`giaddr` = 0) is not specified.
 pub fn vectors(mode: Mode, seed: u32, service_addr: Ipv4Addr) -> Vec<Vector> {
     let mut out = Vec::new();
     let mut n = 0u32;
@@ -189,15 +220,19 @@ pub fn vectors(mode: Mode, seed: u32, service_addr: Ipv4Addr) -> Vec<Vector> {
         n += 1;
         Ident::nth(seed, n)
     };
-    let push_msg = |out: &mut Vec<Vector>, name: &str, id: Ident, m: Message| {
+    let push_expect = |out: &mut Vec<Vector>, name: &str, id: Ident, m: Message, expect: Expect| {
         if let Ok(bytes) = m.encode() {
             out.push(Vector {
                 name: name.to_owned(),
                 xid: id.xid,
                 bytes: pad_after_end(bytes),
                 observable: true,
+                expect,
             });
         }
+    };
+    let push_msg = |out: &mut Vec<Vector>, name: &str, id: Ident, m: Message| {
+        push_expect(out, name, id, m, Expect::NoReply);
     };
     let raw = |out: &mut Vec<Vector>, name: &str, id: Ident, bytes: Vec<u8>| {
         out.push(Vector {
@@ -205,8 +240,10 @@ pub fn vectors(mode: Mode, seed: u32, service_addr: Ipv4Addr) -> Vec<Vector> {
             xid: id.xid,
             bytes,
             observable: true,
+            expect: Expect::NoReply,
         });
     };
+    let relayed = matches!(mode, Mode::Relayed(_));
     let valid = |id: Ident| pxe_discover(mode, id).encode().unwrap_or_default();
 
     // Size.
@@ -388,8 +425,18 @@ pub fn vectors(mode: Mode, seed: u32, service_addr: Ipv4Addr) -> Vec<Vector> {
         push_msg(&mut out, name, id, m);
     }
 
-    // Duplicates of each critical option.
+    // Two identical copies of each critical option. A receiver joins them
+    // (RFC 3396 §4, §7), so the outcome depends on the joined value:
+    // - 43 (on a DISCOVER the server ignores vendor data, RFC 2132 §8.4),
+    //   60 (still starts with "PXEClient"), 61 (opaque client identifier),
+    //   82 (two well-formed sub-options) and 93 (0,7,0,7: even, lists 7)
+    //   join into valid values and must be answered normally;
+    // - 52 and 53 (one octet each), 54 (4), 57 (2), 94 (3) and 97 (17) have
+    //   fixed lengths, so the doubled value is malformed and must be dropped.
     for code in [43u8, 52, 53, 54, 57, 60, 61, 82, 93, 94, 97] {
+        if code == opt::RELAY_AGENT_INFO && !relayed {
+            continue;
+        }
         let id = next();
         let mut m = pxe_discover(mode, id);
         let data = match code {
@@ -412,8 +459,105 @@ pub fn vectors(mode: Mode, seed: u32, service_addr: Ipv4Addr) -> Vec<Vector> {
             opt::CLIENT_NDI => vec![1, 3, 0],
             _ => guid_option(id),
         };
-        duplicate_option(&mut m, code, data);
-        push_msg(&mut out, &format!("duplicate-opt{code}"), id, m);
+        split_option(&mut m, code, &[&data, &data]);
+        let expect = match code {
+            opt::VENDOR_SPECIFIC
+            | opt::VENDOR_CLASS
+            | opt::CLIENT_ID
+            | opt::RELAY_AGENT_INFO
+            | opt::CLIENT_ARCH => Expect::ProxyReply,
+            _ => Expect::NoReply,
+        };
+        push_expect(&mut out, &format!("duplicate-opt{code}"), id, m, expect);
+    }
+
+    // Split options (RFC 3396 §6): one value cut at an arbitrary octet.
+    // Split points carry no meaning (§6, §7), so each joined value is judged
+    // as if it had been sent whole.
+    let splits: Vec<(&str, u8, Vec<Vec<u8>>, Expect)> = vec![
+        // Valid once joined: the "PXEClient" prefix, the architecture
+        // pair, the NDI and the GUID straddle the split.
+        (
+            "split-opt60-prefix",
+            opt::VENDOR_CLASS,
+            vec![b"PXECl".to_vec(), b"ient:Arch:00007:UNDI:003000".to_vec()],
+            Expect::ProxyReply,
+        ),
+        (
+            "split-opt93-pair",
+            opt::CLIENT_ARCH,
+            vec![vec![0], vec![7]],
+            Expect::ProxyReply,
+        ),
+        (
+            "split-opt94",
+            opt::CLIENT_NDI,
+            vec![vec![1], vec![3, 0]],
+            Expect::ProxyReply,
+        ),
+        // Invalid once joined, though one piece alone would pass: the
+        // joined class does not start with "PXEClient" (REQ-BOOT-004), and
+        // the joined option 93 has an odd length (RFC 4578 §2.1).
+        (
+            "split-opt60-non-pxe",
+            opt::VENDOR_CLASS,
+            vec![b"usgp-".to_vec(), PXE_VENDOR_CLASS.to_vec()],
+            Expect::NoReply,
+        ),
+        (
+            "split-opt93-odd",
+            opt::CLIENT_ARCH,
+            vec![vec![0, 7], vec![0]],
+            Expect::NoReply,
+        ),
+    ];
+    for (name, code, pieces, expect) in splits {
+        let id = next();
+        let mut m = pxe_discover(mode, id);
+        let refs: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+        split_option(&mut m, code, &refs);
+        push_expect(&mut out, name, id, m, expect);
+    }
+    // Option 97: the 17-octet GUID cut in two (valid), and the same with
+    // one extra octet (18 joined octets, invalid; RFC 4578 §2.3).
+    for (name, extra, expect) in [
+        ("split-opt97", &[][..], Expect::ProxyReply),
+        ("split-opt97-len-18", &[0u8][..], Expect::NoReply),
+    ] {
+        let id = next();
+        let mut m = pxe_discover(mode, id);
+        let g = guid_option(id);
+        let (a, b) = g.split_at(9);
+        let tail: Vec<u8> = b.iter().chain(extra).copied().collect();
+        split_option(&mut m, opt::CLIENT_UUID, &[a, &tail]);
+        push_expect(&mut out, name, id, m, expect);
+    }
+    // Option 43 on a boot-server REQUEST: tag 71 cut inside its value. The
+    // sub-options are parsed only after joining (dhcp-long-options.md §3).
+    for (name, pieces, expect) in [
+        (
+            "split-opt43-tag71",
+            [&[71u8, 4, 0][..], &[0, 0, 0, 255][..]],
+            Expect::ProxyReply,
+        ),
+        (
+            "split-opt43-tag71-len-3",
+            [&[71u8, 3, 0][..], &[0, 0, 255][..]],
+            Expect::NoReply,
+        ),
+    ] {
+        let id = next();
+        let mut m = pxe_boot_request(mode, id, Ipv4Addr::UNSPECIFIED);
+        split_option(&mut m, opt::VENDOR_SPECIFIC, &pieces);
+        push_expect(&mut out, name, id, m, expect);
+    }
+    // Option 82 (relayed mode): sub-option 1 cut inside its value; the
+    // echo must be the joined value (RFC 3046 §2.2, RFC 3396 §7).
+    if relayed {
+        let id = next();
+        let mut m = pxe_discover(mode, id);
+        split_option(&mut m, opt::RELAY_AGENT_INFO, &[&[1, 3, b'l'], b"ab"]);
+        push_expect(&mut out, "split-opt82", id, m, Expect::ProxyReply);
     }
 
     // Addresses: these replies would go to giaddr, not to the probe.
@@ -433,6 +577,7 @@ pub fn vectors(mode: Mode, seed: u32, service_addr: Ipv4Addr) -> Vec<Vector> {
                 xid: id.xid,
                 bytes,
                 observable: false,
+                expect: Expect::NoReply,
             });
         }
     }
@@ -460,6 +605,55 @@ pub fn check_lease_free(reply: &Message) -> Result<(), String> {
         if reply.option(code).is_some() {
             return Err(format!("lease option {code} present"));
         }
+    }
+    Ok(())
+}
+
+/// Option 53 judged on its joined value (RFC 3396 §7): one octet, a known
+/// type.
+fn joined_message_type(m: &Message) -> Option<codec::MessageType> {
+    match m.option_joined(opt::MESSAGE_TYPE).as_deref() {
+        Some(&[t]) => codec::MessageType::from_code(t),
+        _ => None,
+    }
+}
+
+/// Options a ProxyDHCP reply may always carry: 53, 54 and 60 (plan
+/// section 1.1 "Offer content"; pxe-dhcp.md §7 step 3a) and 93, 94 and 97
+/// (pxe-dhcp.md §5.5, RFC 4578 §2.1 to §2.3).
+pub const REPLY_OPTIONS: [u8; 6] = [
+    opt::MESSAGE_TYPE,
+    opt::SERVER_ID,
+    opt::VENDOR_CLASS,
+    opt::CLIENT_ARCH,
+    opt::CLIENT_NDI,
+    opt::CLIENT_UUID,
+];
+
+/// Checks the option set of a ProxyDHCP reply to `req`: only
+/// [`REPLY_OPTIONS`], plus option 43 in answer to a boot-server REQUEST
+/// that carried option 43 (tag 71; pxe-dhcp.md §6, §7 step 3b) and option
+/// 82 when the request carried it; no code repeated; and an option 82 echo
+/// equal to the request's joined option 82 (RFC 3046 §2.2, RFC 3396 §7).
+pub fn check_reply_options(req: &Message, reply: &Message) -> Result<(), String> {
+    let boot_server_request = joined_message_type(req) == Some(codec::MessageType::Request)
+        && req.option(opt::VENDOR_SPECIFIC).is_some();
+    let relay_info = req.option_joined(opt::RELAY_AGENT_INFO);
+    for o in &reply.options {
+        let allowed = REPLY_OPTIONS.contains(&o.code)
+            || (o.code == opt::VENDOR_SPECIFIC && boot_server_request)
+            || (o.code == opt::RELAY_AGENT_INFO && relay_info.is_some());
+        if !allowed {
+            return Err(format!("option {} not allowed in a proxy reply", o.code));
+        }
+        if reply.option_count(o.code) > 1 {
+            return Err(format!("option {} repeated in the reply", o.code));
+        }
+    }
+    if let Some(echo) = reply.option(opt::RELAY_AGENT_INFO)
+        && relay_info.as_deref() != Some(echo)
+    {
+        return Err("option 82 echo differs from the request's joined option 82".to_owned());
     }
     Ok(())
 }
@@ -561,17 +755,19 @@ impl Rng {
 }
 
 /// Whether a decoded request is one a correct ProxyDHCP service could
-/// legitimately answer: a PXE DISCOVER or REQUEST whose option 93 lists 7.
-/// Random packets for which this is true are regenerated.
+/// legitimately answer: a PXE DISCOVER or REQUEST whose option 93 lists 7,
+/// judged on joined option values (RFC 3396 §7). Random packets for which
+/// this is true are regenerated.
 pub fn could_be_served(m: &Message) -> bool {
     let pxe = m
-        .option(opt::VENDOR_CLASS)
+        .option_joined(opt::VENDOR_CLASS)
         .is_some_and(|v| v.starts_with(b"PXEClient"));
+    // RFC 4578 §2.1: even, non-zero length; one of the pairs is 7.
     let arch7 = m
-        .option(opt::CLIENT_ARCH)
-        .is_some_and(|v| v.as_chunks::<2>().0.contains(&[0, 7]));
+        .option_joined(opt::CLIENT_ARCH)
+        .is_some_and(|v| v.len() % 2 == 0 && v.as_chunks::<2>().0.contains(&[0, 7]));
     let kind = matches!(
-        m.message_type(),
+        joined_message_type(m),
         Some(codec::MessageType::Discover | codec::MessageType::Request)
     );
     m.op == OP_REQUEST && pxe && arch7 && kind
@@ -651,10 +847,120 @@ mod tests {
             "opt60-absent",
             "arch-0-bios",
             "duplicate-opt97",
+            "duplicate-opt82",
+            "split-opt60-prefix",
+            "split-opt82",
+            "split-opt43-tag71",
             "chaddr-all-zero",
             "tag71-credentials-bit",
         ] {
             assert!(names.contains(&want), "{want}");
+        }
+    }
+
+    /// RFC 3396: repeated options are joined, and the joined value decides.
+    /// Vectors that must be answered are valid PXE requests once joined;
+    /// the split negatives are invalid only once joined.
+    #[test]
+    fn repeated_option_vectors_follow_rfc3396() {
+        let relay = Ipv4Addr::new(10, 20, 1, 9);
+        for mode in [Mode::Direct, Mode::Relayed(relay)] {
+            let v = vectors(mode, 9, SVC);
+            let get = |n: &str| v.iter().find(|x| x.name == n);
+            let answered: Vec<&str> = v
+                .iter()
+                .filter(|x| x.expect == Expect::ProxyReply)
+                .map(|x| x.name.as_str())
+                .collect();
+            for x in v.iter().filter(|x| x.expect == Expect::ProxyReply) {
+                let m = Message::decode(&x.bytes).unwrap();
+                assert!(could_be_served(&m), "{}", x.name);
+                assert!(x.observable, "{}", x.name);
+                assert!(x.bytes.len() >= BOOTP_MIN_LEN, "{}", x.name);
+                // Something really is repeated.
+                assert!(
+                    m.options.iter().any(|o| m.option_count(o.code) > 1),
+                    "{}",
+                    x.name
+                );
+            }
+            for code in [43u8, 60, 61, 93] {
+                let n = format!("duplicate-opt{code}");
+                assert!(answered.contains(&n.as_str()), "{mode:?} {n}");
+            }
+            for code in [52u8, 53, 54, 57, 94, 97] {
+                let x = get(&format!("duplicate-opt{code}")).unwrap();
+                assert_eq!(x.expect, Expect::NoReply, "{code}");
+                let m = Message::decode(&x.bytes).unwrap();
+                assert_eq!(m.option_count(code), 2, "{code}");
+            }
+            let m = Message::decode(&get("split-opt60-prefix").unwrap().bytes).unwrap();
+            assert_eq!(m.option_count(opt::VENDOR_CLASS), 2);
+            assert_eq!(
+                m.option_joined(opt::VENDOR_CLASS).as_deref(),
+                Some(PXE_VENDOR_CLASS)
+            );
+            assert!(
+                !m.option(opt::VENDOR_CLASS)
+                    .unwrap()
+                    .starts_with(b"PXEClient")
+            );
+            let m = Message::decode(&get("split-opt93-pair").unwrap().bytes).unwrap();
+            assert_eq!(m.option_joined(opt::CLIENT_ARCH), Some(vec![0, 7]));
+            let m = Message::decode(&get("split-opt94").unwrap().bytes).unwrap();
+            assert_eq!(m.option_joined(opt::CLIENT_NDI), Some(vec![1, 3, 0]));
+            let x = get("split-opt97").unwrap();
+            let m = Message::decode(&x.bytes).unwrap();
+            assert_eq!(m.option_count(opt::CLIENT_UUID), 2);
+            assert_eq!(m.option_joined(opt::CLIENT_UUID).map(|g| g.len()), Some(17));
+            let m = Message::decode(&get("split-opt43-tag71").unwrap().bytes).unwrap();
+            assert_eq!(
+                m.option_joined(opt::VENDOR_SPECIFIC),
+                Some(vec![71, 4, 0, 0, 0, 0, 255])
+            );
+            assert_eq!(joined_message_type(&m), Some(codec::MessageType::Request));
+            // Negatives: one piece alone would pass, the joined value fails.
+            let x = get("split-opt60-non-pxe").unwrap();
+            assert_eq!(x.expect, Expect::NoReply);
+            let m = Message::decode(&x.bytes).unwrap();
+            assert!(
+                m.options
+                    .iter()
+                    .any(|o| o.code == opt::VENDOR_CLASS && o.data.starts_with(b"PXEClient"))
+            );
+            assert!(!could_be_served(&m));
+            let x = get("split-opt93-odd").unwrap();
+            assert_eq!(x.expect, Expect::NoReply);
+            let m = Message::decode(&x.bytes).unwrap();
+            assert_eq!(m.option(opt::CLIENT_ARCH), Some(&[0u8, 7][..]));
+            assert_eq!(m.option_joined(opt::CLIENT_ARCH), Some(vec![0, 7, 0]));
+            assert!(!could_be_served(&m));
+            let x = get("split-opt97-len-18").unwrap();
+            assert_eq!(x.expect, Expect::NoReply);
+            let m = Message::decode(&x.bytes).unwrap();
+            assert_eq!(m.option_joined(opt::CLIENT_UUID).map(|g| g.len()), Some(18));
+            let x = get("split-opt43-tag71-len-3").unwrap();
+            assert_eq!(x.expect, Expect::NoReply);
+            let m = Message::decode(&x.bytes).unwrap();
+            assert_eq!(
+                m.option_joined(opt::VENDOR_SPECIFIC),
+                Some(vec![71, 3, 0, 0, 0, 255])
+            );
+            // Option 82 vectors exist only where a relay agent sends them.
+            match mode {
+                Mode::Direct => {
+                    assert!(get("duplicate-opt82").is_none());
+                    assert!(get("split-opt82").is_none());
+                }
+                Mode::Relayed(_) => {
+                    assert_eq!(get("duplicate-opt82").unwrap().expect, Expect::ProxyReply);
+                    let m = Message::decode(&get("split-opt82").unwrap().bytes).unwrap();
+                    assert_eq!(
+                        m.option_joined(opt::RELAY_AGENT_INFO),
+                        Some(vec![1, 3, b'l', b'a', b'b'])
+                    );
+                }
+            }
         }
     }
 
@@ -782,6 +1088,62 @@ mod tests {
             ..OfferExpect::default()
         };
         assert!(check_proxy_reply(&req, &r, &other).is_err());
+    }
+
+    #[test]
+    fn reply_option_set_checks() {
+        let req = pxe_discover(Mode::Direct, Ident::nth(4, 1));
+        let mut good = good_reply(&req);
+        good.options
+            .push(DhcpOption::new(opt::CLIENT_NDI, [1, 3, 0]));
+        good.options.push(DhcpOption::new(
+            opt::CLIENT_UUID,
+            guid_option(Ident::nth(4, 1)),
+        ));
+        assert_eq!(check_reply_options(&req, &good), Ok(()));
+        // Option 43 only answers a boot-server REQUEST that carried it.
+        let mut r = good_reply(&req);
+        r.options
+            .push(DhcpOption::new(opt::VENDOR_SPECIFIC, tag71(&[0, 0, 0, 0])));
+        assert!(check_reply_options(&req, &r).is_err());
+        let boot = pxe_boot_request(Mode::Direct, Ident::nth(4, 2), Ipv4Addr::UNSPECIFIED);
+        let mut r = good_reply(&boot);
+        r.options
+            .push(DhcpOption::new(opt::VENDOR_SPECIFIC, tag71(&[0, 0, 0, 0])));
+        assert_eq!(check_reply_options(&boot, &r), Ok(()));
+        // Anything else, or a repeated code, is refused.
+        let mut r = good_reply(&req);
+        r.options
+            .push(DhcpOption::new(opt::TFTP_SERVER_NAME, b"x".to_vec()));
+        assert!(check_reply_options(&req, &r).is_err());
+        let mut r = good_reply(&req);
+        r.options.push(DhcpOption::new(opt::CLIENT_ARCH, [0, 7]));
+        assert!(
+            check_reply_options(&req, &r)
+                .unwrap_err()
+                .contains("repeated")
+        );
+        // Option 82: only when sent, and echoed as the joined value.
+        let mut r = good_reply(&req);
+        r.options
+            .push(DhcpOption::new(opt::RELAY_AGENT_INFO, [1, 1, b'x']));
+        assert!(check_reply_options(&req, &r).is_err());
+        let mut relayed = req.clone();
+        split_option(&mut relayed, opt::RELAY_AGENT_INFO, &[&[1, 3, b'l'], b"ab"]);
+        let mut r = good_reply(&relayed);
+        r.options.push(DhcpOption::new(
+            opt::RELAY_AGENT_INFO,
+            [1, 3, b'l', b'a', b'b'],
+        ));
+        assert_eq!(check_reply_options(&relayed, &r), Ok(()));
+        let mut r = good_reply(&relayed);
+        r.options
+            .push(DhcpOption::new(opt::RELAY_AGENT_INFO, [1, 3, b'l']));
+        assert!(
+            check_reply_options(&relayed, &r)
+                .unwrap_err()
+                .contains("82")
+        );
     }
 
     #[test]

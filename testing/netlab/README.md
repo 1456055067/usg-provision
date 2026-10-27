@@ -76,7 +76,18 @@ configured limits: burst + refill over the run (for the defaults, 8 + 10 s /
 Vectors whose reply would go to a `giaddr` other than the probe (the four
 `giaddr-*` vectors) print `observable=false`. A PASS for them only means the
 probe saw nothing; the harness must also check the relay log for their xid.
-`lab-probe dhcp-vectors --list` prints the vector names.
+`lab-probe dhcp-vectors --list` prints the vector names and expectations.
+
+Repeated options follow RFC 3396 (`specs/standards/dhcp-long-options.md`
+§3): a receiver joins every instance of a code and judges the joined value.
+The `duplicate-opt*` and `split-opt*` vectors whose joined values are valid
+(`expect=proxy-reply`) must get a normal reply: a lease-free BOOTREPLY with
+`yiaddr` 0 that passes the ProxyDHCP checks, carries only options 53, 54,
+60, 93, 94 and 97 (plus 43 for a boot-server REQUEST and 82 as the joined
+echo), and repeats no code. Those whose joined values are invalid (for
+example option 93 of odd length, or option 60 that does not start with
+`PXEClient` although one piece does) must get no reply. Option 82 vectors
+are sent only in relayed mode.
 
 ## Tests
 

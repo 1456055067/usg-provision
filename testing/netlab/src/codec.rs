@@ -275,6 +275,17 @@ impl Message {
         self.options.iter().filter(|o| o.code == code).count()
     }
 
+    /// The value of `code` as a receiver must interpret it: every instance
+    /// joined in the order received (RFC 3396 §4, §5, §7;
+    /// `specs/standards/dhcp-long-options.md` §3). Only the main options
+    /// field is decoded (see the module note on option 52). `None` if the
+    /// option is absent.
+    pub fn option_joined(&self, code: u8) -> Option<Vec<u8>> {
+        let mut parts = self.options.iter().filter(|o| o.code == code).peekable();
+        parts.peek()?;
+        Some(parts.flat_map(|o| o.data.iter().copied()).collect())
+    }
+
     /// Option 53, if present with length 1 and a known value.
     pub fn message_type(&self) -> Option<MessageType> {
         match self.option(opt::MESSAGE_TYPE) {
@@ -687,6 +698,23 @@ mod tests {
         let m = Message::decode(&b).unwrap();
         assert_eq!(m.option_count(opt::MESSAGE_TYPE), 2);
         assert_eq!(m.message_type(), Some(MessageType::Discover));
+    }
+
+    #[test]
+    fn repeated_options_join_in_order() {
+        let mut m = discover();
+        m.options.retain(|o| o.code != opt::CLIENT_ARCH);
+        m.options.push(DhcpOption::new(opt::CLIENT_ARCH, [0]));
+        m.options.push(DhcpOption::new(opt::ROUTER, [10, 0, 0, 1]));
+        m.options.push(DhcpOption::new(opt::CLIENT_ARCH, [7, 0]));
+        m.options.push(DhcpOption::new(opt::CLIENT_ARCH, []));
+        let back = Message::decode(&m.encode().unwrap()).unwrap();
+        assert_eq!(back.option_joined(opt::CLIENT_ARCH), Some(vec![0, 7, 0]));
+        assert_eq!(back.option_joined(opt::ROUTER), Some(vec![10, 0, 0, 1]));
+        assert_eq!(back.option_joined(opt::SUBNET_MASK), None);
+        let mut e = discover();
+        e.options.push(DhcpOption::new(opt::SUBNET_MASK, []));
+        assert_eq!(e.option_joined(opt::SUBNET_MASK), Some(vec![]));
     }
 
     #[test]

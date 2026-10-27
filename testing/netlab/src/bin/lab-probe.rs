@@ -23,7 +23,7 @@ use tokio::net::UdpSocket;
 use tokio::time::{Instant, timeout_at};
 use usgp_netlab::args::{ArgError, Args};
 use usgp_netlab::codec::{self, Message};
-use usgp_netlab::probe::{self, Ident, Mode, OfferExpect, Rng};
+use usgp_netlab::probe::{self, Expect as VectorExpect, Ident, Mode, OfferExpect, Rng};
 use usgp_netlab::tftp::{self, ServerPacket};
 use usgp_netlab::{EXIT_USAGE, net};
 
@@ -34,8 +34,10 @@ DHCP commands (common: --iface IFACE --server ADDR [--mode relayed|direct]
   [--local ADDR] [--port 67|4011] [--wait-ms N] [--seed N]):
   dhcp-offer      one valid PXE request; expects a ProxyDHCP reply
                   [--expect-file NAME] [--expect-none] [--mac MAC]
-  dhcp-vectors    every negative vector gets no reply, then a valid
-                  request is answered [--only NAME] [--list] [--no-valid-after]
+  dhcp-vectors    every negative vector gets no reply, every vector whose
+                  repeated options join into valid values (RFC 3396) gets
+                  a normal reply, then a valid request is answered
+                  [--only NAME] [--list] [--no-valid-after]
   dhcp-random     random packets get no reply, then a valid request is
                   answered [--count N] [--per-sec N] [--no-valid-after]
   dhcp-rate       DISCOVERs from one chaddr at --per-sec N for --secs N get
@@ -146,7 +148,12 @@ async fn main() -> ExitCode {
     };
     if cmd == "dhcp-vectors" && args.flag("list") {
         for v in probe::vectors(Mode::Direct, 1, Ipv4Addr::UNSPECIFIED) {
-            println!("{} observable={}", v.name, v.observable);
+            println!(
+                "{} observable={} expect={}",
+                v.name,
+                v.observable,
+                expect_name(v.expect)
+            );
         }
         return ExitCode::SUCCESS;
     }
@@ -408,9 +415,39 @@ async fn dhcp_offer(args: &Args, report: &mut Report) -> Result<(), Failure> {
     Ok(())
 }
 
+fn expect_name(e: VectorExpect) -> &'static str {
+    match e {
+        VectorExpect::NoReply => "no-reply",
+        VectorExpect::ProxyReply => "proxy-reply",
+    }
+}
+
+/// Checks the replies to a vector that must be answered: at least one,
+/// and each one a lease-free ProxyDHCP reply (re-parsed by this crate's
+/// codec) carrying only the allowed options. Returns the failure reasons.
+fn check_answered(v: &probe::Vector, mine: &[&Message], expect: &OfferExpect) -> Vec<String> {
+    let Ok(req) = Message::decode(&v.bytes) else {
+        return vec!["vector does not decode".to_owned()];
+    };
+    if mine.is_empty() {
+        return vec!["no-reply".to_owned()];
+    }
+    let mut reasons = Vec::new();
+    for r in mine {
+        if let Err(e) = probe::check_proxy_reply(&req, r, expect) {
+            reasons.push(e);
+        }
+        if let Err(e) = probe::check_reply_options(&req, r) {
+            reasons.push(e);
+        }
+    }
+    reasons
+}
+
 async fn dhcp_vectors(args: &Args, report: &mut Report) -> Result<(), Failure> {
     let mut d = Dhcp::open(args).await?;
     let only: Option<String> = args.opt("only")?;
+    let expect = expectations(&d, args)?;
     let vectors = probe::vectors(d.mode, d.seed, d.server);
     let mut sent = 0;
     for v in vectors
@@ -419,24 +456,34 @@ async fn dhcp_vectors(args: &Args, report: &mut Report) -> Result<(), Failure> {
     {
         d.send(&v.bytes).await?;
         sent += 1;
-        let replies = d.collect_until(Instant::now() + d.wait).await;
-        let n = replies.iter().filter(|r| r.xid == v.xid).count();
-        report.record(
-            &format!("vector:{}", v.name),
-            n == 0,
-            &format!(
-                "xid={:#010x} len={} observable={} replies={n}",
-                v.xid,
-                v.bytes.len(),
-                v.observable
-            ),
+        let wait = match v.expect {
+            VectorExpect::NoReply => d.wait,
+            VectorExpect::ProxyReply => d.wait.max(Duration::from_secs(2)),
+        };
+        let replies = d.collect_until(Instant::now() + wait).await;
+        let mine: Vec<&Message> = replies.iter().filter(|r| r.xid == v.xid).collect();
+        let n = mine.len();
+        let reasons = match v.expect {
+            VectorExpect::NoReply if n == 0 => Vec::new(),
+            VectorExpect::NoReply => vec!["unexpected-reply".to_owned()],
+            VectorExpect::ProxyReply => check_answered(v, &mine, &expect),
+        };
+        let mut detail = format!(
+            "xid={:#010x} len={} observable={} expect={} replies={n}",
+            v.xid,
+            v.bytes.len(),
+            v.observable,
+            expect_name(v.expect)
         );
+        for e in &reasons {
+            detail.push_str(&format!(" reason=\"{e}\""));
+        }
+        report.record(&format!("vector:{}", v.name), reasons.is_empty(), &detail);
     }
     if sent == 0 {
         return Err(Failure::Usage("no vector matched --only".into()));
     }
     if !args.flag("no-valid-after") {
-        let expect = expectations(&d, args)?;
         d.valid_probe(
             "valid-after-vectors",
             Ident::nth(d.seed, 0xfe00),

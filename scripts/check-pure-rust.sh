@@ -49,7 +49,7 @@ members=()
 for dir in crates/*/ services/*/ tools/*/; do
   [ -f "$dir/Cargo.toml" ] || continue
   m="$(basename "$dir")"
-  pkg="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$dir/Cargo.toml" | head -n 1)"
+  pkg="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$dir/Cargo.toml" | sed -n 1p)"
   if [ "$pkg" != "$m" ]; then
     offenders+=("$dir: package name '$pkg' differs from directory name")
     continue
@@ -61,7 +61,7 @@ for m in "${members[@]}"; do
   tree="$(cargo tree --locked -p "$m" -e normal,build,dev --target all --prefix none)"
   # `--prune` errors if the spec is not in the member's graph, so prune only
   # members that actually reach usgp-crypto.
-  if [ "$m" != "usgp-crypto" ] && echo "$tree" | grep -qE '^usgp-crypto v'; then
+  if [ "$m" != "usgp-crypto" ] && grep -qE '^usgp-crypto v' <<< "$tree"; then
     tree="$(cargo tree --locked -p "$m" -e normal,build,dev --target all \
       --prune usgp-crypto --prefix none)"
   fi
@@ -88,8 +88,10 @@ for d in $deps; do
 done
 
 # Decision 0002: libFuzzer stays in the separate fuzz/ workspace.
-if cargo tree --locked --workspace -e all --target all --prefix none \
-  | grep -qE '^libfuzzer-sys v'; then
+# Captured first, then matched: `cargo tree | grep -q` under pipefail fails
+# when grep's early exit SIGPIPEs cargo, which would hide a match.
+ws_tree="$(cargo tree --locked --workspace -e all --target all --prefix none)"
+if grep -qE '^libfuzzer-sys v' <<< "$ws_tree"; then
   offenders+=("workspace: depends on libfuzzer-sys (decision 0002)")
 fi
 

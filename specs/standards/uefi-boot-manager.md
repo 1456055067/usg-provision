@@ -288,6 +288,26 @@ a reserved category are ignored (§3.1.3).
   `EFI_VARIABLE_NON_VOLATILE` = `0x1`,
   `EFI_VARIABLE_BOOTSERVICE_ACCESS` = `0x2`,
   `EFI_VARIABLE_RUNTIME_ACCESS` = `0x4` (§8.2.1).
+- Secure Boot state (SR-3b, AUDITED 2026-10-28; UEFI §3.3, Table 3.1).
+  These are in
+  the same `EFI_GLOBAL_VARIABLE` namespace. Each holds one byte (an
+  8-bit unsigned value). Their attributes are BS and RT (`0x00000006`),
+  not NV:
+  - `SecureBoot`: 1 means the firmware checks the signatures of
+    drivers and boot programs on this boot; 0 means it does not. It
+    must be 0 if the platform started in Setup or Audit Mode.
+    Read-only after initialisation.
+  - `SetupMode`: 1 means Secure Boot policy variables can be written
+    without authentication; 0 means writes need authentication. The
+    platform is in Setup Mode when `SetupMode` is 1 and `AuditMode`
+    and `DeployedMode` are both 0. Read-only.
+  - `AuditMode`: 1 means Audit Mode, 0 not; other values reserved.
+    Read-only once the OS has taken over.
+  - `DeployedMode`: 1 means Deployed Mode, 0 not; other values
+    reserved. Read-only once the OS has taken over.
+
+  **[reading]** From Windows these are read with
+  `GetFirmwareEnvironmentVariableEx` (topic 23 §9) as one-byte values.
 - Rules for writing (§8.2.3):
   - RT requires BS as well.
   - Writing an existing variable with different attributes fails with

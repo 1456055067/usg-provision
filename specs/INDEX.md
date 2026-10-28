@@ -449,4 +449,9 @@ decide.
     DISK-1, BOOT-5. **Summarised:
     `specs/standards/windows-storage-firmware-api.md`** (M3 build,
     AUDITED 2026-10-28; semantics only, no sample code; OPEN-WAPI-1 to
-    3).
+    3. SR-3b follow-up added §13 to §19 (volumes not on a disk, volume
+    lock and dismount, volume paths, system information, network
+    adapters, console echo, streams, hard links and security) and
+    OPEN-WAPI-4 to 6, AUDITED 2026-10-28 (the OPEN items stay open);
+    topic 5 §10.3 gained the Secure Boot state variables, AUDITED
+    2026-10-28).

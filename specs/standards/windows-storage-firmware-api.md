@@ -8,7 +8,8 @@ of Microsoft Learn reference pages: what each function or control code
 does, what it needs and how it reports failure. It is not a design.
 Which calls the product uses, and how it binds to them, is the clean
 side's choice (DEC-0019 records the binding choice; it adds no spec
-text).
+text). The follow-up request SR-3b (2026-10-28) added §13 to §19 and
+OPEN-WAPI-4 to 6 (AUDITED 2026-10-28; the OPEN items stay open).
 
 Sources: Microsoft Learn Win32 and driver reference pages, one page
 per function, structure or control code, named in each section below.
@@ -322,3 +323,344 @@ Microsoft facts, not product behaviour.
 - **OPEN-WAPI-3**: `IsServicePartition` and `PartitionOrdinal` in a
   partition entry (§5) have no description on Microsoft's page; what
   to put in them when writing a layout is not stated.
+- **OPEN-WAPI-4** (SR-3b, AUDITED): which error
+  `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` returns for a volume that is
+  not backed by a disk (RAM disk, CD/DVD, network or other virtual
+  volume). No Microsoft page read states it (§13). The Win32 page's
+  Remarks say only that the request is not supported over SMB 3.0,
+  which does not settle the code. Only an observation on Windows PE
+  itself can settle it; that is clean-side work.
+- **OPEN-WAPI-5** (SR-3b, AUDITED): which errors `FSCTL_LOCK_VOLUME` and
+  `FSCTL_DISMOUNT_VOLUME` return when the volume is in use, is a system
+  or page-file volume, or is locked by another process. The pages state
+  the conditions but name no error codes (§14).
+- **OPEN-WAPI-6** (SR-3b, AUDITED): the form of the link names that
+  `FindFirstFileNameW` and `FindNextFileNameW` return (for example
+  whether they include the drive) is not stated (§19).
+
+## 13. Volumes not backed by a disk (SR-3b item 3; AUDITED)
+
+Pages: "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS" (Win32, and the
+driver-reference page for the same request in ntddvol.h),
+"VOLUME_DISK_EXTENTS", "GetDriveTypeW function",
+"STORAGE_DEVICE_NUMBER". Background: `winpe.md` §9 (Windows PE runs
+from a RAM disk as drive `X:`).
+
+- **What Microsoft documents for the extents request.** The Win32 page
+  lists no error codes. The driver-reference page gives only the
+  buffer cases:
+  - output buffer smaller than the fixed structure: the request fails
+    with `STATUS_INVALID_PARAMETER` and returns no data;
+  - large enough for the fixed structure but not for every extent:
+    `STATUS_BUFFER_OVERFLOW`, with the fixed part (including the extent
+    count) filled in. The `VOLUME_DISK_EXTENTS` structure page reports
+    this case to Win32 callers as `ERROR_MORE_DATA` (§8);
+  - large enough: success, with every extent.
+  The driver page also says the request was first available only for
+  volumes on fixed disks, and for removable media from Windows 2000
+  SP4 and Windows XP SP1. The Win32 page's Remarks say the request is
+  not supported over SMB 3.0 (background only; it names no error
+  code).
+- **What it does not document.** No page read says what the request
+  returns for a RAM disk, an optical disc, a network volume or another
+  virtual volume. A search of Microsoft Learn found no statement
+  either, and no Microsoft page read confirms how the driver status
+  codes above map to Win32 error codes beyond `ERROR_MORE_DATA`
+  (**OPEN-WAPI-4**).
+- **Documented ways to classify a volume first.**
+  - `GetDriveType(root path)` (the root path needs a trailing
+    backslash) returns: `DRIVE_UNKNOWN` 0, `DRIVE_NO_ROOT_DIR` 1 (no
+    volume mounted there), `DRIVE_REMOVABLE` 2, `DRIVE_FIXED` 3,
+    `DRIVE_REMOTE` 4 (network), `DRIVE_CDROM` 5, `DRIVE_RAMDISK` 6. All
+    values are explicit on the page.
+  - `IOCTL_STORAGE_GET_DEVICE_NUMBER` (§7) reports a `DeviceType`.
+    Microsoft's list includes `FILE_DEVICE_DISK`, `FILE_DEVICE_CD_ROM`,
+    `FILE_DEVICE_DVD` and `FILE_DEVICE_VIRTUAL_DISK`; the page gives
+    the names but not their numbers (OPEN-WAPI-1).
+- **[reading]** From the documented behaviour alone, a failed extents
+  request cannot be told apart from "this volume is not on a disk" by
+  its error code. The documented classifications above answer the
+  question directly. How the agent combines them is clean-side
+  design.
+- **[project rule]** Whatever the combination, it fails closed: if
+  the checks cannot establish that a disk is eligible under
+  REQ-DISK-005 (in particular, that it does not carry the boot
+  environment), that disk is refused. Basis: `specs/disk.md`
+  REQ-DISK-005 and REQ-DISK-015; DEC-0018 item 8.
+
+## 14. Locking and dismounting a volume (SR-3b item 2; AUDITED)
+
+Pages: "FSCTL_LOCK_VOLUME", "FSCTL_DISMOUNT_VOLUME".
+
+- Both take a handle to the volume opened for direct access (the
+  pages show the `\\.\X:` form for a drive letter) with both
+  `FILE_SHARE_READ` and `FILE_SHARE_WRITE` sharing. No input or output
+  buffer.
+- **Lock.**
+  - It succeeds only if the volume is not in use: if any file on the
+    volume is open, it fails. A success means no files were open.
+  - It always fails on a system volume or one that holds a page file.
+  - Before locking, the system writes all cached data to the volume.
+  - Afterwards, the volume can be used only through the handle that
+    locked it.
+  - The lock lasts until `FSCTL_UNLOCK_VOLUME` is sent or that handle
+    is closed, including when the process ends.
+  - NTFS treats a locked volume as dismounted.
+- **Dismount.**
+  - It does **not** need a lock and does not check for open files. It
+    dismounts even a volume that is in use, which can harm processes
+    that do not hold a lock.
+  - It fails if another process holds the lock, and on a system or
+    page-file volume.
+  - After it, no files are open, but the system still sees the volume
+    and mounts it again as soon as anything accesses it. Without a
+    lock held, any process may cause that at any time.
+  - Microsoft's example order for changing a volume's file system:
+    open the volume, lock, do the work, dismount, unlock, close.
+- Error codes: neither page names the errors for "in use", "system or
+  page-file volume" or "locked by another process"
+  (**OPEN-WAPI-5**). The lock page says only that failures carry an
+  NT status.
+
+## 15. Volume paths and volume information (SR-3b item 1; AUDITED)
+
+Pages: "GetVolumePathNamesForVolumeNameW function",
+"DeleteVolumeMountPointW function", "GetVolumeInformationW function".
+
+- **`GetVolumePathNamesForVolumeName(volume GUID path, ...)`.**
+  - Returns every drive letter and mounted-folder path of the volume.
+  - The input must be a volume GUID path, `\\?\Volume{...}\`.
+  - The output is a list of null-terminated strings, ended by one more
+    null. The buffer length is in 16-bit characters and counts every
+    null.
+  - On success, the length output is the number of characters copied.
+    If the buffer is too small, the call fails with `ERROR_MORE_DATA`,
+    the length output gives the size needed, and the buffer holds as
+    much of the list as fits.
+  - **[reading]** A volume with no drive letter and no mounted folder
+    gives an empty list: just the closing null.
+- **`DeleteVolumeMountPoint(mount point)`.**
+  - Removes a drive letter or mounted folder. The argument needs a
+    trailing backslash.
+  - The folder itself is not deleted. Given a folder that is not a
+    mount point, it does nothing.
+  - Nonzero on success; zero on failure, with the reason from
+    `GetLastError`.
+- **`GetVolumeInformation(root path, ...)`.**
+  - The root path needs a trailing backslash. It returns the volume
+    label, the volume serial number, the longest name component, the
+    file-system flags and the file-system name (for example NTFS or
+    FAT).
+  - The label and name buffers are at most `MAX_PATH` + 1 characters.
+  - The serial number is the one the system assigns when the volume is
+    formatted, **not** the disk maker's hardware serial.
+  - Among the flags: `FILE_READ_ONLY_VOLUME` `0x00080000`,
+    `FILE_NAMED_STREAMS` `0x00040000`, `FILE_PERSISTENT_ACLS`
+    `0x00000008`, `FILE_SUPPORTS_HARD_LINKS` `0x00400000`.
+  - Returns nonzero only if **all** the requested information was
+    retrieved.
+  - For a floppy or CD drive with no medium, the system may show a
+    prompt unless critical-error prompts are turned off with
+    `SetErrorMode` (`SEM_FAILCRITICALERRORS`).
+
+## 16. Processor, memory, system directory (SR-3b items 4, 5; AUDITED)
+
+Pages: "GetNativeSystemInfo function", "SYSTEM_INFO",
+"GlobalMemoryStatusEx function", "MEMORYSTATUSEX",
+"GetSystemDirectoryW function".
+
+- **`GetNativeSystemInfo`** fills a `SYSTEM_INFO` and returns nothing.
+  - From a 64-bit program it is the same as `GetSystemInfo`.
+  - An x86 or x64 program emulated on a different 64-bit processor
+    (such as ARM64) sees the emulated architecture.
+  - `wProcessorArchitecture` values, all explicit:
+    `PROCESSOR_ARCHITECTURE_INTEL` 0 (x86), `_ARM` 5, `_IA64` 6,
+    `_AMD64` 9 (x64), `_ARM64` 12, `_UNKNOWN` `0xFFFF`.
+  - `dwNumberOfProcessors` counts the logical processors in the
+    current group.
+- **`GlobalMemoryStatusEx`** fills a `MEMORYSTATUSEX`.
+  - The caller **must set `dwLength`** to the structure's size before
+    the call.
+  - The call returns nonzero on success.
+  - `ullTotalPhys` is the physical memory in bytes. `ullAvailPhys` is
+    the physical memory that can be reused at once, in bytes.
+  - `dwMemoryLoad` is the percentage of memory in use, 0 to 100.
+  - The values change from call to call.
+- **`GetSystemDirectory(buffer, size in characters)`.**
+  - On success it returns the length copied, **not** counting the
+    terminating null.
+  - If the buffer is too small, it returns the size **needed,
+    including** the null.
+  - On failure it returns zero, with the reason from `GetLastError`.
+  - **[reading]** So a return value greater than or equal to the
+    buffer size means "too small". A return value smaller than the
+    buffer size means success.
+  - The path has no trailing backslash unless it is a root directory.
+
+## 17. Network adapters (SR-3b item 6; AUDITED)
+
+Pages: "GetAdaptersAddresses function", "IP_ADAPTER_ADDRESSES_LH",
+"IP_ADAPTER_UNICAST_ADDRESS_LH", "SOCKET_ADDRESS".
+
+- **Arguments.**
+  - Address family: `AF_UNSPEC` 0 (both), `AF_INET` 2 or `AF_INET6`
+    23.
+  - Flags: for example `GAA_FLAG_SKIP_ANYCAST` `0x2`,
+    `GAA_FLAG_SKIP_MULTICAST` `0x4`, `GAA_FLAG_SKIP_DNS_SERVER` `0x8`.
+    Zero returns unicast, anycast and multicast addresses.
+  - A reserved argument, which must be null.
+  - A caller-allocated buffer, and its size in bytes (in and out).
+- **Results.**
+  - The call returns the error code **directly**, not through
+    `GetLastError`.
+  - `ERROR_SUCCESS` (same as `NO_ERROR`) on success.
+  - `ERROR_BUFFER_OVERFLOW` if the buffer is too small or null; the
+    size argument then holds the size needed.
+  - `ERROR_NO_DATA` if no addresses match.
+  - `ERROR_INVALID_PARAMETER`, `ERROR_NOT_ENOUGH_MEMORY` and
+    `ERROR_ADDRESS_NOT_ASSOCIATED` are also listed.
+- **Sizing.**
+  - Microsoft recommends starting with a 15 KB buffer. That makes a
+    retry rare.
+  - Asking for the size with a small buffer first is discouraged,
+    because the size needed can change between calls when addresses
+    are added or removed.
+  - **[reading]** So after `ERROR_BUFFER_OVERFLOW` the buffer may need
+    to grow to the reported size and the call be retried.
+- **Layout.**
+  - The buffer holds a linked list of adapter records, joined by
+    `Next`. The list ends at a null `Next`.
+  - Each record's `Length` gives its own size; the size grew in later
+    Windows versions.
+  - The order of adapters follows the route metric (Windows 10 and
+    later).
+- **Fields used per adapter.**
+  - `AdapterName`: a permanent name that the user cannot change. Byte
+    characters, unlike `FriendlyName`.
+  - `PhysicalAddress` and `PhysicalAddressLength`: the hardware (MAC)
+    address and its length in bytes. The length is zero for interfaces
+    with no data-link layer. The array size constant
+    `MAX_ADAPTER_ADDRESS_LENGTH` is not given a number on the page.
+  - `Flags`: `IP_ADAPTER_DHCP_ENABLED` `0x0004` means DHCP is enabled.
+    Other flags: `IP_ADAPTER_IPV4_ENABLED` `0x0080`,
+    `IP_ADAPTER_IPV6_ENABLED` `0x0100`.
+  - `IfType` (IANA interface types): `IF_TYPE_OTHER` 1,
+    `IF_TYPE_ETHERNET_CSMACD` 6, `IF_TYPE_PPP` 23,
+    `IF_TYPE_SOFTWARE_LOOPBACK` 24, `IF_TYPE_IEEE80211` 71 (Wi-Fi),
+    `IF_TYPE_TUNNEL` 131, and others.
+  - `OperStatus` (RFC 2863): `IfOperStatusUp` 1, `Down` 2, `Testing`
+    3, `Unknown` 4, `Dormant` 5, `NotPresent` 6, `LowerLayerDown` 7.
+  - `Dhcpv4Server`: the DHCP server's address, for an adapter
+    configured by DHCP.
+  - `IfIndex` and `Ipv6IfIndex` may change when an adapter is
+    re-enabled. They are not lasting identities.
+- **Unicast addresses.**
+  - `FirstUnicastAddress` starts a second linked list, also joined by
+    `Next`.
+  - Each entry's `Address` is a pointer to a socket address plus its
+    length in bytes. The address family is the first field of the
+    socket address and tells IPv4 from IPv6.
+  - `OnLinkPrefixLength` gives the prefix length in bits; 255 is
+    commonly used to mean "not valid".
+  - The order of the list is not the order in which the addresses were
+    added. Duplicate addresses may appear (see `DadState`).
+  - The `Length` field again gives the entry's size.
+
+## 18. Console input without echo (SR-3b item 7; AUDITED)
+
+Pages: "GetStdHandle function", "GetConsoleMode function",
+"SetConsoleMode function".
+
+- **`GetStdHandle`.**
+  - Arguments: `STD_INPUT_HANDLE` (−10 as a 32-bit unsigned value,
+    4294967286), `STD_OUTPUT_HANDLE` (−11) and `STD_ERROR_HANDLE`
+    (−12).
+  - Returns `INVALID_HANDLE_VALUE` on failure. Returns **null** if the
+    process has no such standard handle.
+  - The handle may be a redirected file or pipe rather than the
+    console (`GetFileType` tells which).
+  - It need not be closed. Closing it closes it for the whole process.
+- **`GetConsoleMode` and `SetConsoleMode`.**
+  - Both need a console input or screen-buffer handle with
+    `GENERIC_READ` access, and return nonzero on success.
+  - **[reading]** On a redirected (non-console) handle they fail. The
+    pages say only that the handle must be a console buffer.
+- **Input mode flags.**
+  - `ENABLE_PROCESSED_INPUT` `0x0001`, `ENABLE_LINE_INPUT` `0x0002`,
+    `ENABLE_ECHO_INPUT` `0x0004`.
+  - **Echo works only together with line input.**
+  - All input modes except window and virtual-terminal input are on
+    when a console is created.
+- Echo and line input affect only `ReadFile` and `ReadConsole` reads.
+  `GetConsoleMode` reports the current mode and `SetConsoleMode`
+  replaces it.
+
+## 19. Streams, hard links, security (SR-3b item 8; AUDITED)
+
+Pages: "FindFirstStreamW function", "FindNextStreamW function",
+"WIN32_FIND_STREAM_DATA", "FindFirstFileNameW function",
+"FindNextFileNameW function", "GetFileSecurityW",
+"ConvertSecurityDescriptorToStringSecurityDescriptorW function",
+"GetFileInformationByHandleEx function", "FILE_ATTRIBUTE_TAG_INFO".
+
+- **Data streams.**
+  - `FindFirstStreamW(full file name, FindStreamInfoStandard (0),
+    output, 0)` returns a search handle and the first `$DATA` stream.
+    For a file, that is always the unnamed default stream `::$DATA`.
+    A directory has no unnamed stream but may have named ones.
+  - Each result holds the stream size in bytes and its name, in the
+    form `:name:$type`, so a named data stream is `:name:$DATA`. The
+    name buffer is `MAX_PATH` + 36 characters.
+  - No streams: the call fails with `ERROR_HANDLE_EOF` (38).
+  - File system without streams: the call fails with
+    `ERROR_INVALID_PARAMETER` (87).
+  - `FindNextStreamW` returns nonzero for each further stream. The
+    **end of the list** is a failure with `ERROR_HANDLE_EOF` (38).
+  - Close the handle with `FindClose`.
+- **Hard links.**
+  - `FindFirstFileNameW(file name, 0, length in/out, buffer)` returns a
+    search handle and the first of the file's link names.
+    `FindNextFileNameW` returns the rest.
+  - The length is in characters. If the buffer is too small, the call
+    fails with `ERROR_MORE_DATA` (234) and the length output is the
+    size needed.
+  - The end of the list is a failure with `ERROR_HANDLE_EOF`.
+  - Close the handle with `FindClose`.
+  - The pages do not say the form of the names returned
+    (**OPEN-WAPI-6**).
+- **`GetFileSecurityW(name, requested parts, buffer, size, size
+  needed)`.**
+  - Returns the file's security descriptor in self-relative form.
+  - If the size needed is larger than the buffer, **nothing** is
+    returned and the size-needed output gives the size. **[reading]**
+    The caller then retries with that size; the page does not name the
+    error code for this case.
+  - Reading the owner, group or DACL needs `READ_CONTROL` granted by
+    the DACL, or the caller must be the owner.
+  - Reading the SACL needs the `SE_SECURITY_NAME` privilege to be
+    enabled (§10).
+- **`ConvertSecurityDescriptorToStringSecurityDescriptorW`.**
+  - Arguments: the descriptor (absolute or self-relative form),
+    revision `SDDL_REVISION_1`, the parts to include, an output string
+    pointer and an optional length output.
+  - The output string is null-terminated and **must be freed with
+    `LocalFree`**.
+  - The length output is the size of the returned buffer in 16-bit
+    characters, **not** the number of characters in the string.
+    **[reading]** It may include the terminating null; use the string
+    up to its null.
+  - Listed errors: `ERROR_INVALID_PARAMETER`,
+    `ERROR_UNKNOWN_REVISION`, `ERROR_NONE_MAPPED` (an account could
+    not be looked up) and `ERROR_INVALID_ACL`. A null DACL with the
+    "DACL present" control bit set fails.
+  - `BACKUP_SECURITY_INFORMATION` is not applicable: with it, the call
+    reports success but returns a null string.
+- **`GetFileInformationByHandleEx(handle, class, buffer, size in
+  bytes)`.**
+  - Returns nonzero on success. The handle must not be a pipe.
+  - Class `FileAttributeTagInfo` (9, explicit) fills
+    `FILE_ATTRIBUTE_TAG_INFO`: `FileAttributes` and `ReparseTag`. The
+    structure page describes the members only as the attributes and
+    the reparse tag.
+  - **[reading]** The reparse tag is meaningful when the attributes
+    include the reparse-point attribute.

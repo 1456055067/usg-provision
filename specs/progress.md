@@ -1,8 +1,9 @@
 # Deployment progress and errors (JOB-1 for milestone M3)
 
 Status: AUDITED, partial (spec run M3, 2026-10-27; fix round 1,
-2026-10-28; re-audit round 1 approved with comments). AUDITED
-2026-10-28: REQ-JOB-001 to 009, 011 to 015. OPEN: 010.
+2026-10-28; re-audit rounds 1 and 2 approved with comments). AUDITED
+2026-10-28: REQ-JOB-001 to 009, 011 to 015 (012 changed for DEC-0018
+item 10, project rule). OPEN: 010.
 REQ range in use: `REQ-JOB-001` to `REQ-JOB-015`. JOB-2 to JOB-4
 (overview metrics, log collection, event forwarding) are not specced;
 numbers from `REQ-JOB-020` are kept for them.
@@ -83,7 +84,8 @@ overall percentage for the download step.
   where is not stated)
 - Basis: placement at the device and in the operator view is derived
 - Standards: none
-- Status: AUDITED (2026-10-28; how often the operator view refreshes is OPEN-JOB-1)
+- Status: AUDITED (2026-10-28; how often the operator view refreshes is
+  OPEN-JOB-1)
 
 ### What the person at the device sees
 
@@ -120,7 +122,8 @@ When a step fails, the device stops and shows an error that:
   by itself during troubleshooting)
 - Basis: item 3 is derived
 - Standards: none
-- Status: AUDITED (2026-10-28; what the person can then do is REQ-JOB-009, REQ-JOB-010)
+- Status: AUDITED (2026-10-28; what the person can then do is
+  REQ-JOB-009, REQ-JOB-010)
 
 ### REQ-JOB-006: Failure shown to the operator
 
@@ -211,16 +214,21 @@ naming the timeout.
 ### REQ-JOB-012: Job states
 
 A job is in exactly one of: *Running* (with its current step),
-*Succeeded*, *Failed* (with reason), *Cancelled*, or *Lost* (the product
-has not heard from the device for longer than an allowed interval). Every
-change of state is recorded with its time.
+*Succeeded*, *Failed* (with reason), or *Lost* (the product has not
+heard from the device for longer than an allowed interval). A job
+starts at the wipe confirmation and cannot be cancelled; a session
+cancelled before that never becomes a job (`specs/targeting.md`
+REQ-TGT-010, REQ-TGT-011). Every change of state is an audit record
+with its time.
 
 - Priority: MUST
 - Source: SRC-002 (outcome only: deployment status can be reported)
-- Basis: the state set is derived; *Lost* is project design
+- Basis: the state set is derived; *Lost* is project design; no
+  cancelled state and auditing of every state change are DEC-0018 item
+  10 (project rule, not described product behaviour)
 - Standards: none
-- Status: AUDITED (2026-10-28; the interval for *Lost* is OPEN-JOB-4; whether state
-  changes are audit records is `specs/targeting.md` REQ-TGT-016, D-M3-8)
+- Status: AUDITED (2026-10-28, re-audit round 2, after the change for
+  DEC-0018 item 10. The interval for *Lost* is OPEN-JOB-4)
 
 ### REQ-JOB-013: Success
 
@@ -266,7 +274,6 @@ product's interface.
 ```text
 Running(step 1) -> Running(step 2) -> ... -> Running(step 5) -> Succeeded
 Running(any) -> Failed(reason)          (REQ-JOB-005, REQ-JOB-006)
-Running(any) -> Cancelled               (if allowed, targeting REQ-TGT-011)
 Running(any) -> Lost                    (no report within the interval)
 Lost -> Running | Failed | Succeeded    (when the device reports again)
 ```

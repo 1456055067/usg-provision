@@ -1,9 +1,10 @@
 # Target disk handling (DISK-1 for milestone M3)
 
-Status: AUDITED, partial (spec run M3, 2026-10-27; fix round 1,
-2026-10-28; re-audit round 1 approved with comments). AUDITED
-2026-10-28: REQ-DISK-001, 003, 004, 007 to 015. OPEN: 002, 005, 006,
-016.
+Status: AUDITED (spec run M3, 2026-10-27; fix round 1, 2026-10-28;
+re-audit rounds 1 and 2 approved with comments). AUDITED
+2026-10-28: REQ-DISK-001 to 016 (002, 005, 006 and 016 settled by
+DEC-0018 items 7 and 8, project rules; re-audit round 2). No REQ is
+OPEN; OPEN-DISK-1 to 4 remain.
 REQ range in use: `REQ-DISK-001` to `REQ-DISK-016`. DISK-2 (eMMC) is not
 specced; numbers from `REQ-DISK-030` are kept for it and for legacy BIOS
 layouts (BOOT-3).
@@ -59,18 +60,20 @@ reason they cannot be used.
 - Standards: none
 - Status: AUDITED (2026-10-28)
 
-### REQ-DISK-002: Several eligible disks
+### REQ-DISK-002: One or several eligible disks [project rule]
 
 When there are several eligible disks the device preselects none of
-them; the person must pick one. When exactly one is eligible, whether it
-is preselected or picked automatically is not settled.
+them; the person must pick one. When exactly one is eligible, it is
+still shown to the person, who must confirm it; it is never used
+without that confirmation (REQ-DISK-006).
 
-- Priority: SHOULD
+- Priority: MUST
 - Source: SRC-001 (the person selects the disk)
-- Basis: "no preselection with several disks" is project design
+- Basis: DEC-0018 item 8 (a single eligible disk is still shown for
+  confirmation; project rule, not described product behaviour); "no
+  preselection with several disks" is project design
 - Standards: none
-- Status: OPEN (D-M3-5: with a single eligible disk, still ask, or
-  preselect and ask only for the wipe confirmation? No public source.)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 8)
 
 ### REQ-DISK-003: No eligible disk
 
@@ -106,44 +109,51 @@ shows the disk's size and the minimum.
 - Status: AUDITED (2026-10-28; whether an operator may lower the minimum is
   OPEN-DISK-1)
 
-### REQ-DISK-005: Removable disks and the boot media disk
+### REQ-DISK-005: Removable disks and the boot media disk [project rule]
 
-A disk the environment reports as removable media, and any disk the
-environment itself was started from, are not eligible.
+A disk the environment reports as removable media, and any disk that
+carries the boot environment itself, are not eligible. They are refused
+with the reason shown (REQ-DISK-001).
 
-- Priority: MUST (proposed)
+- Priority: MUST
 - Source: none (no public source describes this refusal)
-- Basis: project design proposal; Microsoft distinguishes removable media
-  from fixed disks (SRC-085) and WinPE reports where it booted from
-  (SRC-096)
+- Basis: DEC-0018 item 8 (removable disks and the disk carrying the boot
+  environment are refused; project rule, not described product
+  behaviour); showing the reason is project design; Microsoft
+  distinguishes removable media from fixed disks (SRC-085) and WinPE
+  reports where it booted from (SRC-096)
 - Standards: `specs/standards/gpt.md` §11, §12; `specs/standards/
   winpe.md` §5.3
-- Status: OPEN (D-M3-5: adopt? Are USB-attached fixed disks eligible?
-  For network boot the second clause rarely applies; it matters for boot
-  media, MEDIA-1.)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 8.
+  Whether a USB-attached disk that reports itself as fixed is eligible
+  is OPEN-DISK-4. For network boot the second clause rarely applies; it
+  matters for boot media, MEDIA-1.)
 
 ### Before the wipe
 
-### REQ-DISK-006: Show and confirm before wiping
+### REQ-DISK-006: Show and confirm before wiping [project rule]
 
 Before anything is written to the chosen disk, the device shows: the
 disk's identity as in REQ-DISK-001; that every partition and all data on
 it will be destroyed; and the existing partitions it holds, with their
 sizes and any volume labels it can read. The wipe starts only after the
 person explicitly confirms, with an action distinct from the one used to
-choose the disk. Declining returns to the disk choice or cancels
-(`specs/targeting.md` REQ-TGT-010).
+choose the disk. In release R1 no mode skips this confirmation.
+Declining returns to the disk choice or cancels (`specs/targeting.md`
+REQ-TGT-010). The person's authorisation of the wipe is durably
+recorded as an audit record before anything is written to the disk; if
+it cannot be recorded, nothing is written.
 
-- Priority: MUST (proposed)
+- Priority: MUST
 - Source: SRC-087 (Microsoft's reference deployment flow warns that all
   data on the disk will be deleted and asks for confirmation before
   erasing)
-- Basis: project design following Microsoft's reference practice; no
-  vendor source describes the confirmation screen
+- Basis: DEC-0018 item 7 (explicit wipe confirmation, mandatory and
+  separate from disk selection, never skipped in release R1, durably
+  recorded before any write; project rule, not described product
+  behaviour); no vendor source describes the confirmation screen
 - Standards: `specs/standards/gpt.md` §10
-- Status: OPEN (D-M3-4: adopt as MUST? Does a mode needing no input at
-  the device (REQ-TGT-007)
-  ever skip it?)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 7)
 
 ### REQ-DISK-007: Wipe the chosen disk
 
@@ -284,7 +294,7 @@ install, including disks that hold earlier operating systems or data.
 - Standards: none
 - Status: AUDITED (2026-10-28)
 
-### REQ-DISK-016: Existing contents are not read out
+### REQ-DISK-016: Existing contents are not read out [project rule]
 
 The environment reads only what it needs to describe the disk
 (REQ-DISK-001, REQ-DISK-006). It does not copy or send any file content
@@ -292,10 +302,10 @@ from existing partitions to the product.
 
 - Priority: MUST
 - Source: none (project security requirement; no vendor source)
-- Basis: project design (data minimisation)
+- Basis: DEC-0018 item 8 (the product never reads out existing disk
+  contents; project rule, not described product behaviour)
 - Standards: none
-- Status: OPEN (D-M3-5: confirm as project rule; needs a decision record
-  to cite)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 8)
 
 ## States and transitions (target disk)
 
@@ -327,7 +337,8 @@ disk's earlier contents are gone.
 ## Security expectations
 
 - Destructive action needs an explicit, separate confirmation at the
-  device (REQ-DISK-006) and touches only the chosen disk (REQ-DISK-015).
+  device, recorded before any write (REQ-DISK-006), and touches only the
+  chosen disk (REQ-DISK-015).
 - Existing data is not exfiltrated (REQ-DISK-016).
 - Disk-level encryption of the new install (BitLocker) and secure
   sanitisation are out of scope (INDEX Unconfirmed; RET-1).
@@ -350,4 +361,8 @@ disk's earlier contents are gone.
 - **OPEN-DISK-3**: is the Windows recovery environment placed in and
   registered for the recovery partition (Microsoft's samples do this
   from the applied Windows), or is the partition only created?
-- **D-M3-4**: REQ-DISK-006. **D-M3-5**: REQ-DISK-002, 005, 016.
+- **OPEN-DISK-4**: is a USB-attached disk that reports itself as fixed
+  (not removable) eligible? DEC-0018 item 8 covers removable disks and
+  the boot-environment disk only.
+- REQ-DISK-002, 005, 006 and 016 are settled by DEC-0018 items 7 and 8
+  (project rules).

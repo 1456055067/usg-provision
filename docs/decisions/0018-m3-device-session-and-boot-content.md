@@ -1,7 +1,7 @@
 # 0018: M3 Device Session, Boot Content and Install Defaults
 
-- Status: Accepted in part. Items 1–4 were accepted by the owner on
-  2026-10-28. Items 5–10 are proposed defaults, pending owner acceptance.
+- Status: Accepted (owner, 2026-10-28). Items 1–4 and items 5–10 were
+  accepted in two steps on the same day.
 - Date: 2026-10-28
 - Decider: project owner
 - Refines: decisions 0004 (boot scope), 0006 (WIM by black-box samples), 0010
@@ -41,7 +41,8 @@ Items 1–4 were accepted by the owner on 2026-10-28.
   Windows APIs and verifies content before every write. Microsoft's
   servicing tool is not used to apply images.
 
-Items 5–10 are proposed defaults, pending owner acceptance.
+Items 5–10 were proposed as defaults and accepted by the owner on
+2026-10-28.
 
 - **5. Boot chain (D-2).** WinPE boots through Microsoft's boot program from
   the operator's PE boot kit. No third-party chain-loader is used, and

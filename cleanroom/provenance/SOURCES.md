@@ -346,6 +346,43 @@ comments, 2026-10-28):
   uefi-boot-manager.md §9. Still OPEN: REQ-TGT-006, 007, 010, 011, 016;
   REQ-DISK-002, 005, 006, 016; REQ-JOB-010; REQ-BOOT-067.
 
+DEC-0018 items 5 to 10 accepted (2026-10-28):
+
+- No fetches and no searches. The content of items 5 to 10 comes from
+  the orchestrator's message; the researcher did not open the decision
+  record.
+- The DEC-0018 row now says all items 1 to 10 are accepted and citable.
+- Settled as [project rule] and set to DRAFT for audit: REQ-TGT-006,
+  010, 011, 016; REQ-DISK-002, 005, 006, 016; REQ-BOOT-061 (was OPEN,
+  text unchanged), REQ-BOOT-067.
+- Changed for consistency and set back from AUDITED to DRAFT:
+  REQ-JOB-012 (no *Cancelled* job state; every state change audited;
+  item 10) and REQ-BOOT-065 (Basis cites item 9; text unchanged).
+- Item 5 is noted against OPEN-BOOT-SB; the choice of signing authority
+  stays open. Item 6 has no spec text.
+- Still OPEN: REQ-TGT-007, REQ-JOB-010, REQ-BOOT-062. New: OPEN-DISK-4,
+  whether a USB-attached disk that reports itself as fixed is eligible.
+- The wipe-authorisation record in REQ-DISK-006 is described by its
+  behaviour only; the project's internal event name is not used in
+  `specs/`.
+
+M3 re-audit round 2 (approve with comments, 2026-10-28):
+
+- No fetches and no searches.
+- CR-013: "in release R1" added wherever the wipe confirmation is said
+  never to be skipped (REQ-DISK-006, REQ-TGT-006, REQ-TGT-007 status).
+- CR-014: REQ-TGT-006 keeps MUST for showing the summary with the
+  mandatory wipe confirmation (item 7); the summary's content is
+  labelled project design.
+- CR-015: showing the refusal reason in REQ-DISK-005 is labelled project
+  design.
+- CR-016: REQ-TGT-016's Basis also cites item 7. The DEC-0018 row now
+  records that the auditor checked items 1 to 10 in rounds 1 and 2.
+- Marked AUDITED (2026-10-28): REQ-DISK-002, 005, 006, 016;
+  REQ-TGT-006, 010, 011, 016; REQ-JOB-012; REQ-BOOT-061, 065, 067.
+  Still OPEN: REQ-TGT-007, REQ-JOB-010, REQ-BOOT-062, and OPEN-DISK-1
+  to 4.
+
 ## Project decisions cited
 
 These are project design decisions, not product behaviour. They are
@@ -365,7 +402,7 @@ recorded in the repository and need no public-access check.
 | DEC-0014 | M2 WIM compression scope | `docs/decisions/0014-m2-wim-compression-scope.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | REQ-IMG-038 (M2 accepted and refused set); REQ-IMG-039 status note; os-images.md OPEN-IMG-C1 (M2 part); standards/wim-compression.md §7 M2 scope note; standards/wim.md §10 (split parts refused in M2, drift round; labelled [project rule] in fix round 2); INDEX IMG-2 |
 | DEC-0015 | M2 content and audit operating rules | `docs/decisions/0015-m2-content-and-audit-operating-rules.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | REQ-IMG-015 item 1 (item 2 of the decision); REQ-AUD-006 (item 1); REQ-AUD-007 (item 3); REQ-AUD-004, 005 status notes; os-images.md OPEN-IMG-D1; preinstall-env.md States; operator-access.md OPEN-AUD-1, OPEN-ACC-2; INDEX IMG-1, PE-1, RBAC-2, AUD-2 |
 | DEC-0017 | WIM header strictness | `docs/decisions/0017-wim-header-strictness.md` | 2026-10-27 (Accepted by owner 2026-10-27) | Project decision, not product behaviour | standards/wim.md §2 "Project rules on the header" (`cbSize` must be 208; offset 20 must be 32768 for XPRESS; CR-605, fix round 2); INDEX header note and topic 9 |
-| DEC-0018 | M3 device session and boot content | `docs/decisions/0018-m3-device-session-and-boot-content.md` | 2026-10-28 (Accepted in part (items 1 to 4) by owner 2026-10-28; items 5 to 10 proposed, not citable) | Project decision, not product behaviour. Content taken from the orchestrator's message; the decision record itself was not opened by the researcher (outside its read scope). The clean-room auditor checked items 1 to 4 against the record on 2026-10-28 (re-audit round 1) | Item 1 (session authorised by a short-lived, single-use operator-issued code or by operator approval; on by default; issue, use, approval and refusal audited): REQ-TGT-013, REQ-TGT-014, targeting.md "Security expectations" and "Out of scope". Item 2 (TFTP wrap-around; RFC 2348 large blocks when asked): REQ-BOOT-035 status, REQ-BOOT-064; standards/winpe-network-boot.md §7, OPEN-WPXE-4. Item 3 (operator builds the WinPE boot configuration with Microsoft's tool; the product imports and verifies it, never generates it): REQ-PE-012; standards/winpe-network-boot.md §6, OPEN-WPXE-3. Item 4 (the product applies the image with its own reader): REQ-PE-017. INDEX header, BOOT-1, BOOT-5, PE-1, TGT-1, topic 22 |
+| DEC-0018 | M3 device session and boot content | `docs/decisions/0018-m3-device-session-and-boot-content.md` | 2026-10-28 (Accepted (items 1 to 10) by owner 2026-10-28; all items citable. Items 1 to 4 were accepted first, items 5 to 10 later the same day) | Project decision, not product behaviour. Content taken from the orchestrator's message; the decision record itself was not opened by the researcher (outside its read scope). The clean-room auditor checked items 1 to 10 against the record on 2026-10-28 (re-audit rounds 1 and 2) | Item 1 (session authorised by a short-lived, single-use operator-issued code or by operator approval; on by default; issue, use, approval and refusal audited): REQ-TGT-013, REQ-TGT-014, targeting.md "Security expectations" and "Out of scope". Item 2 (TFTP wrap-around; RFC 2348 large blocks when asked): REQ-BOOT-035 status, REQ-BOOT-064; standards/winpe-network-boot.md §7, OPEN-WPXE-4. Item 3 (operator builds the WinPE boot configuration with Microsoft's tool; the product imports and verifies it, never generates it): REQ-PE-012; standards/winpe-network-boot.md §6, OPEN-WPXE-3. Item 4 (the product applies the image with its own reader): REQ-PE-017. Item 5 (Microsoft's boot program from the operator's kit; no third-party chain-loader; Secure Boot never weakened): boot-network.md OPEN-BOOT-SB note; INDEX Unconfirmed (Secure Boot). Item 6 (check the FIPS module's validated environments for WinPE x64; POA&M if not): no spec text (clean-side compliance). Item 7 (mandatory, separate wipe confirmation, never skipped in R1, durably recorded before any write): REQ-DISK-006, REQ-TGT-006, REQ-TGT-007 status. Item 8 (single disk still confirmed; removable and boot-environment disks refused; no read-out of existing contents): REQ-DISK-002, 005, 016. Item 9 (installed OS's boot entry first, lasting; boot service stops offering once the job succeeded): REQ-BOOT-061, 065, 067. Item 10 (cancel only before the wipe confirmation; afterwards success or persistent error; device-side choices and every job state change audited): REQ-TGT-010, 011, 016; REQ-JOB-012. Item 7 is also cited by REQ-TGT-016 (CR-016). INDEX header, BOOT-1, BOOT-5, PE-1, TGT-1, topic 22 |
 
 ## Project observation records
 

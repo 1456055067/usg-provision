@@ -4,8 +4,11 @@ Status: AUDITED (clean-room re-verify round 1; DEC-0004 accepted by the
 owner on 2026-10-26). REQs marked OPEN stay open. Spec run M3
 (2026-10-27) added REQ-BOOT-063 to REQ-BOOT-067. M3 fix round 1
 (2026-10-28) settled REQ-BOOT-035 and 064 by DEC-0018 item 2 (project
-rule). After re-audit round 1, REQ-BOOT-035 and 063 to 066 are AUDITED
-(2026-10-28); 067 stays OPEN. REQ range in use: `REQ-BOOT-001` to
+rule). After re-audit round 1, REQ-BOOT-035, 063, 064 and 066 are
+AUDITED (2026-10-28). DEC-0018 item 9 (2026-10-28, project rule) settles
+REQ-BOOT-061 and 067 and changes the Basis of 065; these three are
+AUDITED after re-audit round 2 (2026-10-28). REQ range in use:
+`REQ-BOOT-001` to
 `REQ-BOOT-070`. Numbers are grouped by topic in tens, so some numbers are
 unused.
 
@@ -527,11 +530,13 @@ installed operating system from its disk.
 - Priority: MUST
 - Source: SRC-004
 - Standards: UEFI 2.10 §3.1.1, §3.1.2, §3.3 (SRC-021)
-- Status: OPEN (Does the device's lasting firmware boot order change,
-  putting the installed system ahead of network boot, or is only the next
-  boot steered? Does REQ-BOOT-050 apply to the device automatically when
-  provisioning finishes, or only when an operator sets it? The public
-  source gives the outcome only.)
+- Basis: DEC-0018 item 9 for both questions below (project rule, not
+  described product behaviour); requirement text unchanged
+- Status: AUDITED (2026-10-28; was OPEN; settled by DEC-0018 item 9.
+  The lasting firmware boot order changes, with the
+  installed system first (REQ-BOOT-065). The boot service stops offering
+  a boot program to the device automatically once its job has succeeded
+  (REQ-BOOT-067). The public source gives the outcome only.)
 
 ### REQ-BOOT-062: Make a device eligible for network boot again
 
@@ -548,8 +553,9 @@ to network boot and provision again.
 ### Serving the provisioning environment and finishing (M3)
 
 REQ-BOOT-063 to REQ-BOOT-067 were added in spec run M3 (2026-10-27).
-063 to 066 are AUDITED (2026-10-28); 067 is OPEN. REQ-BOOT-065 partly answers the
-question in REQ-BOOT-061, whose text is unchanged.
+063 to 067 are AUDITED (2026-10-28); 065 and 067 rest on DEC-0018 item
+9 (project rule). REQ-BOOT-065 and 067 answer the questions in
+REQ-BOOT-061, whose text is unchanged.
 
 ### REQ-BOOT-063: Serve the Windows PE boot files
 
@@ -592,10 +598,10 @@ delivered.
   project rule, not described product behaviour)
 - Standards: RFC 1350 §5; RFC 2348; RFC 7440; `specs/standards/tftp.md`
   §7, §8, §10; `specs/standards/winpe-network-boot.md` §5, §7
-- Status: AUDITED (2026-10-28; wrap-around is not standardised, `tftp.md` §8: the
-  value the block number wraps to is a clean-side choice that must be
-  checked against Microsoft's boot manager; which options the boot
-  manager sends is still OPEN-WPXE-2)
+- Status: AUDITED (2026-10-28; wrap-around is not standardised,
+  `tftp.md` §8: the value the block number wraps to is a clean-side
+  choice that must be checked against Microsoft's boot manager; which
+  options the boot manager sends is still OPEN-WPXE-2)
 
 ### REQ-BOOT-065: The installed system becomes the next boot target
 
@@ -609,14 +615,16 @@ it does not exist).
 - Priority: MUST
 - Source: SRC-004 (outcome only: the device does not boot back into
   network boot; whether the change is lasting is not stated)
-- Basis: making the change lasting and putting the Windows option first
-  is project design; it is also what Microsoft's boot-file tool does by
-  default (SRC-089)
+- Basis: DEC-0018 item 9 (the installed OS's boot entry is made first
+  and the change is lasting; project rule, not described product
+  behaviour); it is also what Microsoft's boot-file tool does by default
+  (SRC-089)
 - Standards: UEFI 2.10 §3.1.1, §3.3 (SRC-021);
   `specs/standards/uefi-boot-manager.md` §2, §8 item 1, §9
-- Status: AUDITED (2026-10-28; lasting change: confirm as D-M3-6. Firmware may reorder
-  options itself, `uefi-boot-manager.md` §2; OPEN-UBM-1 covers the case
-  where no firmware option is created)
+- Status: AUDITED (2026-10-28, re-audit round 2, after the Basis change
+  for DEC-0018 item 9; text unchanged. Firmware may reorder options
+  itself, `uefi-boot-manager.md` §2; OPEN-UBM-1 covers the case where no
+  firmware option is created)
 
 ### REQ-BOOT-066: Create the installed system's boot files and entry
 
@@ -635,28 +643,30 @@ option pointing at the Windows boot manager on that disk then exists
   SRC-088 (apply, then set up boot files); SRC-004 (outcome only)
 - Standards: `specs/standards/uefi-boot-manager.md` §9;
   `specs/standards/gpt.md` §10, §11
-- Status: AUDITED (2026-10-28; the boot configuration is an undocumented Microsoft
-  format, `winpe-network-boot.md` §6; using Microsoft's tool from the
-  applied image is the documented route. Which boot files, 2011 or 2023
-  CA, is OPEN-BOOT-SB)
+- Status: AUDITED (2026-10-28; the boot configuration is an undocumented
+  Microsoft format, `winpe-network-boot.md` §6; using Microsoft's tool
+  from the applied image is the documented route. Which boot files, 2011
+  or 2023 CA, is OPEN-BOOT-SB)
 
-### REQ-BOOT-067: Boot service behaviour for a device whose install is done
+### REQ-BOOT-067: Stop booting a device whose install is done [project rule]
 
-Once a device's install has succeeded, whether the boot service keeps
-answering that device's network boots (it is then protected from a loop
-only by REQ-BOOT-065), or stops answering it automatically as for a
-suppressed device (REQ-BOOT-050, REQ-BOOT-051) until an operator makes
-it eligible again (REQ-BOOT-062), is not settled.
+Once a device's job has succeeded (`specs/progress.md` REQ-JOB-013),
+the boot service stops offering a boot program to that device, as for a
+suppressed device (REQ-BOOT-050, REQ-BOOT-051), until an operator makes
+it eligible again (REQ-BOOT-062). A person who later network boots the
+device on purpose gets no answer until an operator acts.
 
-- Priority: SHOULD
+- Priority: MUST
 - Source: SRC-004 (outcome only: no loop back into network boot)
+- Basis: DEC-0018 item 9 (the boot service stops offering a boot program
+  once the job has succeeded; project rule, not described product
+  behaviour)
 - Standards: UEFI 2.10 §3.1.2 (SRC-021);
   `specs/standards/uefi-boot-manager.md` §8
-- Status: OPEN (D-M3-6: automatic suppression after success? If yes, a
-  person who deliberately network boots the device later gets no
-  answer until an operator acts; if no, a device whose boot order was
-  reset by its firmware will start provisioning again. No public source
-  says which the product does.)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 9.
+  The device is recognised as in REQ-BOOT-007, so REQ-BOOT-045 applies:
+  this is a convenience, not access control. How an operator makes it
+  eligible again is still REQ-BOOT-062, OPEN)
 
 ### Timing
 
@@ -802,12 +812,15 @@ Unknown (OPEN):
 - **OPEN-BOOT-SB**: Must network boot work with Secure Boot enabled on the
   device, and if so, which signing authority must the boot program chain
   to? This is in the INDEX Unconfirmed list. Background is in
-  `specs/standards/uefi-secure-boot.md`.
-- REQ-BOOT-013, REQ-BOOT-014, REQ-BOOT-054, REQ-BOOT-061,
-  REQ-BOOT-062, REQ-BOOT-067: see the question in each Status line. M3
-  note: REQ-BOOT-035 and REQ-BOOT-064 are settled by DEC-0018 item 2
-  (project rule); REQ-BOOT-065 answers the first question of
-  REQ-BOOT-061 for the project, pending D-M3-6.
+  `specs/standards/uefi-secure-boot.md`. M3 [project rule], DEC-0018
+  item 5: Windows PE boots through Microsoft's boot program from the
+  operator's PE boot kit (REQ-BOOT-063), no third-party chain-loader is
+  used, and Secure Boot is never weakened. Which signing authority (2011
+  or 2023 CA boot files) is still open.
+- REQ-BOOT-013, REQ-BOOT-014, REQ-BOOT-054, REQ-BOOT-062: see the
+  question in each Status line. M3 note: REQ-BOOT-035 and REQ-BOOT-064
+  are settled by DEC-0018 item 2, and REQ-BOOT-061, 065 and 067 by item 9
+  (project rules).
 - M3 standards: `specs/standards/winpe-network-boot.md` (topic 22) and
   `specs/standards/uefi-boot-manager.md` §9 (boot entry creation).
 - The primary PXE 2.1 specification text could not be retrieved from any

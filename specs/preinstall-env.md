@@ -221,8 +221,9 @@ change any disk until the person at the device has confirmed a wipe
   provisioning environment; outcome only); SRC-091, SRC-092 (how Windows
   PE boots over the network into a RAM disk)
 - Standards: `specs/standards/winpe-network-boot.md` §2 to §4
-- Status: AUDITED (2026-10-28; which environment a boot service serves when several
-  packages with different environments are offered is OPEN-PE-5)
+- Status: AUDITED (2026-10-28; which environment a boot service serves
+  when several packages with different environments are offered is
+  OPEN-PE-5)
 
 ### REQ-PE-012: Network-boot files come from the operator's kit
 
@@ -305,9 +306,9 @@ the device and nothing is installed.
   design
 - Standards: `specs/standards/http-tls.md` §6;
   `specs/standards/security-baseline.md` §2
-- Status: AUDITED (2026-10-28; how the trust anchor and the session credential reach
-  the environment, given that the PXE phase carries no secrets, is
-  OPEN-PE-6)
+- Status: AUDITED (2026-10-28; how the trust anchor and the session
+  credential reach the environment, given that the PXE phase carries no
+  secrets, is OPEN-PE-6)
 
 ### REQ-PE-016: Download and verify content before use
 

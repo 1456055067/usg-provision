@@ -1,9 +1,9 @@
 # Targeting at the device (TGT-1 for milestone M3)
 
 Status: AUDITED, partial (spec run M3, 2026-10-27; fix rounds 1 and 2,
-2026-10-28; re-audit round 1 approved with comments, CR-008 and CR-011
-applied). AUDITED 2026-10-28: REQ-TGT-001 to 005, 008, 009, 012 to 015.
-OPEN: 006, 007, 010, 011, 016.
+2026-10-28; re-audit rounds 1 and 2 approved with comments). AUDITED
+2026-10-28: REQ-TGT-001 to 006, 008 to 016 (006, 010, 011 and 016
+settled by DEC-0018 items 7 and 10, project rules). OPEN: 007.
 REQ range in use: `REQ-TGT-001` to `REQ-TGT-016`. TGT-2 to TGT-4
 (refresh targeting, serial number, targeting restrictions) are not
 specced; numbers from `REQ-TGT-020` are kept for them.
@@ -121,20 +121,23 @@ After choosing a package, the person chooses the disk to install to, as
 - Standards: `specs/standards/gpt.md`
 - Status: AUDITED (2026-10-28)
 
-### REQ-TGT-006: Review before starting
+### REQ-TGT-006: Review before starting [project rule]
 
 Before anything on the disk is changed, the device shows a summary of the
 choices (package, operating system, target disk) and the install starts
-only when the person confirms it. This confirmation can be the same step
-as the wipe confirmation in `specs/disk.md` REQ-DISK-006.
+only when the person confirms it. This summary is shown with the
+mandatory wipe confirmation of `specs/disk.md` REQ-DISK-006, which is
+separate from choosing the disk and which, in release R1, no mode skips.
 
-- Priority: SHOULD
+- Priority: MUST (shown with the mandatory wipe confirmation)
 - Source: SRC-087 (Microsoft's reference deployment flow warns and asks
   for confirmation before erasing)
-- Basis: project design following Microsoft's reference practice; no
-  vendor source describes a review step
+- Basis: DEC-0018 item 7 (mandatory, separate wipe confirmation; project
+  rule, not described product behaviour); the summary's content
+  (package, operating system, disk) is project design; no vendor source
+  describes a review step
 - Standards: `specs/standards/gpt.md` §10
-- Status: OPEN (D-M3-4: adopt as MUST? See `specs/disk.md` REQ-DISK-006)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 7)
 
 ### REQ-TGT-007: Exactly one package offered
 
@@ -145,10 +148,11 @@ person to choose it or proceeds with it is not settled.
 - Source: SRC-004 (outcome only: an operator-configurable mode needing no
   input at the device exists; not publicly defined)
 - Standards: none
-- Status: OPEN (Is the single package chosen automatically, and if so
-  is the person still asked to confirm the disk? Relates to installs
-  needing no input at the device, INDEX Unconfirmed. Authorisation still applies,
-  REQ-TGT-013, REQ-TGT-014.)
+- Status: OPEN (Is the single package chosen automatically? Relates to
+  installs needing no input at the device, INDEX Unconfirmed.
+  Authorisation still applies, REQ-TGT-013, REQ-TGT-014, and in release
+  R1 the wipe confirmation is never skipped, `specs/disk.md`
+  REQ-DISK-006, DEC-0018 item 7.)
 
 ### When nothing can be offered
 
@@ -183,30 +187,33 @@ changes nothing, and lets the person restart or shut down.
 
 ### Cancelling
 
-### REQ-TGT-010: Cancel before anything is written
+### REQ-TGT-010: Cancel before anything is written [project rule]
 
 Until the person confirms the wipe (`specs/disk.md` REQ-DISK-006), they
-can cancel at any choice step. Cancelling changes nothing on any disk,
-ends the device session, records it as cancelled (`specs/progress.md`
-REQ-JOB-012), and lets the person restart or shut down.
+can cancel at any point. Cancelling changes nothing on any disk, ends
+the device session, is recorded as a cancelled session (an audit record,
+REQ-TGT-016), and lets the person restart or shut down.
 
-- Priority: SHOULD
+- Priority: MUST
 - Source: none (no public source describes cancelling)
-- Basis: project design
+- Basis: DEC-0018 item 10 (cancel allowed at any point before the wipe
+  confirmation; project rule, not described product behaviour)
 - Standards: none
-- Status: OPEN (D-M3-7: confirm. No vendor source.)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 10)
 
-### REQ-TGT-011: Cancel after the disk has been changed
+### REQ-TGT-011: No cancelling after the wipe confirmation [project rule]
 
-Whether the person or an operator can stop an install after the disk
-has been wiped, and what state the device is left in, is not settled.
+Once the person has confirmed the wipe, the install cannot be cancelled,
+from the device or from the operator view. The job runs until it
+succeeds or stops with a persistent error (`specs/progress.md`
+REQ-JOB-005, REQ-JOB-006).
 
-- Priority: SHOULD
+- Priority: MUST
 - Source: none
+- Basis: DEC-0018 item 10 (after the wipe the job runs to success or a
+  persistent error; project rule, not described product behaviour)
 - Standards: none
-- Status: OPEN (D-M3-7: Is a running install cancellable, from the
-  device, from the operator view, or both? A cancelled install leaves a
-  disk that may not boot; must the product say so?)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 item 10)
 
 ### Authorising the device session (DEC-0018 item 1)
 
@@ -230,7 +237,7 @@ gets nothing and is recorded.
   clean-side design; the PXE phase itself carries no secrets,
   REQ-BOOT-043)
 
-### REQ-TGT-013: Device session authorised by an operator-issued code [project rule]
+### REQ-TGT-013: Session authorised by operator-issued code [project rule]
 
 A bare-metal device session goes no further than REQ-TGT-012 until it is
 authorised. One way to authorise it is for the person at the device to
@@ -290,23 +297,25 @@ the device's screen.
 
 ### Record
 
-### REQ-TGT-016: Device-session choices are recorded
+### REQ-TGT-016: Device-session choices are audit records [project rule]
 
-The product records, for each device session: the boot service, the
-device's network hardware address and machine identifier
+The product records, as audit records (`specs/operator-access.md`
+REQ-AUD-001), for each device session: the boot service, the device's
+network hardware address and machine identifier
 (`specs/boot-network.md` REQ-BOOT-007), whether authentication and the
-required authorisation succeeded, the package and disk chosen, and the
-outcome (started, cancelled, failed). Failed code attempts are recorded
-without the value entered.
+required authorisation succeeded, the package and disk chosen, the wipe
+confirmation, and the outcome (started, cancelled, failed). Failed code
+attempts are recorded without the value entered. Job state changes are
+audit records too (`specs/progress.md` REQ-JOB-012).
 
-- Priority: SHOULD
+- Priority: MUST
 - Source: none (no public source for a record of device-side choices)
-- Basis: project design; extends the spirit of DEC-0010 (every operator
-  action audited) to device-side actions, which DEC-0010 does not cover
+- Basis: DEC-0018 item 10 (device-side choices and every job state
+  change are audit records) and item 7 (the wipe confirmation is
+  durably recorded before any write); project rules, not described
+  product behaviour
 - Standards: none
-- Status: OPEN (D-M3-8: should device-side choices and job state changes
-  be audit records under `specs/operator-access.md` REQ-AUD-001? A
-  decision record is needed to cite.)
+- Status: AUDITED (2026-10-28; settled by DEC-0018 items 7 and 10)
 
 ## States and transitions (device session)
 
@@ -321,7 +330,8 @@ without the value entered.
    (REQ-TGT-009).
 5. *Confirming*: REQ-TGT-006, REQ-DISK-006. Confirm goes to *Started*
    and the job of `specs/progress.md` begins.
-6. From states 3 to 5 the person can cancel: *Cancelled* (REQ-TGT-010).
+6. Before the wipe is confirmed the person can cancel: *Cancelled*
+   (REQ-TGT-010). After it, no cancel (REQ-TGT-011).
 
 *Refused*, *Nothing to offer*, *No disk*, *Cancelled* and *Failed* end
 the session with nothing written to disk.
@@ -378,4 +388,5 @@ the session with nothing written to disk.
   approval, time out, and what happens then?
 - **OPEN-TGT-2**: length and lifetime of the operator-issued code and the
   limit on failed attempts (clean-side design).
-- REQ-TGT-006, 007, 010, 011, 016: see their Status lines.
+- REQ-TGT-007: see its Status line. REQ-TGT-006, 010, 011 and 016 are
+  settled by DEC-0018 items 7 and 10 (project rules).

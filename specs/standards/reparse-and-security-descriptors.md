@@ -2,7 +2,10 @@
 
 Topic 24 of the standards reading list (spec request SR-6, M3,
 2026-10-28). **Status: AUDITED 2026-10-28** (all sections; audit
-fixes CR-SR6-001 to 008 applied). The OPEN items stay open.
+fixes CR-SR6-001 to 008 applied). The OPEN items stay open, except
+OPEN-RPSD-2 and 3, which the R4 fold (2026-10-28, AUDITED
+2026-10-28) marks settled for the drive-letter form. Text added in
+that fold is marked "R4".
 
 Background for PE-1 image apply (REQ-PE-017): a WIM image stores
 Windows symbolic links, junctions (mount points) and security
@@ -43,8 +46,11 @@ Labels (same meaning as in `wim.md`):
 - **[reading]**: our interpretation where a source is silent or
   ambiguous.
 - **[WIM]**: a link to an observation already recorded in `wim.md`
-  §6.1 and in the project's observation record (OBS-036 to OBS-038).
-  This file adds no new observations.
+  §6.1 and in the project's observation record (OBS-036 to OBS-038;
+  R4: also OBS-049 to OBS-054). This file adds no new
+  observations.
+- **[project rule, DEC-0022]** (R4): the project's rule for
+  applying reparse points, stated in full in `wim.md` §13.
 
 All integers below are unsigned. Byte order: the SECURITY_DESCRIPTOR
 section says a self-relative descriptor travels little-endian with no
@@ -187,6 +193,11 @@ These rules are the same for both buffer types.
 - The pages do not say which form a full-path substitute name takes
   on a local volume (for example whether it carries a drive or volume
   prefix). That is OPEN-RPSD-2.
+- **[WIM, OBS-049] (R4)**: in the project's samples, a
+  full-path substitute name on a lettered volume had the form
+  `\??\L:\path` and its print name `L:\path`. This settles OPEN-RPSD-2
+  for the drive-letter form only; volume-name and other prefixes were
+  not sampled.
 
 **WIM relevance, header flag 0x80 (`FLAG_HEADER_RP_FIX`)
 [WIM, OBS-036, OBS-037].**
@@ -203,7 +214,12 @@ These rules are the same for both buffer types.
     that lay inside the captured tree; the stored target is still a
     full path, now without the capture root [WIM, OBS-037]. Which of
     the two names was rewritten, and whether both offsets and lengths
-    changed, is not recorded in `wim.md` (OPEN-RPSD-3).
+    changed, was not recorded in `wim.md` after R3 (OPEN-RPSD-3).
+  - **(R4) [WIM, OBS-049]**: both names are rewritten, the
+    drive letter is kept, the offsets and lengths are rewritten to
+    match, and the stored layout is substitute name first at offset 0,
+    a 2-byte zero, the print name and a 2-byte zero. This settles
+    OPEN-RPSD-3 for the drive-letter form.
   - The print name has no effect on what the link resolves to; the
     substitute name does (§5 above).
 - A separate point, about the WIM directory entry and not the reparse
@@ -212,12 +228,26 @@ These rules are the same for both buffer types.
   links [WIM, OBS-036]. They lie outside the stored reparse data and
   are not the symbolic-link `Flags` field of §4. Their meaning is
   still open (OPEN-WIM-7, M-13); this file does not settle it.
+  - **(R4) [WIM, OBS-052, corrected]**: read as a 32-bit value, +92
+    is zero exactly on symbolic links with `Flags` 0 and mount points
+    whose target lies inside the captured tree, with
+    `FLAG_HEADER_RP_FIX` on, and 0x00010000 otherwise. It does not
+    mean the data were changed (a volume-root capture stored such
+    entries with nothing stripped). That it marks the targets DISM's
+    apply re-bases is a [reading].
 - Points that do not depend on the flag: the buffer layouts in §2 to
   §4, the bounds rules above, and the tag values.
 - How the product applies rewritten absolute targets to a different
-  root or drive letter is product behaviour. It stays **OPEN-WIM-12**
-  (`wim.md` §13), refused until decided. Nothing in this file decides
-  it.
+  root or drive letter is product behaviour. (R4) It is now the
+  **[project rule, DEC-0022]** in `wim.md` §13 (formerly OPEN-WIM-12):
+  - entries with +92 equal to 0x00010000 are written unchanged;
+  - entries with +92 zero, in a file with the flag set, in the exact
+    observed layout with a drive-letter target, are re-based onto the
+    apply root;
+  - everything else is refused with a named reason.
+
+  Copied and re-based data must meet this file's §3 to §5 bounds. The
+  volume-root capture case was never applied (OPEN-WIM-13).
 
 ## 6. Setting a reparse point (FSCTL_SET_REPARSE_POINT, background)
 
@@ -370,8 +400,21 @@ the parts may overlap (OPEN-RPSD-4).
   SDDL text. The descriptors of the 5 reparse points were not
   compared (the sample manifests hold no SDDL for them).
 - Whether the stored bytes are exactly the self-relative form above,
-  with SR set, is still **open** (OPEN-WIM-7, M-14, sample S13D). This
-  section is the reference that sample should be checked against.
+  with SR set, was **open** after R3 (OPEN-WIM-7, M-14, sample S13D).
+  This section is the reference that sample should be checked against.
+- **(R4) [WIM, OBS-054, corrected]**: every stored descriptor seen
+  has `Revision` 1 and SR set, `OffsetSacl` 0 with SP clear, and
+  owner, group and DACL inside the block, so it is the self-relative
+  form above. Several stored descriptors set PS although SP is clear;
+  the well-formedness rule
+  above does not forbid that. Byte equality with what Windows itself
+  returns is still **open**: R4 compared only with .NET's
+  re-serialisation (S13D, narrowed).
+- **(R4) [WIM, OBS-053, corrected]**: DISM's apply wrote the
+  stored descriptor faithfully on every reparse point. Seven file
+  links that had their own explicit DACL in the source were stored at
+  capture with the descriptor shared by ordinary files, so they lost
+  that DACL at capture.
 - These points do not depend on `FLAG_HEADER_RP_FIX`.
 
 ## 10. Security notes (for the clean side)
@@ -386,7 +429,13 @@ the parts may overlap (OPEN-RPSD-4).
 - **[reading]** An absolute symbolic link or mount point in an image
   can point outside the applied tree. Under `FLAG_HEADER_RP_FIX`,
   targets outside the captured tree are a separate case (OPEN-WIM-7,
-  S13C). The product's handling is OPEN-WIM-12.
+  S13C). (R4) DISM stores and applies those unchanged
+  [WIM, OBS-051], and the product's handling is the
+  [project rule, DEC-0022] in `wim.md` §13: copied as stored, re-based
+  only in the observed rewritten form, otherwise refused. The rule
+  never invents a target beyond re-basing a stored one onto the apply
+  root. An applied
+  absolute target can still name a path outside the applied tree.
 
 ## 11. Open questions
 
@@ -398,14 +447,18 @@ the parts may overlap (OPEN-RPSD-4).
   and how does the print name differ? [MS-FSCC] §2.1.5 has an absolute
   pathname start at the root directory and says nothing of drive or
   volume prefixes. To be settled from the project's own samples (S13B,
-  S13C), not from product material.
+  S13C), not from product material. **(R4) Settled for the
+  drive-letter form** (OBS-049, §5); other prefixes not sampled.
 - **OPEN-RPSD-3**: under `FLAG_HEADER_RP_FIX`, does the fix-up change
   the substitute name, the print name or both, and are the offsets and
-  lengths rewritten to match? Same samples.
+  lengths rewritten to match? Same samples. **(R4) Settled for
+  the drive-letter form**: both names, with offsets and lengths
+  (OBS-049, §5).
 - **OPEN-RPSD-4**: may the parts of a self-relative descriptor overlap,
   or share bytes? [MS-DTYP] is silent.
 - Related, not settled here: OPEN-WIM-7 (M-13, M-14) and OPEN-WIM-12
-  in `wim.md` §13.
+  in `wim.md` §13. (R4) OPEN-WIM-12 is now settled for the
+  project by DEC-0022; OPEN-WIM-13 (volume-root capture) is open.
 
 ## 12. Not summarised
 

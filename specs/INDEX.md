@@ -371,7 +371,20 @@ decide.
    M-15 partly open); OPEN-WIM-10 stays open (M-22); EFS entries are
    refused as a [project rule, DEC-0006]. Samples S13B to S13F and S08B are
    needed. The R3 notes were audited 2026-10-28, approve with
-   comments; fixes CR-R3-001 to 003 and 005 applied).
+   comments; fixes CR-R3-001 to 003 and 005 applied. After run R4
+   (2026-10-28), OBS-049 to OBS-058 added [observed] notes: what
+   capture with the reparse fix-up flag stores; DISM re-bases
+   rewritten targets on apply and copies all others; +92 is zero
+   exactly on in-tree absolute targets with the flag; stored
+   descriptors are self-relative and applied faithfully, while some
+   file links lose their own DACL at capture; the sparse block; stream
+   order; short raw final chunks; 8-byte chunk-table entries above
+   2^32. OPEN-WIM-5 is answered and OPEN-WIM-10 partly answered for
+   the forms seen; OPEN-WIM-12 is settled as a [project rule,
+   DEC-0022] re-base rule; new OPEN-WIM-13 (volume-root capture never
+   applied). The R4 notes were audited 2026-10-28, approve with
+   comments; fixes CR-R4-001 to 009 applied against the corrected
+   records at d38b584).
    Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.
@@ -469,4 +482,8 @@ decide.
     request SR-6, M3, 2026-10-28; AUDITED 2026-10-28; marks what
     matters under the WIM `FLAG_HEADER_RP_FIX` flag; OPEN-RPSD-1 to 4.
     Does not settle OPEN-WIM-7 or OPEN-WIM-12; topic 9 §6.1 and §13
-    gained cross-references, AUDITED 2026-10-28).
+    gained cross-references, AUDITED 2026-10-28. The R4 fold
+    (AUDITED 2026-10-28) adds [WIM] notes from OBS-049 to OBS-054,
+    marks OPEN-RPSD-2 and 3 settled for the drive-letter form, and
+    replaces "refused until decided" in §5 and §10 with the
+    [project rule, DEC-0022] re-base rule of topic 9 §13).

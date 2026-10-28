@@ -17,14 +17,18 @@ Sources:
   unattend `MetaData` key, the `WIMSetImageInformation` API page, Windows
   Setup supported platforms, and the `SYSTEM_INFO` structure.
 - **Observation record (clean side, not Microsoft text)**:
-  `docs/formats/wim-observed.md`, records OBS-001 to OBS-048, made under
+  `docs/formats/wim-observed.md`, records OBS-001 to OBS-058, made under
   project decision 0006 from WIM files the project built itself with
-  Microsoft's DISM. Records come from three runs: **R1** (OBS-001 to
+  Microsoft's DISM. Records come from four runs: **R1** (OBS-001 to
   OBS-017; workflow run 40535666995, commit ba23bed), **R2**
-  (OBS-018 to OBS-023; workflow run 40599556702, commit 5d3c8c7) and
+  (OBS-018 to OBS-023; workflow run 40599556702, commit 5d3c8c7),
   **R3** (OBS-024 to OBS-048; workflow run 40754869824, commit
-  27f7237). All three runs used DISM file version 10.0.26100.32860 on
-  Windows build 26100.33650.
+  27f7237) and **R4** (OBS-049 to OBS-058; workflow run 40766748266,
+  commit 4ba76cd). All four runs used DISM file version
+  10.0.26100.32860 on Windows build 26100.33650. The M3
+  boot-protocol review of R4 (findings BOOT-R4-001 to 008) led to
+  corrections of some R4 records, committed at d38b584; this file
+  cites the corrected records, marked "(OBS-0nn, corrected)".
 
 Labels: **[derived]** means we computed it from facts the sources state
 (for example, offsets from field order and sizes). **[reading]** means our
@@ -33,11 +37,12 @@ by Microsoft. Each has an OPEN item in §13 where it matters.
 
 Two further labels were added in M2 fix round 1 (drift):
 
-- **[observed]** marks what was seen in the R1, R2 or R3 files, cited
+- **[observed]** marks what was seen in the R1 to R4 files, cited
   by record (OBS-nnn). It is evidence about those files only, not a
   statement by Microsoft, and says nothing about other DISM builds or
   other tools. The R2 notes were added after run R2 (2026-10-27). The
-  R3 notes were added after run R3 and audited (2026-10-28).
+  R3 notes were added after run R3 and audited (2026-10-28). The R4
+  notes (marked R4) were added after run R4 and audited (2026-10-28).
   An observation can confirm or contradict a [derived] or [reading]
   point, or the paper itself; each note below says which.
 - **[project rule]** marks a rule the product applies that neither
@@ -254,8 +259,9 @@ size bytes and 1 flag byte". The stored size is therefore a 56-bit value
   table. Read this way, every compressed resource in R1 (83 resources,
   369 chunk instances) decodes to the SHA-1 of its lookup entry. These
   [reading] and [derived] points are **confirmed** for R1.
-- **[observed]** The 8-byte entry width was never seen; the threshold
-  stays **open** (OPEN-WIM-10) until a sample over 4 GiB exists.
+- **[observed]** The 8-byte entry width was never seen in R1. R4 saw
+  it (OBS-058, below); the exact threshold stays **open**
+  (OPEN-WIM-10).
 - **[observed]** Resource level of OPEN-WIM-5 (OBS-010): inside an
   XPRESS file, a whole resource that did not shrink (pseudorandom data,
   and every file of 59 bytes or less) is stored as plain bytes, with
@@ -282,13 +288,13 @@ size bytes and 1 flag byte". The stored size is therefore a 56-bit value
   whose stored size equals its expanded size (32768) is stored
   uncompressed.
 - **[observed, AUDITED 2026-10-28]** Position (OBS-046 as corrected,
-  with S14): a
-  chunk stored at full size (32768) is raw at any position in the
-  resource, including several consecutive raw chunks, not only first
-  or last.
-- **Not seen**: a final chunk shorter than 32768 bytes that did not
-  shrink. Whether the same equal-size rule marks it is **open**
-  **[reading: the same rule applies, by analogy only]**.
+  with S14): a chunk stored at full size (32768) is raw at any
+  position in the resource, including several consecutive raw chunks,
+  not only first or last.
+- **Not seen in R3**: a final chunk shorter than 32768 bytes that did
+  not shrink. Whether the same equal-size rule marks it was **open**
+  after R3 **[reading: the same rule applies, by analogy only]**. R4
+  settles it (below).
 - **[observed]** Compressed metadata (OBS-043): an XPRESS file's
   metadata resource of 496936 bytes (16 chunks) decodes, through the
   chunk table as read above, to exactly the bytes of the uncompressed
@@ -296,7 +302,31 @@ size bytes and 1 flag byte". The stored size is therefore a 56-bit value
 - **[observed]** No chunk table over 4 GiB (OBS-047): the R3 sample
   over 4 GiB was pseudorandom, so DISM stored it uncompressed with no
   chunk table (as OBS-010 for small files). The 8-byte entry width
-  stays **open** (OPEN-WIM-10).
+  stayed **open** (OPEN-WIM-10) after R3; see R4 below.
+
+**Observations on chunking (R4, AUDITED 2026-10-28).**
+
+- **[observed]** Short final raw chunk (OBS-057): three XPRESS
+  resources, each 32768 bytes of text followed by 100, 5000 or 32767
+  pseudorandom bytes, had a one-entry chunk table. The text chunk was
+  coded; the last chunk's stored size equalled its expanded size, and
+  read as plain bytes each resource gave its lookup SHA-1. This
+  **confirms** the [reading] above for R4 and settles OPEN-WIM-5 for
+  the forms seen: a chunk is raw exactly when its stored size equals
+  its expanded size (32768, or the remainder for the last chunk), at
+  any position.
+- **[observed]** 8-byte table entries (OBS-058; evidence from a dump
+  only, because the file was not kept and its chunks were not
+  decoded): one XPRESS resource with an original size of 4831838208
+  (above 2^32) and a stored size of 897896440 (below 2^32). Read with
+  8-byte entries, its 147455-entry table increases, the first chunk
+  after the table starts with a complete Huffman table at exactly that
+  offset, and the chunks fill the stored size. Read with 4-byte
+  entries, the table does not increase. Every entry value was below
+  2^32. So the width followed the original size, not the stored size
+  or the entry values, as the paper says.
+- **Still open** (OPEN-WIM-10): whether the width changes at exactly
+  2^32 or only above it, and LZX resources over 4 GiB (none seen).
 
 ## 5. Lookup table (WIM paper, "Lookup Table")
 
@@ -531,7 +561,19 @@ those files only.
   gives, and those 24 bytes are not zero. Their last 16 bytes hold the
   start and end of the file's deallocated range as 8-byte values. The
   meaning of the first 8 bytes, and the block's form for other ranges,
-  are **open** (OPEN-WIM-7, sample S13E).
+  were **open** after R3 (OPEN-WIM-7, sample S13E); R4 below.
+- **[observed, R4, AUDITED 2026-10-28] Sparse block** (OBS-055,
+  corrected): six sparse files with known holes. The block follows
+  the entry's used bytes, padded to 8, and the entry length includes
+  it. It holds a 4-byte value 3 (the same in every file; meaning not
+  shown), then a 4-byte value equal to 16 times the number of pairs,
+  then one pair of 8-byte values per range: start, and end
+  (exclusive). Ranges appear merged (three adjacent holes gave one
+  pair) and in descending order. A file with the sparse attribute but
+  no hole has no block. That the pairs describe the holes is a
+  [reading] from equal values. Whether DISM's apply re-creates the
+  holes was not measured; the resource holds the full expanded content
+  either way.
 - **[observed]** Stream entries start at the entry's offset plus its
   length field, and the next sibling starts where the last stream entry
   ends. A reader must advance by the length field, not by a size it
@@ -572,8 +614,14 @@ those files only.
 - **[observed]** Empty content, main or named, has an all-zero hash
   and no lookup entry (OBS-031).
 - **[observed]** The order of named streams was not their creation
-  order in the one case with two; the rule is **open** (OPEN-WIM-7,
-  sample S13F).
+  order in the one case with two; the rule was **open** after R3
+  (OPEN-WIM-7, sample S13F); R4 below.
+- **[observed, R4, AUDITED 2026-10-28]** Stream order (OBS-056,
+  corrected): in every file seen, named streams follow the unnamed
+  entry in descending name order, whatever order they were written in
+  and whatever their sizes. All names sampled were lower case, so
+  whether the sort folds case is not shown. A reader must not depend
+  on the order.
 
 **Attributes and times** (OBS-033, OBS-034).
 
@@ -609,6 +657,17 @@ those files only.
   is not always zero: it was non-zero for relative links and, as part
   of the shared value, for hard-link names (OBS-035, OBS-036). A
   reader must not require it to be zero.
+- **[observed, AUDITED 2026-10-28]** +92 on reparse points (OBS-052,
+  corrected): in every file seen, read as a 32-bit value, it is zero
+  exactly on symbolic links with `Flags` 0 and mount points whose
+  target lies inside the captured tree, with header flag 0x80 on, and
+  0x00010000 otherwise (relative links, absolute targets outside the
+  tree, and every entry of a file captured without the flag). It does
+  **not** mean that the data were changed: in a volume-root capture
+  with the flag, entries with zero were stored with nothing stripped
+  (the junction byte-identical, the links only re-laid out). That it
+  marks the targets DISM's apply re-bases is a [reading]; no source
+  names the field.
 - **[observed]** The reparse data bytes, without the tag and the data
   length (which Windows reports separately), are stored as a resource
   named by a hash. For a directory reparse point, the entry's own hash
@@ -620,25 +679,55 @@ those files only.
   by removing the capture-root part of the path; relative targets were
   stored unchanged. This **adds** detail to the paper's description
   of the flag (§2).
+- **[observed, R4, AUDITED 2026-10-28]** What capture with the flag
+  stores (OBS-049, corrected): for three absolute symbolic
+  links and one junction whose targets lay inside the captured
+  directory, DISM rewrote **both** the substitute name and the print
+  name by removing the capture directory and keeping the drive letter,
+  and rewrote their offsets and lengths to match. The stored names
+  have the form `\??\L:\path` (substitute) and `L:\path` (print). The
+  stored layout puts the substitute name first at offset 0, then a
+  2-byte zero, the print name and a 2-byte zero. That layout was new
+  only for the symbolic links; the source junction already had it.
+  The stored length is the new path buffer plus 12 (link) or 8
+  (junction), as topic 24 §3 and §4 give.
 - **[observed, AUDITED 2026-10-28]** On apply (S16), the applied
   reparse data
   equalled the stored bytes. Source and target were both the root of
   a volume lettered `R:`, so this cannot show whether DISM copies the
   stored targets or re-bases them onto the target root (OBS-037). It
-  stays **open** with sample S13B.
-- **Open** (OPEN-WIM-7): whether an apply to another drive letter or a
-  subdirectory changes the stored target (both volumes had the same
-  letter; sample S13B), and how absolute targets outside the capture
-  root are stored, with and without DISM's no-fix option (sample
-  S13C). How the product itself handles such targets is OPEN-WIM-12
-  (§13).
+  stayed **open** with sample S13B; R4 answered it (below).
+- **[observed, R4, AUDITED 2026-10-28] Re-base on apply** (OBS-050):
+  DISM applied
+  the image of the previous bullet to the root of another drive
+  letter, and to a subdirectory two levels down on a third letter.
+  For the four rewritten entries, it replaced the stored drive letter
+  by the apply root (a letter, or a letter and a directory path) in
+  both names, recomputed the offsets and lengths, and kept the
+  layout. Each applied target named the applied copy of its target.
+- **[observed, R4, AUDITED 2026-10-28] Copy on apply** (OBS-051):
+  every other
+  reparse point was stored equal to its source and applied unchanged,
+  byte for byte: absolute targets outside the captured tree (including
+  one on another drive letter), relative links, and all entries
+  of an image captured with DISM's no-fix option. With that option
+  DISM cleared header flag 0x80 and stored in-tree absolute targets
+  unchanged too, so after apply they still name the capture-time
+  paths.
+- **Answered in R4** (OPEN-WIM-7, M-13) by samples S13B and S13C,
+  for the drive-letter and subdirectory forms above. What the
+  product does is the [project rule, DEC-0022] in §13 (formerly
+  OPEN-WIM-12). A volume-root capture with rewritten entries was never
+  applied (OPEN-WIM-13).
 - **See also (SR-6, AUDITED 2026-10-28)**: Microsoft's published
   layouts of the
   reparse buffers (tags, substitute and print names, the relative
   flag) are summarised in `reparse-and-security-descriptors.md`
   (topic 24) §1 to §5, which also marks the points that matter when
   `FLAG_HEADER_RP_FIX` is set. Topic 24 settles neither OPEN-WIM-7
-  nor OPEN-WIM-12.
+  nor OPEN-WIM-12. (R4, AUDITED 2026-10-28: topic 24's OPEN-RPSD-2
+  and 3 are now
+  settled for the drive-letter form from OBS-049.)
 
 **Security descriptors** (OBS-038).
 
@@ -651,7 +740,29 @@ those files only.
 - **Open** (OPEN-WIM-7, sample S13D): whether the stored bytes are
   exactly the self-relative descriptor Windows returns (no binary
   reference was captured), and what an index of −1 looks like (never
-  seen in any file).
+  seen in any file). R4 narrows the first point (below).
+- **[observed, AUDITED 2026-10-28] Form** (OBS-054, corrected): every
+  stored descriptor has `Revision` 1 and SR set,
+  a SACL offset of 0 (SP clear), and owner, group and DACL offsets
+  inside the descriptor: the self-relative form of topic 24 §9.
+  Several stored descriptors set PS although SP is clear. The only
+  binary comparison available was .NET's re-serialisation of each
+  file's descriptor, not the bytes Windows returns. Of the rows
+  compared (3052 in one file, 20 in another; reparse points have no
+  such row), most stored copies differed from it only by the PS bit, a
+  few whose stored copy has no PS were equal, and one differed in
+  length. Whether Windows' own bytes carry PS is still **open**.
+- **[observed, AUDITED 2026-10-28] Reparse-point descriptors**
+  (OBS-053, corrected): DISM's apply wrote the
+  stored descriptor faithfully on every reparse point (12 of 12 in each
+  of three applies). One file link whose DACL had been set on the link
+  itself kept its own stored descriptor. Seven other file links had
+  an explicit, protected DACL in the source, but at capture DISM
+  stored them with the descriptor shared by ordinary files
+  (inherited entries), so they lost their own DACL at capture, not at
+  apply. Why is not shown. Directory reparse points kept theirs.
+  Whether the product should warn about this is a product decision
+  (open).
 - **See also (SR-6, AUDITED 2026-10-28)**: the self-relative
   descriptor, SID and
   ACL layouts from [MS-DTYP] are in topic 24 §7 to §9, the reference
@@ -878,8 +989,14 @@ own limits before using it.
     size equal to its expanded size, first or last. **[observed,
     AUDITED 2026-10-28]** At any position, including consecutive raw
     chunks (OBS-046 as corrected, with S14).
-  - Still open: a final chunk shorter than 32768 bytes that does not
-    shrink (never seen).
+  - Open after R3: a final chunk shorter than 32768 bytes that does
+    not shrink (not seen then).
+  - **Answered for the forms seen (R4, AUDITED 2026-10-28; S17B,
+    OBS-057)**: a short
+    final chunk that does not shrink is stored as its plain bytes,
+    marked by a stored size equal to its expanded size. So a chunk is
+    raw exactly when its stored size equals its expanded size, at any
+    position. Other DISM builds and other tools are not covered.
 - **OPEN-WIM-6**: lookup entry packing, and how metadata entries map to
   image indexes (§5).
   - Settled for the R1 and R2 files: packing (OBS-008); and the k-th
@@ -924,6 +1041,28 @@ own limits before using it.
     the union is [derived] from the paper's order and the observed tag
     position, not seen directly; recycle-bin handling in
     a volume-root capture; whether other DISM builds or tools agree.
+  - **After R4 (AUDITED 2026-10-28; §6.1 R4 notes, OBS-049 to
+    OBS-056):**
+    - M-13 answered for the drive-letter and subdirectory forms:
+      - what capture with the flag stores (OBS-049);
+      - re-base on apply for rewritten entries (OBS-050);
+      - copy for every other entry (OBS-051);
+      - +92 is zero exactly on in-tree absolute targets with the flag
+        set (OBS-052, corrected); its meaning remains a [reading].
+    - M-14 narrowed: stored descriptors are self-relative with SR set,
+      and DISM's apply writes the stored descriptor faithfully
+      (OBS-053, corrected; OBS-054). Still open: whether Windows' own
+      bytes carry PS; security index −1 (never seen).
+    - M-15 sparse block answered: a 4-byte 3, a value equal to 16 ×
+      the number of pairs, then merged (start, end) pairs in
+      descending order (OBS-055). The
+      meaning of the 3 stays open. EFS stays refused.
+    - M-09 stream order: descending name order in every file seen;
+      case folding not shown; not to be relied on (OBS-056).
+    - Product questions raised by R4, not format questions: whether
+      the product warns that file links lose their own DACL at capture
+      (open); how the product treats the volume-root capture form
+      (OPEN-WIM-13).
 - **OPEN-WIM-8**: the content of `NAME`, `DESCRIPTION`, `FLAGS` and
   `WINDOWS` in the XML data, in particular where edition, architecture,
   version and languages are recorded (§7).
@@ -932,46 +1071,140 @@ own limits before using it.
   and whether it is "over" or "at least" (§4). Still open after R3
   (M-22): the sample over 4 GiB was stored uncompressed, so it has no
   chunk table (OBS-047). Needs S08B.
+  - **Answered for the form seen (R4, AUDITED 2026-10-28; S08B,
+    OBS-058, dump
+    only)**: an XPRESS resource with an original size above 2^32 has
+    8-byte entries, even though its stored size and every entry value
+    are below 2^32. The width follows the original size.
+  - Still open: whether the switch is at exactly 2^32 or only above
+    it, and LZX resources over 4 GiB (never seen).
 - **OPEN-WIM-11**: the integrity chunk size unit (§8).
-- **OPEN-WIM-12** (OPEN; wording AUDITED 2026-10-28; product
-  behaviour, not a format question): how does the product handle
+- **OPEN-WIM-12** (product behaviour, not a format question).
+  **No longer OPEN (R4, AUDITED 2026-10-28): settled for the project
+  by DEC-0022**
+  (accepted 2026-10-28). The question was: how does the product handle
   absolute reparse targets that were rewritten at capture (header flag
   0x80) when it applies an image to a different root or drive letter
-  than the one captured? No public source describes this, so it stays
-  OPEN. [project rule, pending decision] Until it is decided, such
-  targets are refused (fail closed). Related: OPEN-WIM-7 (M-13),
-  samples S13B and S13C.
+  than the one captured? No public source on the product describes
+  this. The earlier interim rule ([project rule, pending decision]:
+  refuse such targets) is replaced by the rule below.
   - See also (SR-6, AUDITED 2026-10-28): topic 24
     (`reparse-and-security-descriptors.md`) §5 and OPEN-RPSD-2 and 3
     summarise the published buffer formats this question concerns.
-    The formats do not answer it; it stays OPEN.
 
-**Status after R1, R2 and R3** (R1 in M2 fix round 1, drift; R2 added
-2026-10-27; R3 added and audited 2026-10-28). An observation settles a
-point for the files of its run only; other DISM builds are not covered.
+**[project rule, DEC-0022] Applying reparse points (AUDITED
+2026-10-28).** The
+product applies link and junction targets as the R4 samples show DISM
+does (OBS-050, OBS-051), accepts only the combinations those samples
+show, and refuses anything else with a named reason (fail closed). The
+rule rests on the observed combination of header flag, +92 value and
+stored name form, not on a documented field. What +92 means remains a
+[reading] (OBS-052).
 
-| Item | Status after R1, R2 and R3 | Records |
-|------|----------------------------|---------|
+Inputs, for one reparse-point entry:
+
+| Symbol | Meaning |
+|--------|---------|
+| H | the header flags (§2) |
+| T | the reparse tag, the 32-bit value at entry +88 |
+| M | the 32-bit value at entry +92 |
+| B | the stored reparse data (topic 24 buffer without its 8-byte header) |
+| A | the apply root chosen for this apply |
+
+1. **Copy**, when M is 0x00010000, whatever H is. Write B unchanged.
+   Rebuild the 8-byte header from T, with the data length equal to
+   the size of B and the reserved field 0. B must meet topic 24's
+   bounds (§3 to §5), and a symbolic link's `Flags` must be 0 or 1.
+2. **Re-base**, when M is 0 and all of these hold:
+   - H has 0x80 (`FLAG_HEADER_RP_FIX`) set;
+   - T is the mount-point tag 0xA0000003, or T is the symbolic-link
+     tag 0xA000000C with `Flags` 0;
+   - B has exactly the observed layout: substitute name at offset 0;
+     print name at the substitute length plus 2; a 2-byte zero after
+     each name; path buffer exactly substitute length + 2 + print
+     length + 2;
+   - the substitute name is `\??\` followed by D, a colon and R, and
+     the print name is D, a colon and R, with the same D and R, where
+     D is one upper-case letter `A` to `Z`; R starts with a backslash
+     and is not a lone backslash; and R has no empty, `.` or `..`
+     component and no NUL character.
+
+   The product then writes new data:
+   - A is normalised to `L:` for a volume root, or to `L:\c1\...\cn`
+     with no trailing backslash for a directory;
+   - the new substitute name is `\??\` + A + R, and the new print
+     name is A + R; the stored letter D is discarded;
+   - the layout is the one required above, and `Flags` stays 0;
+   - the data length is the path buffer size plus 12 for a symbolic
+     link, or plus 8 for a mount point;
+   - the entry is refused if the new data would exceed 65535 bytes,
+     or a name would exceed 32760 characters.
+3. **Refuse** with a named reason in every other case.
+
+How well R4 supports the rule:
+
+- The records show 8 re-based cases (four entries, each applied to
+  another drive letter and to a subdirectory) whose applied data DISM
+  wrote byte for byte as the rule gives (OBS-050 to OBS-052).
+- The M3 boot-protocol review of R4 (not a record) reports that,
+  across 34 reparse entries, M = 0 coincided exactly with "symbolic
+  link with `Flags` 0 or mount point, target inside the captured
+  tree, H set", with no conflicts.
+
+Never seen, and therefore refused under the rule:
+
+- M = 0 with H clear; any M other than 0 or 0x00010000;
+- M = 0 together with: a relative `Flags` value or another tag; any
+  other layout; a substitute name that is not a drive-letter path; a
+  lower-case letter; a print name that differs from the substitute;
+  R equal to a lone backslash; dot components;
+- apply roots given as a UNC path, a `\\?\` path, a volume GUID path
+  or a mounted folder;
+- a hard-linked reparse point;
+- any tag other than 0xA000000C or 0xA0000003.
+
+DEC-0022 also names an owner lab run (MT-2), on a real Windows 11
+image, that is to confirm junctions resolve after first boot.
+
+- **OPEN-WIM-13** (R4; wording AUDITED 2026-10-28; still OPEN): what
+  applying a **volume-root
+  capture** with header flag 0x80 should produce. In such a capture
+  (S15) entries with M = 0 were stored with nothing stripped (§6.1),
+  and no such image was ever applied, so the re-base rule's result for
+  it is untested. Needs a sample: apply S15 to another letter and to a
+  subdirectory.
+
+**Status after R1 to R4** (R1 in M2 fix round 1, drift; R2 added
+2026-10-27; R3 added and audited 2026-10-28; R4 added and audited
+2026-10-28). An observation settles a point for the files of its run only;
+other DISM builds are not covered.
+
+| Item | Status after R1 to R4 | Records |
+|------|-----------------------|---------|
 | OPEN-WIM-1 | Settled for R1: little-endian | OBS-002 |
 | OPEN-WIM-2 | Partly: values written are known; which to accept is open | OBS-003 |
 | OPEN-WIM-3 | Partly: not the file size (paper contradicted); meaning is a [reading] | OBS-004 |
 | OPEN-WIM-4 | Partly: `.esd` flags recorded; its compression is undocumented | OBS-006 |
-| OPEN-WIM-5 | Partly: full-size chunk settled (R3) | OBS-010, OBS-046 |
+| OPEN-WIM-5 | Answered for forms seen (R4) | OBS-010, 046, 057 |
 | OPEN-WIM-6 | Packing settled; metadata first; lookup order gives the index in every file seen, including when offset order differs (R2); other cases open (see above) | OBS-008, OBS-009, OBS-018, OBS-021, OBS-023 |
-| OPEN-WIM-7 | Partly (R3): fixed part 102; see above | OBS-024 to 045, 048 |
+| OPEN-WIM-7 | Partly (R3, R4): see above | OBS-024 to 045, 048 to 056 |
 | OPEN-WIM-8 | Partly: encoding and element set for non-Windows content; edition, architecture, version not observable (decision 0013) | OBS-014 |
 | OPEN-WIM-9 | Partly: shared GUID, part and total | OBS-016 |
-| OPEN-WIM-10 | Width 4 seen; threshold open (M-22) | OBS-011, OBS-047 |
+| OPEN-WIM-10 | Answered for form seen; threshold open | OBS-011, 047, 058 |
 | OPEN-WIM-11 | Partly: unit is 10 MiB; range confirmed; multi-entry open | OBS-015 |
+| OPEN-WIM-12 | Settled: [project rule, DEC-0022] | OBS-049 to 052 |
+| OPEN-WIM-13 | Open (volume-root capture never applied) | none |
 
-**Never observed in R1 to R3**: an 8-byte chunk-table entry; a final
-chunk shorter than 32768 bytes stored raw (a full-size raw chunk was
-seen in R3, OBS-046); an integrity table with more than one entry; a
+**Never observed in R1 to R4** (the 8-byte chunk-table entry and the
+short raw final chunk, listed here after R3, were seen in R4: OBS-058,
+OBS-057): an integrity table with more than one entry; a
 bootable image (non-zero boot index); a file whose lookup order
 differs from its index order (file-offset order does differ in
 OBS-021); a commit of any index other than 1; more than two images
 sharing one metadata copy; a security index of −1; a non-zero value at
-directory entry offsets +24, +32 or +84.
+directory entry offsets +24, +32 or +84; a compressed resource of
+exactly 2^32 bytes; an LZX resource over 4 GiB; an apply of a
+volume-root capture.
 
 **Samples recorded in R2** (asked for by the M2 boot-protocol review
 as S11 and S12):
@@ -996,8 +1229,24 @@ to M-23):
 - **S08** (a file over 4 GiB): recorded, OBS-047, but stored
   uncompressed, so it did not answer OPEN-WIM-10.
 
-**Samples still needed** (from the M2 boot-protocol review, run R2 and
-run R3):
+**Samples recorded in R4** (AUDITED 2026-10-28; asked for after R3):
+
+- **S13B** (a second metadata tree with in-tree and out-of-tree
+  absolute links, relative links, sparse files with several holes and
+  files with several named streams, captured with the fix) and
+  **S13C** (the same tree with DISM's no-fix option): recorded,
+  OBS-049 to OBS-056.
+- **S16B**, **S16C** and **S16D** (applies to another drive letter, to
+  a subdirectory, and of S13C): recorded, OBS-050, OBS-051, OBS-053,
+  OBS-054.
+- **S17B** (short pseudorandom final chunks): recorded, OBS-057.
+- **S08B** (a compressible file over 4 GiB): recorded, OBS-058 (dump
+  only).
+- S13D was not run as such: R4 compared descriptors with .NET's
+  re-serialisation only, so its byte-equality part is still needed.
+
+**Samples still needed** (from the M2 boot-protocol review and runs R2
+to R4):
 
 - a tree with long runs (for example 32 KiB of zero bytes and a
   repeated 300-byte pattern), to exercise long matches and many-chunk
@@ -1017,24 +1266,19 @@ run R3):
 - **S11D**: images A, B, then A again by export, to see what happens
   when identical images are not adjacent in index order (§5,
   OPEN-WIM-6);
-- **S08B**: a compressible file over 4 GiB, so that DISM writes a
-  chunk table over 4 GiB (M-22, OPEN-WIM-10);
 - an integrity sample over 10 MiB (OPEN-WIM-11);
-- **S13B**: the S13 tree applied to a volume with another drive
-  letter, and to a subdirectory, to see whether stored absolute link
-  targets change (M-13, OPEN-WIM-7);
-- **S13C**: an absolute symbolic link whose target lies outside the
-  capture root, captured with and without DISM's no-fix option (M-13,
-  OPEN-WIM-7);
-- **S13D**: a file with an explicit protected descriptor without
-  inheritable entries, a binary dump of the descriptors Windows
-  returns for the tree, and any entry with security index −1 if DISM
-  can be made to write one (M-14, OPEN-WIM-7);
-- **S13E**: sparse files with one and with three deallocated ranges
-  (M-15, OPEN-WIM-7);
-- **S13F**: files with three or more named streams created in
-  different orders (M-09, OPEN-WIM-7);
-- a short final chunk that does not shrink (OPEN-WIM-5, rest).
+- **S13D** (narrowed after R4): a binary dump of the descriptors
+  Windows itself returns for the tree, not a .NET re-serialisation,
+  and any entry with security index −1 if DISM can be made to write
+  one (M-14, OPEN-WIM-7);
+- an apply of the volume-root capture S15 to another drive letter and
+  to a subdirectory (OPEN-WIM-13);
+- a compressible resource of exactly 2^32 bytes, and an LZX resource
+  over 4 GiB (OPEN-WIM-10);
+- stream names that differ only in case (M-09 case folding).
+- Recorded in R4 and no longer needed: S08B, S13B, S13C, S13E (as
+  part of S13B), S13F (as part of S13B) and the short final chunk
+  (S17B).
 
 Any [reading] or OPEN point can be settled by testing against files made
 with Microsoft's DISM. That is interoperability testing with Microsoft's

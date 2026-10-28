@@ -584,6 +584,78 @@ Reparse data and security descriptors (spec request SR-6, M3,
     sentence, SRC-140 to SRC-153 and this run note. OPEN-RPSD-1 to 4
     stay open.
 
+DISM sample run R4 folded into wim.md and topic 24 (2026-10-28;
+AUDITED 2026-10-28, approve with comments):
+
+- No research, no fetches and no searches. No vendor source and no
+  Microsoft page was opened.
+- At the coordinator's direction the researcher read:
+  - the R4 row of "Runs examined" and records OBS-049 to OBS-058 of
+    `docs/formats/wim-observed.md` (being corrected at the time);
+  - the run's `findings-boot-obs-r4.md` (the restatements BOOT-R4-001
+    to 008, "The re-base rule" and "Spec drift");
+  - decision record 0022.
+
+  No code or script was opened.
+- Where a record and the findings differ (OBS-049, 052, 053, 054,
+  055, 056 and 058), the findings' restatement was followed. The
+  volume-root point (+92 zero with nothing stripped) is taken from
+  BOOT-R4-001, not from a record.
+- `wim.md`:
+  - §4: short raw final chunks (OBS-057) and 8-byte table entries
+    above 2^32 (OBS-058, dump only).
+  - §6.1: the sparse block, stream order, +92, capture with the flag,
+    re-base and copy on apply, and descriptor form and reparse-point
+    DACLs.
+  - §13: OPEN-WIM-5 answered and OPEN-WIM-10 partly answered for the
+    forms seen. OPEN-WIM-12 is replaced by the [project rule,
+    DEC-0022] re-base rule (inputs H, T, M, B, A; copy, re-base,
+    refuse; apply-root normalisation; never-seen list). New
+    OPEN-WIM-13 (volume-root capture never applied). The status table
+    and sample lists were updated.
+- Topic 24:
+  - §5 and §10 no longer say "refused until decided"; they cite
+    DEC-0022.
+  - The +92 note and the S13D remark were updated.
+  - OPEN-RPSD-2 and 3 are settled for the drive-letter form.
+- No hex dumps or sample paths were copied. Rule literals (`\??\`, tag
+  values) are Microsoft format constants already in topic 24.
+- New rows: DEC-0022 and the R4 observation record. INDEX topics 9
+  and 24 were updated.
+- Text changed inside AUDITED material (for the auditor):
+  - the R1 §4 width bullet;
+  - the R3 §4 "Not seen" and "No chunk table" bullets;
+  - the §6.1 sparse and stream-order bullets;
+  - the R3 "On apply" bullet and the M-13 "Open" bullet, which became
+    "Answered in R4";
+  - the OPEN-WIM-12 wording, whose interim refusal is replaced;
+  - topic 24's §5 last bullet, §9 S13D bullet and §10 third bullet.
+  - Completed for CR-R4-005, from the auditor's list:
+    - topic 24: the header status sentence, the [WIM] label bullet,
+      the §5 RP_FIX bullet, and §11 OPEN-RPSD-2 and 3 and Related;
+    - wim.md: the Sources paragraph and the [observed] definition,
+      the §13 M-14 bullet, the §6.1 SR-6 see-also bullet, the
+      OPEN-WIM-12 SR-6 sub-bullet, and the status rows for
+      OPEN-WIM-5, 7 and 10.
+- Re-check: checked against committed OBS-049..058 at d38b584; all R4
+  notes match; the volume-root point is now OBS-052. "As restated"
+  became "(OBS-0nn, corrected)" in wim.md and topic 24.
+- Audit fixes (2026-10-28):
+  - CR-R4-001: "most" became "several" for stored descriptors that set
+    PS (4 of 10; OBS-054).
+  - CR-R4-002: "a drive that did not exist" became "another drive
+    letter", because OBS-051 does not state the drive was absent.
+  - CR-R4-003: the 34-entry tally is attributed to the boot review
+    without the [observed] label; the 8 byte-exact cases cite OBS-050
+    to OBS-052.
+  - CR-R4-004 and CR-R4-005: as above.
+  - CR-R4-006 to 009 (NITs): applied.
+- Marked AUDITED 2026-10-28: the R4 notes in wim.md (Sources, labels,
+  §4, §6.1, §13 including the DEC-0022 rule and the OPEN-WIM-13
+  wording, status table and sample lists), the R4 text in topic 24,
+  INDEX topics 9 and 24, the DEC-0022 and R4 observation rows and this
+  run note. OPEN-WIM-13 and the other open items stay open.
+
 ## Project decisions cited
 
 These are project design decisions, not product behaviour. They are
@@ -607,6 +679,7 @@ recorded in the repository and need no public-access check.
 | DEC-0019 | Windows API binding | `docs/decisions/0019-windows-api-binding.md` | 2026-10-28 (owner decision, as stated in the M3 build spec request) | Project decision, not product behaviour. Implementation choice. Content taken from the orchestrator's spec request; the record was not opened by the researcher (outside its read scope). Checked by the clean-room auditor 2026-10-28 (spec pass) | No spec text. Named in standards/windows-storage-firmware-api.md header and OPEN-WAPI-1 only to say the binding is a clean-side choice; INDEX header |
 | DEC-0020 | Pre-boot agent trust model | `docs/decisions/0020-preboot-agent-trust-model.md` | 2026-10-28 (owner decision, as stated in the M3 build spec request) | Project decision, not product behaviour. Content taken from the spec request; record not opened. Checked by the clean-room auditor 2026-10-28 (spec pass) | Items 1 and 5: the operator adds the agent and its public configuration (server address and trust anchor) to the operator's own WinPE, and the product never modifies the PE (CR-002); the device carries no secret; REQ-TGT-012's trusted environment is met by server-authenticated TLS plus the mandatory code or approval (DEC-0018 item 1) acting as the device credential; a secret embedded in the PE is not built: REQ-PE-010 status note, REQ-PE-015 status note, preinstall-env.md OPEN-PE-6 (settled for the project), REQ-TGT-012 status note; INDEX header, PE-1, TGT-1 |
 | DEC-0021 | Minimal relay enrolment for M3 | `docs/decisions/0021-minimal-relay-enrolment-m3.md` | 2026-10-28 (owner decision, as stated in the M3 build spec request) | Project decision, not product behaviour. Content taken from the spec request; record not opened. Checked by the clean-room auditor 2026-10-28 (spec pass) | Manual relay enrolment; relay pulls a signed, generation-numbered boot-policy list; a stop is reversed only by an audited operator command until REQ-BOOT-062 is specced: REQ-BOOT-062 and REQ-BOOT-067 status notes. Item 4 (all content for the chosen package downloaded and verified in full before the wipe, then discarded; fetched and verified again during apply; nothing staged and nothing written before it is verified; OPEN-JOB-3 open only as a product question): REQ-PE-016 status note (corrected for CR-001). INDEX header, BOOT-5, PE-1 |
+| DEC-0022 | Applying absolute link and junction targets (OPEN-WIM-12) | `docs/decisions/0022-apply-rebases-rpfix-targets.md` | 2026-10-28 (Accepted by owner 2026-10-28, with a 2026-10-28 clarification of "rewritten" after review finding BOOT-R4-001) | Project decision, not product behaviour. Record opened by the researcher at the coordinator's direction (R4 fold); the exact rule is taken from the "re-base rule" section of the run's R4 boot-protocol findings, which the decision names | standards/wim.md §6.1 (R4 reparse notes) and §13 (OPEN-WIM-12 settled; the [project rule, DEC-0022] re-base rule; OPEN-WIM-13 raised); standards/reparse-and-security-descriptors.md §5, §10, §11; INDEX topics 9 and 24. AUDITED 2026-10-28 (CR-R4-001 to 009 applied) |
 
 ## Project observation records
 
@@ -620,6 +693,7 @@ cited in specs only under the [observed] label.
 | OBS-001 to OBS-017 (run R1) | WIM format: observations from our own DISM-made files | `docs/formats/wim-observed.md` | Workflow run 40535666995, attempt 1, commit ba23bed (branch of the WIM sample job); DISM 10.0.26100.32860 on Windows build 26100.33650; 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R1 files only | standards/wim.md Sources, labels, §2, §3, §4, §5, §7, §8, §9, §10, §12, §13; standards/wim-compression.md Sources, §1, §3, §3.1, §3.3, §3.4, §3.6, §7; REQ-IMG-038 Status (OPEN-WIMC-1 confirmed for R1); INDEX header, topics 9 and 20 |
 | OBS-018 to OBS-023 (run R2) | WIM format: observations from our own DISM-made files changed after capture (identical images, append, export, commit, delete) | `docs/formats/wim-observed.md` | Workflow run 40599556702, attempt 1, commit 5d3c8c7 (job `generate`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1); 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R2 files only (OBS-020 also notes R1's 12-image file) | standards/wim.md Sources, labels, §3, §5, §13 (OPEN-WIM-6, status table, never-observed list, samples recorded and still needed), §14; INDEX header and topic 9 |
 | OBS-024 to OBS-048 (run R3) | WIM format: observations of metadata resources (directory entries, streams, security data), raw chunks, a file over 4 GiB, XML counts and DISM's apply | `docs/formats/wim-observed.md` | Workflow run 40754869824, attempt 1, commit 27f7237 (jobs `generate`, `generate-large`, `generate-metadata`, `reference`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1 and R2); 2026-10-28 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for the R3 files examined (including S01, rebuilt in R3 with the R1 command) only. Records were read from the "Runs examined" rows, the M-01 to M-23 section and the records themselves | standards/wim.md Sources, labels, §3, §4, §5, §6 (fixed part contradicted by OBS-026; new §6.1), §7, §13 (OPEN-WIM-5, 7, 10, status table, never-observed list, samples recorded in R3 and still needed), §13 OPEN-WIM-12 (via OBS-037); INDEX topic 9. EFS refusal: [project rule, DEC-0006]. AUDITED 2026-10-28 (CR-R3-001 to 003, 005 applied). SR-6: OBS-036 to OBS-038 cited in standards/reparse-and-security-descriptors.md §2, §5, §9 and in the wim.md §6.1 descriptor correction (AUDITED 2026-10-28) |
+| OBS-049 to OBS-058 (run R4) | WIM format: reparse-point capture and apply with and without the fix-up flag, descriptors of reparse points and their form, sparse blocks, stream order, short raw final chunks, 8-byte chunk-table entries | `docs/formats/wim-observed.md` | Workflow run 40766748266, attempt 1, commit 4ba76cd (jobs `generate`, `generate-large`, `generate-metadata`, `reference`); DISM and Windows build as R3; 2026-10-28 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for the R4 files only. Records were corrected after the run's R4 boot-protocol findings (BOOT-R4-001 to 008) and committed at d38b584; the fold was re-checked against the committed records, and specs cite corrected records as "(OBS-0nn, corrected)". The volume-root point is OBS-052. OBS-058 rests on a dump only | standards/wim.md Sources, labels, §4 (R4 chunking), §6.1 (R4 sparse, stream, reparse and descriptor notes), §13 (OPEN-WIM-5, 7, 10 answered or narrowed; OPEN-WIM-12 rule support; OPEN-WIM-13; status table, never-observed list, R4 samples, samples still needed); standards/reparse-and-security-descriptors.md header, labels, §5, §9, §10, §11 (OPEN-RPSD-2, 3); INDEX topics 9 and 24. AUDITED 2026-10-28 (CR-R4-001 to 009 applied) |
 
 ## Sources used
 

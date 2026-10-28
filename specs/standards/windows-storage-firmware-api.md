@@ -10,6 +10,8 @@ Which calls the product uses, and how it binds to them, is the clean
 side's choice (DEC-0019 records the binding choice; it adds no spec
 text). The follow-up request SR-3b (2026-10-28) added §13 to §19 and
 OPEN-WAPI-4 to 6 (AUDITED 2026-10-28; the OPEN items stay open).
+SR-3c (2026-10-28) added §20 to §25 and OPEN-WAPI-7 to 12 (AUDITED
+2026-10-28 after the fix round; the OPEN items stay open).
 
 Sources: Microsoft Learn Win32 and driver reference pages, one page
 per function, structure or control code, named in each section below.
@@ -315,8 +317,10 @@ Microsoft facts, not product behaviour.
 
 ## 12. Open points
 
-- **OPEN-WAPI-1**: the numeric values of the control codes (§1) and of
-  the [enum] values are not given on the pages read. Where they come
+- **OPEN-WAPI-1**: the numeric values of the control codes (§1), of
+  the [enum] values, and of flag constants that the pages name without
+  a number (for example the `SECURITY_INFORMATION` flags, §20, and the
+  device-type names, §13) are not given on the pages read. Where they come
   from is clean-side design (DEC-0019).
 - **OPEN-WAPI-2**: which error `IOCTL_DISK_IS_WRITABLE` reports for a
   write-protected disk (§6) is not stated.
@@ -337,6 +341,25 @@ Microsoft facts, not product behaviour.
 - **OPEN-WAPI-6** (SR-3b, AUDITED): the form of the link names that
   `FindFirstFileNameW` and `FindNextFileNameW` return (for example
   whether they include the drive) is not stated (§19).
+- **OPEN-WAPI-7** (SR-3c, AUDITED): whether `SetKernelObjectSecurity`
+  on a file keeps the DACL and SACL "protected" and "auto-inherited"
+  control bits exactly as given in the descriptor. No page read says
+  (§20).
+- **OPEN-WAPI-8** (SR-3c, AUDITED): whether `GetDriveType` accepts a
+  volume GUID path (`\\?\Volume{...}\`) as its root path. Its page
+  speaks only of a root directory with a trailing backslash (§25).
+- **OPEN-WAPI-9** (SR-3c, AUDITED): what `SetFileShortNameW` does, and
+  which error it returns, on a volume where 8.3 short names are
+  disabled. Not stated (§21).
+- **OPEN-WAPI-10** (SR-3c, AUDITED): the handle access and error codes
+  for `FSCTL_SET_REPARSE_POINT`. The Win32 page names only the
+  privilege (§24).
+- **OPEN-WAPI-11** (SR-3c, AUDITED): whether `SetFileInformationByHandle` with
+  basic information accepts, ignores or rejects attribute bits that
+  Microsoft says are set by other means (compressed, sparse, reparse,
+  encrypted, directory, device, virtual) (§22).
+- **OPEN-WAPI-12** (SR-3c, AUDITED): whether `FILE_ATTRIBUTE_NORMAL` is valid on
+  a directory (§22).
 
 ## 13. Volumes not backed by a disk (SR-3b item 3; AUDITED)
 
@@ -664,3 +687,220 @@ Pages: "FindFirstStreamW function", "FindNextStreamW function",
     the reparse tag.
   - **[reading]** The reparse tag is meaningful when the attributes
     include the reparse-point attribute.
+
+## 20. Security descriptors on files (SR-3c item 1; AUDITED)
+
+Pages: "SetKernelObjectSecurity function", "SECURITY_INFORMATION",
+"IsValidSecurityDescriptor function", "GetSecurityDescriptorLength
+function", "GetSecurityDescriptorOwner function",
+"GetSecurityDescriptorDacl function", "GetSecurityDescriptorSacl
+function", "File Security and Access Rights". Layouts of SIDs, ACLs
+and self-relative descriptors: topic 24 §7 to §9.
+
+- **`SetKernelObjectSecurity(handle, parts, descriptor)`.**
+  - Sets the parts of an object's security named by the
+    `SECURITY_INFORMATION` flags. Returns nonzero on success, zero on
+    failure with the reason from `GetLastError`.
+  - Its own page says it **should not be used for file-system
+    objects**; it points to `SetSecurityInfo` or
+    `SetNamedSecurityInfo` instead.
+  - The "File Security and Access Rights" page says the opposite for
+    one case: a backup program that has opened a file with backup
+    semantics (§23) may read and reset the file's access-control
+    settings with `GetKernelObjectSecurity` and
+    `SetKernelObjectSecurity`.
+  - The page says nothing about inheritance, propagation to children,
+    or how the descriptor's "protected" and "auto-inherited" control
+    bits are treated (**OPEN-WAPI-7**).
+- **Which part needs which handle access** (`SECURITY_INFORMATION`
+  page; it gives no numeric flag values, see OPEN-WAPI-1). Each entry
+  gives the right needed to read, then to set:
+  - owner (`OWNER_SECURITY_INFORMATION`): `READ_CONTROL`;
+    `WRITE_OWNER`.
+  - group (`GROUP_SECURITY_INFORMATION`): `READ_CONTROL`;
+    `WRITE_OWNER`.
+  - DACL (`DACL_SECURITY_INFORMATION`): `READ_CONTROL`; `WRITE_DAC`.
+  - SACL (`SACL_SECURITY_INFORMATION`): `ACCESS_SYSTEM_SECURITY` for
+    both.
+  - integrity label (`LABEL_SECURITY_INFORMATION`): `READ_CONTROL`;
+    `WRITE_OWNER`.
+  - `PROTECTED_DACL_` and `UNPROTECTED_DACL_SECURITY_INFORMATION`:
+    cannot be read; set with `WRITE_DAC`.
+  - `PROTECTED_SACL_` and `UNPROTECTED_SACL_SECURITY_INFORMATION`:
+    cannot be read; set with `ACCESS_SYSTEM_SECURITY`.
+  - all parts (`BACKUP_SECURITY_INFORMATION`): `READ_CONTROL` and
+    `ACCESS_SYSTEM_SECURITY`; `WRITE_DAC`, `WRITE_OWNER` and
+    `ACCESS_SYSTEM_SECURITY`.
+  - "Protected" means the DACL (or SACL) does not inherit entries from
+    the parent; "unprotected" means it does. The page also says some
+    flags work only with `SetNamedSecurityInfo`, without saying which.
+    `BACKUP_SECURITY_INFORMATION` (all parts) is not available before
+    Windows 8 and Windows Server 2012.
+- **Checking a descriptor.**
+  - `IsValidSecurityDescriptor` checks the parts that are present. It
+    does **not** check that any given part is present, and does
+    **not** check the contents of individual ACLs or ACEs. It returns
+    zero for invalid, with no extended error (`GetLastError` must not
+    be used).
+  - `GetSecurityDescriptorLength` returns the length in bytes of a
+    structurally valid descriptor, including everything it refers to.
+    For an invalid descriptor the result is **undefined**. The smallest
+    descriptor (no SIDs, no ACLs) is `SECURITY_DESCRIPTOR_MIN_LENGTH`.
+  - **[reading]** So the length is meaningful only after the
+    descriptor has passed the validity check, and neither call
+    replaces the bounds checks of topic 24 §9.
+- **Reading the parts.** Each returns a pointer **into** the
+  descriptor (no copy) and nonzero on success.
+  - `GetSecurityDescriptorOwner`: the owner SID, or null if there is
+    none, and whether it was defaulted. `GetSecurityDescriptorGroup`
+    does the same for the primary group: the group SID, or null if
+    there is none, and whether it was defaulted.
+  - `GetSecurityDescriptorDacl`: a "present" flag, the DACL pointer and
+    a "defaulted" flag. Present with a **null** DACL means a null DACL,
+    which allows all access. That is not the same as an empty DACL,
+    which allows none. Microsoft says a program that expects a DACL and
+    finds a null one should fail securely. Not present means the other
+    outputs are not valid.
+  - `GetSecurityDescriptorSacl`: the same pattern for the SACL;
+    present with null means a null SACL.
+
+## 21. Short (8.3) names (SR-3c item 2; AUDITED)
+
+Page: "SetFileShortNameW function" (dated 2025-03-07).
+
+- Sets the file's short name; the file must be on an NTFS volume.
+- **Handle:** opened with `DELETE` access and the backup-semantics
+  flag. Before Windows 10 version 1903 it needed `GENERIC_ALL`, or
+  `GENERIC_WRITE` plus `DELETE`, also with backup semantics.
+- **Privilege:** before Windows 10 version 1903 the caller needed the
+  restore privilege (`SE_RESTORE_NAME`). The page does not say a
+  privilege is needed from 1903 on.
+- An empty string removes the short name; if there is none, the call
+  does nothing and succeeds. Windows Server 2008, Vista and earlier do
+  not support this.
+- Errors named: `ERROR_ALREADY_EXISTS` (the short name is not unique);
+  `ERROR_INVALID_PARAMETER` (the file was opened case-sensitive, or the
+  short name is not valid).
+- Not supported on ReFS. Short names are not recommended on cluster
+  shared volumes.
+- What happens on an NTFS volume with short names turned off is **not
+  stated** (**OPEN-WAPI-9**).
+
+## 22. Basic information: times and attributes (SR-3c item 3; AUDITED)
+
+Pages: "SetFileInformationByHandle function",
+"GetFileInformationByHandleEx function" (§19), "FILE_BASIC_INFO",
+"SetFileAttributesW function", "File Attribute Constants".
+
+- `SetFileInformationByHandle(handle, class, buffer, size in bytes)`
+  sets information by class. Class `FileBasicInfo` is 0; other
+  settable classes include rename (3), disposition (4), allocation (5)
+  and end of file (6). All these values are explicit on the page.
+  The handle must have been opened with the access the change needs
+  (the page gives the delete case as its example). Nonzero on success.
+- `FILE_BASIC_INFO`: `CreationTime`, `LastAccessTime`,
+  `LastWriteTime`, `ChangeTime` (each a 64-bit count of 100 ns
+  intervals since 1601-01-01 UTC; `ChangeTime` tracks metadata
+  changes, `LastWriteTime` the data), then `FileAttributes`.
+  - `FileAttributes` = 0 when setting means **leave the attributes
+    unchanged**.
+  - The page does not say whether a zero time means "unchanged"
+    ([reading]: do not assume it).
+- **Which attribute bits can be set.** The basic-info pages do not
+  list them. The `SetFileAttributes` page (a different function)
+  lists the settable set, which is the best published guide:
+  `READONLY` `0x1`, `HIDDEN` `0x2`, `SYSTEM` `0x4`, `ARCHIVE` `0x20`,
+  `NORMAL` `0x80`, `TEMPORARY` `0x100`, `OFFLINE` `0x1000`,
+  `NOT_CONTENT_INDEXED` `0x2000`. Others are set by other means:
+  - compressed `0x800`: `FSCTL_SET_COMPRESSION`;
+  - sparse `0x200`: `FSCTL_SET_SPARSE`;
+  - reparse point `0x400`: `FSCTL_SET_REPARSE_POINT` (§24);
+  - encrypted `0x4000`: created encrypted, or `EncryptFile`;
+  - directory `0x10`: cannot be set; a file cannot become a directory;
+  - device `0x40` and virtual `0x10000`: reserved for the system.
+  Whether `SetFileInformationByHandle` accepts, ignores or rejects
+  these "other means" bits is not stated (**OPEN-WAPI-11**).
+- **`NORMAL` (`0x80`)** is described as "a file that does not have
+  other attributes set" and is valid only when used alone; any other
+  bit overrides it. Neither page says whether it is valid on a
+  directory (**OPEN-WAPI-12**). **[reading, unconfirmed; not to be
+  relied on]** The description speaks of a file only, and a directory
+  always carries the directory attribute, so "alone" may not hold for
+  one.
+- `READONLY` is not honoured on directories.
+
+## 23. Backup, restore and security privileges (SR-3c item 4; AUDITED)
+
+Pages: "Privilege Constants (Winnt.h)", "File Security and Access
+Rights", "SACL Access Right", "GetFileSecurityW" (§19).
+
+- **Backup** (`SE_BACKUP_NAME`, `SeBackupPrivilege`): grants read
+  access to any file whatever its ACL (other requests are still checked
+  against the ACL). The rights granted are `READ_CONTROL`,
+  `ACCESS_SYSTEM_SECURITY`, `FILE_GENERIC_READ` and `FILE_TRAVERSE`.
+- **Restore** (`SE_RESTORE_NAME`, `SeRestorePrivilege`): grants write
+  access to any file whatever its ACL (other requests still checked),
+  and lets the holder set **any valid user or group SID as owner**.
+  Rights granted: `WRITE_DAC`, `WRITE_OWNER`,
+  `ACCESS_SYSTEM_SECURITY`, `FILE_GENERIC_WRITE`, `FILE_ADD_FILE`,
+  `FILE_ADD_SUBDIRECTORY`, `DELETE`.
+- **Security** (`SE_SECURITY_NAME`, `SeSecurityPrivilege`) and the
+  SACL:
+  - The `ACCESS_SYSTEM_SECURITY` right controls both **getting and
+    setting** an object's SACL. The system grants that right only if
+    the security privilege is **enabled** in the requesting thread's
+    token ("SACL Access Right").
+  - Microsoft's steps: enable the privilege, request
+    `ACCESS_SYSTEM_SECURITY` when opening the handle, get or set the
+    SACL, then disable the privilege. The named-object functions
+    request the right themselves once the privilege is enabled.
+  - `GetFileSecurityW` also says reading a SACL needs the privilege
+    enabled (§19).
+  - The privilege-constants page lists `ACCESS_SYSTEM_SECURITY` among
+    the rights the backup and restore privileges grant (above). On a
+    removable drive with removable-storage auditing turned on, those
+    two privileges also need the security privilege to get it.
+- **How they take effect.** The privileges must be held **and
+  enabled** in the token (§10), and the file must be opened with the
+  backup-semantics flag, which marks the caller as a backup program.
+  Then:
+  - with backup, opening for `READ_CONTROL` bypasses the normal checks
+    so the file and its security can be read;
+  - with restore, opening for `WRITE_OWNER` and `WRITE_DAC` lets the
+    program reset owner and DACL;
+  - adding `ACCESS_SYSTEM_SECURITY` to the requested access is needed
+    to reach the SACL.
+
+## 24. Setting a reparse point (SR-3c item 5; AUDITED)
+
+Page: "FSCTL_SET_REPARSE_POINT" (the same page as topic 24 §6). Buffer
+layouts and the earlier summary: topic 24 §2 to §6
+(`reparse-and-security-descriptors.md`).
+
+- The control code is sent to a handle on the file or directory with a
+  reparse buffer as input and no output.
+- **Privilege:** the page says the calling process must hold the
+  create-symbolic-link privilege (`SE_CREATE_SYMBOLIC_LINK_NAME`),
+  as topic 24 §6 records.
+- **Not stated** on the page: the handle access or open flags needed,
+  any error codes, a size limit, rules for an existing reparse point
+  or a non-empty directory, or what happens to file data
+  (**OPEN-WAPI-10**; topic 24 OPEN-RPSD-1).
+- Time stamps may not update correctly on a remote file. Reparse
+  points are not supported on cluster shared volumes.
+
+## 25. `GetDriveType` and volume GUID paths (SR-3c item 6; AUDITED)
+
+Pages: "GetDriveTypeW function" (§13), "Naming a Volume" (§8).
+
+- `GetDriveType` takes "the root directory for the drive", and **a
+  trailing backslash is required**. Null means the root of the current
+  directory. A path with no volume mounted gives `DRIVE_NO_ROOT_DIR`
+  (1).
+- Its page does not say whether a volume GUID path is accepted
+  (**OPEN-WAPI-8**).
+- "Naming a Volume" lists a volume GUID path as one kind of volume
+  mount point, and says every volume function that takes a volume GUID
+  path needs the trailing backslash. **[reading]** If `GetDriveType`
+  accepts one, it would be in the form `\\?\Volume{...}\`, with the
+  backslash. Not confirmed.

@@ -456,7 +456,11 @@ decide.
     adapters, console echo, streams, hard links and security) and
     OPEN-WAPI-4 to 6, AUDITED 2026-10-28 (the OPEN items stay open);
     topic 5 §10.3 gained the Secure Boot state variables, AUDITED
-    2026-10-28).
+    2026-10-28. SR-3c added §20 to §25 (file security descriptors,
+    short names, basic file information and attributes, backup and
+    restore privileges, setting reparse points, `GetDriveType` with
+    volume GUID paths) and OPEN-WAPI-7 to 12, AUDITED 2026-10-28 after
+    its fix round; the OPEN items stay open).
 24. Reparse data and security descriptors ([MS-FSCC] reparse tags and
     the generic, mount-point and symbolic-link reparse buffers;
     [MS-DTYP] SID, ACL, ACE header and the self-relative security

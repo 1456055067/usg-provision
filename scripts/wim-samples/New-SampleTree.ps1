@@ -81,6 +81,35 @@
                       mixed-65536.bin (32768 bytes of text, then 32768
                       pseudorandom bytes) and mixed-reverse-65536.bin (the
                       same two halves in the other order).
+      Metadata2       the R3 follow-up requests (samples S13B, S13C; apply
+                      references S16B to S16D; docs/formats/wim-observed.md
+                      "M3 metadata questions"). NTFS, elevated, and
+                      -OutsidePath: a directory on the same volume, outside
+                      -Path, that the script fills with link targets.
+                        links\   in-tree absolute symbolic links to a file,
+                                 a directory and a nested file, a junction,
+                                 relative links (one through ..)
+                        out\     absolute links and a junction to
+                                 -OutsidePath, a dangling link to another
+                                 drive letter, a relative link that leaves
+                                 the tree
+                        acl\     a symbolic link with its own explicit DACL
+                                 (icacls /L)
+                        sparse\  sparse files with two and three holes, a
+                                 hole at the start, at the end, all hole,
+                                 and the sparse flag without a hole
+                                 (65536-byte blocks)
+                        streams\ five named streams written out of name
+                                 order, five written in name order, three
+                                 streams on a directory, streams whose size
+                                 order differs from their name order
+                      Times are the Metadata profile's (Set-DistinctTimes).
+      MixedTail       short final chunks that do not shrink (OPEN-WIM-5,
+                      sample S17B): 32768 bytes of text, then 100, 5000 or
+                      32767 pseudorandom bytes (three files).
+      LargeText       one compressible file of -LargeBytes bytes (default
+                      4.5 GiB): a 1 MiB block of text repeated (sample
+                      S08B, OPEN-WIM-10: a compressed resource over 4 GiB).
 
     Every native command the Metadata profile runs is printed as a "cmd:"
     line, and its failure stops the script (fail closed).
@@ -98,8 +127,13 @@
     Seed for System.Random (0 to 2147483647).
 
 .PARAMETER TreeProfile
-    Standard, Incompressible, Large, LongRun, Service, Metadata or Mixed.
-    Alias: -Profile (plan WU-W wording).
+    Standard, Incompressible, Large, LongRun, Service, Metadata, Mixed,
+    Metadata2, MixedTail or LargeText. Alias: -Profile (plan WU-W wording).
+
+.PARAMETER OutsidePath
+    Metadata2 only: absolute path of a directory on the same volume,
+    outside -Path, for the out-of-tree link targets (created if absent;
+    must be empty if present).
 
 .PARAMETER LargeBytes
     Size of the Large profile's file in bytes.
@@ -125,11 +159,14 @@ param(
 
     [Parameter(Mandatory = $true)]
     [Alias('Profile')]
-    [ValidateSet('Standard', 'Incompressible', 'Large', 'LongRun', 'Service', 'Metadata', 'Mixed')]
+    [ValidateSet('Standard', 'Incompressible', 'Large', 'LongRun', 'Service', 'Metadata', 'Mixed',
+        'Metadata2', 'MixedTail', 'LargeText')]
     [string] $TreeProfile,
 
     [ValidateRange(1, 68719476736)]
-    [long] $LargeBytes = 4831838208
+    [long] $LargeBytes = 4831838208,
+
+    [string] $OutsidePath = ''
 )
 
 Set-StrictMode -Version 3.0
@@ -424,6 +461,134 @@ function New-MetadataTree([string] $Root, [int] $Seed, [System.Random] $Rng) {
     }
 }
 
+# Metadata2 helpers. A sparse file of 65536-byte blocks: 'D' blocks hold
+# pseudorandom data, 'H' blocks are zero and deallocated with fsutil.
+function New-SparseFile([string] $File, [string] $Pattern, [System.Random] $Rng) {
+    $block = 65536
+    $buf = [byte[]]::new($block * $Pattern.Length)
+    $data = [byte[]]::new($block)
+    for ($i = 0; $i -lt $Pattern.Length; $i++) {
+        if ($Pattern[$i] -eq 'D') {
+            $Rng.NextBytes($data)
+            [Array]::Copy($data, 0, $buf, $i * $block, $block)
+        }
+    }
+    [System.IO.File]::WriteAllBytes($File, $buf)
+    Invoke-Native 'fsutil.exe' @('sparse', 'setflag', $File)
+    for ($i = 0; $i -lt $Pattern.Length; $i++) {
+        if ($Pattern[$i] -eq 'H') {
+            Invoke-Native 'fsutil.exe' @('sparse', 'setrange', $File, [string]($i * $block), [string]$block)
+        }
+    }
+    Assert-Attribute $File ([System.IO.FileAttributes]::SparseFile)
+    Invoke-Native 'fsutil.exe' @('sparse', 'queryrange', $File)
+}
+
+function New-Link([string] $Link, [string] $Target, [switch] $Directory) {
+    Write-Output ('op: symbolic link {0} -> {1} (directory: {2})' -f $Link, $Target, [bool]$Directory)
+    if ($Directory) { [void][System.IO.Directory]::CreateSymbolicLink($Link, $Target) }
+    else { [void][System.IO.File]::CreateSymbolicLink($Link, $Target) }
+}
+
+function New-Metadata2Tree([string] $Root, [string] $Outside, [int] $Seed, [System.Random] $Rng) {
+    $volume = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($Root))
+    if ($volume.DriveFormat -ne 'NTFS') {
+        throw "profile Metadata2 needs an NTFS volume; $Root is on '$($volume.DriveFormat)'"
+    }
+    if ($Outside.Length -eq 0 -or -not [System.IO.Path]::IsPathFullyQualified($Outside)) {
+        throw 'profile Metadata2 needs -OutsidePath, an absolute directory path'
+    }
+    $Outside = [System.IO.Path]::GetFullPath($Outside).TrimEnd('\')
+    if ($Outside.StartsWith($Root.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $Root.StartsWith($Outside + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "-OutsidePath must not contain or lie inside -Path: $Outside"
+    }
+    if ([System.IO.Path]::GetPathRoot($Outside) -ne [System.IO.Path]::GetPathRoot($Root)) {
+        throw "-OutsidePath must be on the same volume as -Path: $Outside"
+    }
+    if ((Test-Path -LiteralPath $Outside) -and @(Get-ChildItem -LiteralPath $Outside -Force).Count -ne 0) {
+        throw "refusing to write into non-empty -OutsidePath: $Outside"
+    }
+
+    # Out-of-tree targets (S13C).
+    New-Dir (Join-Path $Outside 'outside-dir')
+    Write-AsciiFile (Join-Path $Outside 'outside-target.txt') "outside the capture root, seed $Seed`r`n"
+    Write-AsciiFile (Join-Path $Outside 'outside-dir\inside.txt') "outside directory content, seed $Seed`r`n"
+
+    # links\: in-tree targets (S13B).
+    $d = Join-Path $Root 'links'
+    New-Dir (Join-Path $d 'target-dir')
+    Write-AsciiFile (Join-Path $d 'target-file.txt') "in-tree target file, seed $Seed`r`n"
+    Write-AsciiFile (Join-Path $d 'target-dir\inside.txt') "in-tree target directory content, seed $Seed`r`n"
+    New-Link (Join-Path $d 'abs-file.txt') (Join-Path $d 'target-file.txt')
+    New-Link (Join-Path $d 'abs-deep.txt') (Join-Path $d 'target-dir\inside.txt')
+    New-Link (Join-Path $d 'abs-dir') (Join-Path $d 'target-dir') -Directory
+    New-Link (Join-Path $d 'rel-file.txt') 'target-file.txt'
+    New-Link (Join-Path $d 'rel-up.txt') '..\links\target-file.txt'
+    Invoke-Native 'cmd.exe' @('/d', '/c', 'mklink', '/J', (Join-Path $d 'junction'), (Join-Path $d 'target-dir'))
+
+    # out\: targets outside the capture root (S13C).
+    $o = Join-Path $Root 'out'
+    New-Dir $o
+    New-Link (Join-Path $o 'abs-file-out.txt') (Join-Path $Outside 'outside-target.txt')
+    New-Link (Join-Path $o 'abs-dir-out') (Join-Path $Outside 'outside-dir') -Directory
+    New-Link (Join-Path $o 'abs-other-volume.txt') 'Q:\usgp-absent\target.txt'
+    New-Link (Join-Path $o 'rel-escape.txt') ('..\..\' + (Split-Path -Leaf $Outside) + '\outside-target.txt')
+    Invoke-Native 'cmd.exe' @('/d', '/c', 'mklink', '/J', (Join-Path $o 'junction-out'), (Join-Path $Outside 'outside-dir'))
+
+    # acl\: a symbolic link with its own explicit DACL (S13D, reparse-point
+    # descriptors). /L acts on the link, not its target.
+    $a = Join-Path $Root 'acl'
+    New-Dir $a
+    Write-AsciiFile (Join-Path $a 'plain-target.txt') "target of the link with a DACL, seed $Seed`r`n"
+    $l = Join-Path $a 'link-with-dacl.txt'
+    New-Link $l 'plain-target.txt'
+    # Not fail closed: if icacls refuses /L here, the link keeps its default
+    # DACL, which the manifest records; the rest of the tree is still built.
+    try {
+        Invoke-Native 'icacls.exe' @($l, '/L', '/inheritance:r', '/grant:r', '*S-1-5-32-544:(F)', '*S-1-5-18:(F)')
+    }
+    catch {
+        Write-Output ('NOTE: explicit DACL not set on acl\link-with-dacl.txt: {0}' -f $_.Exception.Message)
+    }
+
+    # sparse\: hole patterns (S13E).
+    $sp = Join-Path $Root 'sparse'
+    New-Dir $sp
+    foreach ($p in @(
+            @('two-holes.bin', 'DHDHDD'), @('three-holes.bin', 'DHDHDHD'),
+            @('hole-at-start.bin', 'HD'), @('hole-at-end.bin', 'DH'),
+            @('all-hole.bin', 'HHH'), @('flag-only.bin', 'DD'))) {
+        New-SparseFile (Join-Path $sp $p[0]) $p[1] $Rng
+    }
+
+    # streams\: named-stream order (S13F).
+    $st = Join-Path $Root 'streams'
+    New-Dir $st
+    $f = Join-Path $st 'five-out-of-order.txt'
+    Write-AsciiFile $f "five streams written out of name order, seed $Seed`r`n"
+    foreach ($n in @('s-charlie', 's-alpha', 's-echo', 's-bravo', 's-delta')) {
+        Write-NamedStream $f $n ($Ascii.GetBytes("stream $n, seed $Seed"))
+    }
+    $f = Join-Path $st 'five-in-order.txt'
+    Write-AsciiFile $f "five streams written in name order, seed $Seed`r`n"
+    foreach ($n in @('s-alpha', 's-bravo', 's-charlie', 's-delta', 's-echo')) {
+        Write-NamedStream $f $n ($Ascii.GetBytes("stream $n, seed $Seed"))
+    }
+    $sd = Join-Path $st 'dir-three-streams'
+    New-Dir $sd
+    foreach ($n in @('s-zulu', 's-alpha', 's-mike')) {
+        Write-NamedStream $sd $n ($Ascii.GetBytes("directory stream $n, seed $Seed"))
+    }
+    $f = Join-Path $st 'sizes.txt'
+    Write-AsciiFile $f "streams whose size order differs from name order, seed $Seed`r`n"
+    foreach ($p in @(@('s-a', 300), @('s-b', 10), @('s-c', 2000))) {
+        $b = [byte[]]::new($p[1])
+        $Rng.NextBytes($b)
+        Write-NamedStream $f $p[0] $b
+    }
+}
+
 if (Test-Path -LiteralPath $Path) {
     if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
         throw "refusing to write into non-empty directory: $Path"
@@ -505,6 +670,42 @@ switch ($TreeProfile) {
     'Metadata' {
         New-MetadataTree $Root $Seed $rng
     }
+    'Metadata2' {
+        New-Metadata2Tree $Root $OutsidePath $Seed $rng
+    }
+    'MixedTail' {
+        # A compressible first chunk, then a short final chunk of
+        # pseudorandom bytes (OPEN-WIM-5: the last chunk, shorter than
+        # 32768, that does not shrink).
+        $text = New-TextBytes 700 $rng
+        foreach ($tail in @(100, 5000, 32767)) {
+            $buf = [byte[]]::new(32768 + $tail)
+            [Array]::Copy($text, 0, $buf, 0, 32768)
+            $r = [byte[]]::new($tail)
+            $rng.NextBytes($r)
+            [Array]::Copy($r, 0, $buf, 32768, $tail)
+            [System.IO.File]::WriteAllBytes((Join-Path $Root ("tail-random-{0}.bin" -f $tail)), $buf)
+        }
+    }
+    'LargeText' {
+        # A 1 MiB block of text, repeated to -LargeBytes (compressible, so
+        # DISM keeps the resource compressed: OPEN-WIM-10).
+        $block = New-TextBytes 20000 $rng
+        if ($block.Length -lt 1048576) { throw "text block is $($block.Length) bytes, need 1048576" }
+        $stream = [System.IO.File]::Open((Join-Path $Root 'text-large.bin'), [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $left = $LargeBytes
+            while ($left -gt 0) {
+                $n = [int][Math]::Min(1048576L, $left)
+                $stream.Write($block, 0, $n)
+                $left -= $n
+            }
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
     'Mixed' {
         # One compressible chunk and one pseudorandom chunk (32768 bytes
         # each, wim.md section 4), in both orders.
@@ -522,7 +723,7 @@ switch ($TreeProfile) {
     }
 }
 
-if ($TreeProfile -eq 'Metadata') {
+if ($TreeProfile -in 'Metadata', 'Metadata2') {
     Set-DistinctTimes $Root
 }
 else {

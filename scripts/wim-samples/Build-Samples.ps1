@@ -41,6 +41,8 @@
     Set Large (job "generate-large"; observations only, the WIM is deleted):
 
       S08  /Capture-Image /Compress:fast                        tree-large
+      S08B /Capture-Image /Compress:fast                        tree-large-text
+           (compressible, over 4 GiB: OPEN-WIM-10; WIM deleted too)
 
     Set Metadata (job "generate-metadata"; plan M3 section 1.4, OPEN-WIM-7;
     uploaded as its own artifact, every file under 64 MiB):
@@ -50,6 +52,13 @@
       S15  /Capture-Image /Compress:none of the volume root     the VHD
            that holds tree-meta                                 volume
       S17  /Capture-Image /Compress:fast                        tree-mixed
+      S13B /Capture-Image /Compress:none                        tree-meta2
+      S13C /Capture-Image /Compress:none /NoRpFix               tree-meta2
+      S17B /Capture-Image /Compress:fast                        tree-mixed-tail
+
+    tree-meta2 (profile Metadata2, seed 602; the R3 follow-up requests in
+    docs/formats/wim-observed.md) is written on a second VHD volume
+    lettered T:, with its out-of-tree link targets in T:\outside-tree.
 
     tree-meta (profile Metadata, seed 601) is written on a fresh NTFS
     volume of an expandable VHD that this script creates and attaches with
@@ -64,6 +73,9 @@
            generate-metadata artifact of the same run) to the
            root of a fresh NTFS VHD volume, then a tree manifest
            of the result
+      S16B S13B index 1 to the root of a volume lettered S:      S13B.wim
+      S16C S13B index 1 to U:\deep\apply-here (subdirectory)    S13B.wim
+      S16D S13C index 1 to the root of a volume lettered V:      S13C.wim
 
     Tree manifests (tree-meta, the volume root, S16) are written by this
     script (Save-TreeManifest): one row per item with its type, attributes,
@@ -250,7 +262,7 @@ function Invoke-DiskPart([string] $Id, [string[]] $Lines, [string] $OutFile, [sw
 # A drive letter no volume uses, from the end of the alphabet.
 function Get-FreeLetter {
     $used = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
-    foreach ($l in 'RSTUVWXYQP'.ToCharArray()) {
+    foreach ($l in 'RSTUVWXYP'.ToCharArray()) {
         if ([string]$l -notin $used) { return [string]$l }
     }
     throw 'no free drive letter for the sample VHD'
@@ -260,12 +272,21 @@ function Get-FreeLetter {
 # one NTFS partition (GPT disk), assigns a free letter and enables
 # short-name generation on that volume only. Returns "X:". The VHD is a
 # scratch disk image of our own content; it is never uploaded.
-function New-SampleVhd([string] $Id, [string] $File, [string] $Label) {
+function New-SampleVhd([string] $Id, [string] $File, [string] $Label, [string] $Letter = '') {
     if (-not $File.StartsWith($WorkDir, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "$Id`: VHD file must be under -WorkDir: $File"
     }
     if (Test-Path -LiteralPath $File) { throw "$Id`: VHD file already exists: $File" }
-    $letter = Get-FreeLetter
+    # A fixed -Letter makes capture and apply letters differ on purpose
+    # (S16B: apply to another letter than the capture's).
+    if ($Letter.Length -gt 0) {
+        $used = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
+        if ($Letter -notmatch '^[A-Z]$' -or $Letter -in $used) { throw "$Id`: drive letter $Letter is not free" }
+        $letter = $Letter
+    }
+    else {
+        $letter = Get-FreeLetter
+    }
     $out = Join-Path $OutDir "$Id.diskpart.txt"
     [void](Invoke-DiskPart "$Id-vhd-create" @(
             "create vdisk file=`"$File`" maximum=$VhdMegabytes type=expandable",
@@ -341,7 +362,11 @@ function Format-Field([string] $Text) {
 # group, DACL), link-target, hard-links (fsutil hardlink list, "|"-
 # separated, only for files with more than one name), reparse-tag (fsutil
 # reparsepoint query; its full output goes to <OutFile without
-# .manifest.tsv>.reparse.txt). -NoContent skips sha256 and streams (no file
+# .manifest.tsv>.reparse.txt), then (added for R4, BOOT-003) sd-binary
+# (hex of the owner, group and DACL descriptor as .NET's Get-Acl returns it
+# in binary form; not reparse points) and link-dacl (for reparse points
+# only: the DACL of the link itself in SDDL, from "icacls /save /L").
+# -NoContent skips sha256 and streams (no file
 # content is read, so no last-access time is touched by this script).
 # A value that cannot be read is "error: <message>", never dropped.
 function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [string[]] $NoDescend = @(), [switch] $NoContent) {
@@ -352,7 +377,8 @@ function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [str
     if ($items.Count -gt 1) { [Array]::Sort($keys, $items, [System.StringComparer]::Ordinal) }
     $all = @(Get-Item -LiteralPath $Root -Force) + $items
     $rows = [System.Collections.Generic.List[string]]::new()
-    $rows.Add("path`ttype`tattributes`tcreation`tlast-access`tlast-write`tlength`tsha256`tstreams`tsddl`tlink-target`thard-links`treparse-tag")
+    $rows.Add("path`ttype`tattributes`tcreation`tlast-access`tlast-write`tlength`tsha256`tstreams`tsddl`tlink-target`thard-links`treparse-tag`tsd-binary`tlink-dacl")
+    $aclTmp = Join-Path $WorkDir "$Id.icacls.tmp"
     foreach ($i in $all) {
         $rel = Get-RelPath $Root $i.FullName
         $isReparse = ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
@@ -383,9 +409,27 @@ function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [str
             catch { $streams = 'error: ' + (Format-Field $_.Exception.Message) }
         }
         $sddl = '-'
+        $sdBin = '-'
+        $linkDacl = '-'
         if (-not $isReparse) {
-            try { $sddl = Format-Field (Get-Acl -LiteralPath $i.FullName).Sddl }
+            try {
+                $acl = Get-Acl -LiteralPath $i.FullName
+                $sddl = Format-Field $acl.Sddl
+                $sdBin = [Convert]::ToHexString($acl.GetSecurityDescriptorBinaryForm()).ToLowerInvariant()
+            }
             catch { $sddl = 'error: ' + (Format-Field $_.Exception.Message) }
+        }
+        else {
+            # icacls /save writes UTF-16 text: the name, then the SDDL line.
+            Remove-Item -LiteralPath $aclTmp -ErrorAction SilentlyContinue
+            $o = @(& icacls.exe $i.FullName /save $aclTmp /L 2>&1 | ForEach-Object { $_.ToString() })
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $aclTmp)) {
+                $lines = @([System.IO.File]::ReadAllLines($aclTmp, [System.Text.Encoding]::Unicode) | Where-Object { $_ })
+                $linkDacl = if ($lines.Count -ge 2) { Format-Field $lines[1] } else { 'error: icacls /save gave ' + $lines.Count + ' lines' }
+            }
+            else {
+                $linkDacl = 'error: ' + (Format-Field ($o -join ' '))
+            }
         }
         $target = Format-Field ([string]$i.LinkTarget)
         $links = '-'
@@ -401,11 +445,12 @@ function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [str
             $m = [regex]::Match(($o -join "`n"), 'Reparse Tag Value\s*:\s*(0x[0-9A-Fa-f]+)')
             $tag = if ($LASTEXITCODE -eq 0 -and $m.Success) { $m.Groups[1].Value.ToLowerInvariant() } else { 'error: see reparse.txt' }
         }
-        $rows.Add(("{0}`t{1}`t0x{2:x8}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}`t{10}`t{11}`t{12}" -f
+        $rows.Add(("{0}`t{1}`t0x{2:x8}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}`t{10}`t{11}`t{12}`t{13}`t{14}" -f
                 (Format-Field $rel), $type, [int]$i.Attributes,
                 $i.CreationTimeUtc.ToFileTimeUtc(), $i.LastAccessTimeUtc.ToFileTimeUtc(), $i.LastWriteTimeUtc.ToFileTimeUtc(),
-                $length, $sha, $streams, $sddl, $target, $links, $tag))
+                $length, $sha, $streams, $sddl, $target, $links, $tag, $sdBin, $linkDacl))
     }
+    Remove-Item -LiteralPath $aclTmp -ErrorAction SilentlyContinue
     Write-LfLines $OutFile $rows.ToArray()
     Add-Text $CommandsLog ('{0} {1} manifest of {2}: {3} rows{4}' -f [datetime]::UtcNow.ToString('o'), $Id, $Root,
         ($rows.Count - 1), $(if ($NoContent) { ' (no content read)' } else { '' }))
@@ -498,9 +543,10 @@ function Add-ManifestRow([string] $Id, [string] $File, [string] $Compression, [i
 # Writes a source tree under $Parent (default -WorkDir). Every line the
 # tree script prints (its summary, and for profile Metadata each native
 # command and any NOTE) goes to commands.log.
-function New-Tree([string] $Name, [int] $Seed, [string] $TreeProfile, [string] $Parent = $WorkDir) {
+function New-Tree([string] $Name, [int] $Seed, [string] $TreeProfile, [string] $Parent = $WorkDir,
+    [string] $Outside = '', [long] $Bytes = $LargeBytes) {
     $p = Join-Path $Parent $Name
-    $msg = @(& (Join-Path $Here 'New-SampleTree.ps1') -Path $p -Seed $Seed -TreeProfile $TreeProfile -LargeBytes $LargeBytes)
+    $msg = @(& (Join-Path $Here 'New-SampleTree.ps1') -Path $p -Seed $Seed -TreeProfile $TreeProfile -LargeBytes $Bytes -OutsidePath $Outside)
     foreach ($m in $msg) {
         Add-Text $CommandsLog ('{0} tree {1}: {2}' -f [datetime]::UtcNow.ToString('o'), $Name, $m)
     }
@@ -582,10 +628,12 @@ function Get-Expect([string] $Prefix, [int] $Index, [string] $What) {
     }
 }
 
-function Invoke-Capture([string] $Id, [string] $Wim, [string] $Dir, $Expect, [string] $Compress, [switch] $Integrity) {
+function Invoke-Capture([string] $Id, [string] $Wim, [string] $Dir, $Expect, [string] $Compress, [switch] $Integrity,
+    [string[]] $Extra = @()) {
     $a = @('/Capture-Image', "/ImageFile:$Wim", "/CaptureDir:$Dir", "/Name:$($Expect.Name)",
         "/Description:$($Expect.Description)", "/Compress:$Compress")
     if ($Integrity) { $a += '/CheckIntegrity' }
+    $a += $Extra
     [void](Invoke-Dism $Id $a (Join-Path $OutDir "$Id.dism.txt"))
 }
 
@@ -854,6 +902,33 @@ elseif ($Set -eq 'Large') {
             if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
         }
     }
+
+    # S08B (OPEN-WIM-10, M-22): a compressible file over 4 GiB, so DISM
+    # keeps the resource compressed and writes a chunk table for an
+    # original size over 2^32. Runs after S08's files are deleted. The
+    # dump's chunk section reads the table with 4- and 8-byte entries.
+    $s08b = Join-Path $WorkDir 'S08B.wim'
+    $drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($WorkDir))
+    $need = 2 * $LargeBytes + 1GB
+    Add-Text (Join-Path $OutDir 'host.txt') ('work drive {0}: free {1} bytes, S08B needs {2}' -f $drive.Name, $drive.AvailableFreeSpace, $need)
+    if ($drive.AvailableFreeSpace -lt $need) {
+        $Failures.Add("S08B: NOT RUN: $($drive.AvailableFreeSpace) bytes free on $($drive.Name), $need needed")
+        Add-ManifestRow 'S08B' $s08b 'xpress' 1 'accept' 'not-produced'
+    }
+    else {
+        $treeB = New-Tree 'tree-large-text' 302 'LargeText'
+        Save-TreeListing 'tree-large-text' $treeB
+        $s08bExpect = Get-Expect 'S08B' 1 'large-text'
+        $ok08b = Invoke-Sample 'S08B' {
+            Invoke-Capture 'S08B' $s08b $treeB $s08bExpect 'fast'
+            Save-WimInfo 'S08B' $s08b @($s08bExpect)
+            Save-Dump $s08b
+        }
+        Add-ManifestRow 'S08B' $s08b 'xpress' 1 'accept' $(if ($ok08b) { 'produced (not uploaded)' } else { 'not-produced' })
+        foreach ($p in @($s08b, $treeB)) {
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
+        }
+    }
 }
 elseif ($Set -eq 'Metadata') {
     # S13 to S15 (OPEN-WIM-7, plan M3 section 1.4): tree-meta on a fresh
@@ -922,6 +997,66 @@ elseif ($Set -eq 'Metadata') {
     }
     Add-ManifestRow 'S17' $s17 'xpress' 1 'accept' $(if ($ok['S17']) { 'produced' } else { 'not-produced' })
 
+    # S13B, S13C (R3 follow-up requests): tree-meta2 (profile Metadata2,
+    # seed 602) on its own VHD volume, lettered T: so that S16B can apply
+    # it to another letter. S13B is captured as DISM does by default;
+    # S13C with /NoRpFix. Both hold in-tree and out-of-tree absolute
+    # targets. The out-of-tree targets live in T:\outside-tree.
+    $vhdMeta2 = Join-Path $WorkDir 'tree-meta2.vhdx'
+    $s13bExpect = Get-Expect 'S13B' 1 'reparse-rpfix'
+    $s13cExpect = Get-Expect 'S13C' 1 'reparse-norpfix'
+    $meta2Rows = @(
+        @{ Id = 'S13B'; Exp = $s13bExpect; Extra = @() },
+        @{ Id = 'S13C'; Exp = $s13cExpect; Extra = @('/NoRpFix') }
+    )
+    foreach ($r in $meta2Rows) { $ok[$r.Id] = $false }
+    $state2 = @{}
+    try {
+        $tree2Ok = Invoke-Sample 'tree-meta2' {
+            $state2['vol'] = New-SampleVhd 'VHD-META2' $vhdMeta2 'USGPMETA2' 'T'
+            $state2['outside'] = Join-Path "$($state2['vol'])\" 'outside-tree'
+            $state2['tree'] = New-Tree 'tree-meta2' 602 'Metadata2' "$($state2['vol'])\" $state2['outside']
+            Save-TreeManifest 'tree-meta2-before' $state2['tree'] (Join-Path $OutDir 'tree-meta2-before.manifest.tsv') -NoContent
+        }
+        if ($tree2Ok) {
+            foreach ($r in $meta2Rows) {
+                $id = $r.Id
+                $wim = Join-Path $OutDir "$id.wim"
+                $ok[$id] = Invoke-Sample $id {
+                    Invoke-Capture $id $wim $state2['tree'] $r.Exp 'none' -Extra $r.Extra
+                    Save-WimInfo $id $wim @($r.Exp)
+                    Save-Dump $wim
+                }
+            }
+            [void](Invoke-Sample 'tree-meta2 manifests' {
+                    Save-TreeManifest 'tree-meta2' $state2['tree'] (Join-Path $OutDir 'tree-meta2.manifest.tsv')
+                    Save-ShortNames 'tree-meta2' $state2['tree'] (Join-Path $OutDir 'tree-meta2.dirx.txt')
+                    Save-TreeManifest 'outside-tree' $state2['outside'] (Join-Path $OutDir 'outside-tree.manifest.tsv')
+                })
+        }
+        else {
+            $Failures.Add('S13B, S13C: not produced because tree-meta2 failed')
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $vhdMeta2) { Dismount-SampleVhd 'VHD-META2' $vhdMeta2 }
+    }
+    foreach ($r in $meta2Rows) {
+        Add-ManifestRow $r.Id (Join-Path $OutDir "$($r.Id).wim") 'none' 1 'accept' $(if ($ok[$r.Id]) { 'produced' } else { 'not-produced' })
+    }
+
+    # S17B (OPEN-WIM-5): short final chunks that do not shrink.
+    $treeTail = New-Tree 'tree-mixed-tail' 702 'MixedTail'
+    Save-TreeListing 'tree-mixed-tail' $treeTail
+    $s17b = Join-Path $OutDir 'S17B.wim'
+    $s17bExpect = Get-Expect 'S17B' 1 'mixed-tail'
+    $ok['S17B'] = Invoke-Sample 'S17B' {
+        Invoke-Capture 'S17B' $s17b $treeTail $s17bExpect 'fast'
+        Save-WimInfo 'S17B' $s17b @($s17bExpect)
+        Save-Dump $s17b
+    }
+    Add-ManifestRow 'S17B' $s17b 'xpress' 1 'accept' $(if ($ok['S17B']) { 'produced' } else { 'not-produced' })
+
     # Upload cap and checksums over every sample file actually written.
     $samples = @(Get-ChildItem -LiteralPath $OutDir -File | Where-Object { $_.Extension -eq '.wim' } | Sort-Object Name)
     foreach ($f in $samples) {
@@ -932,45 +1067,67 @@ elseif ($Set -eq 'Metadata') {
     Write-LfLines (Join-Path $OutDir 'SHA256SUMS') $sums.ToArray()
 }
 else {
-    # Reference (S16, M-20): DISM's own apply of S13 index 1 to a fresh
-    # NTFS VHD volume, recorded as text only. S13 comes from -SampleDir
-    # (the generate-metadata artifact of the same run) and must match the
-    # SHA-256 recorded there in both manifest.tsv and SHA256SUMS.
+    # Reference (M-20 and the R3 follow-ups): DISM's own apply of our
+    # samples to fresh NTFS VHD volumes, recorded as text only. Each source
+    # comes from -SampleDir (the generate-metadata artifact of the same
+    # run) and must match the SHA-256 recorded there in both manifest.tsv
+    # and SHA256SUMS.
+    #   S16  S13 index 1 to the root of a volume (free letter, R: in R3)
+    #   S16B S13B index 1 to the root of a volume lettered S: (captured on T:)
+    #   S16C S13B index 1 to U:\deep\apply-here (a subdirectory)
+    #   S16D S13C (/NoRpFix) index 1 to the root of a volume lettered V:
     $src = (Resolve-Path -LiteralPath $SampleDir).ProviderPath
-    $s16 = Join-Path $OutDir 'S16.manifest.tsv'
-    $state = @{}
-    $ok16 = Invoke-Sample 'S16' {
-        $rows = @([System.IO.File]::ReadAllLines((Join-Path $src 'manifest.tsv'), $Utf8NoBom) |
-                Select-Object -Skip 1 | ForEach-Object { , ($_ -split "`t") } |
-                Where-Object { $_[0] -eq 'S13' })
-        if ($rows.Count -ne 1) { throw "S16: expected one S13 row in the sample manifest, found $($rows.Count)" }
-        $row = $rows[0]
-        if ($row.Count -ne 8 -or $row[7] -ne 'produced') { throw "S16: S13 row is not 'produced': $($row -join ' | ')" }
-        if ($row[1] -notmatch '^S13\.wim$') { throw "S16: unexpected S13 file name '$($row[1])'" }
-        $s13 = Join-Path $src $row[1]
-        $sha = Get-Sha256 $s13
-        if ($sha -ne $row[3]) { throw "S16: S13.wim SHA-256 $sha differs from the manifest's $($row[3])" }
-        $sumLine = '{0}  {1}' -f $sha, $row[1]
-        if (@([System.IO.File]::ReadAllLines((Join-Path $src 'SHA256SUMS'), $Utf8NoBom) | Where-Object { $_ -ceq $sumLine }).Count -ne 1) {
-            throw 'S16: S13.wim is not listed with this SHA-256 in SHA256SUMS'
+    $sourceRows = @([System.IO.File]::ReadAllLines((Join-Path $src 'manifest.tsv'), $Utf8NoBom) |
+            Select-Object -Skip 1 | ForEach-Object { , ($_ -split "`t") })
+    $sumLines = @([System.IO.File]::ReadAllLines((Join-Path $src 'SHA256SUMS'), $Utf8NoBom))
+    $applies = @(
+        @{ Id = 'S16'; Source = 'S13'; Letter = ''; Sub = '' },
+        @{ Id = 'S16B'; Source = 'S13B'; Letter = 'S'; Sub = '' },
+        @{ Id = 'S16C'; Source = 'S13B'; Letter = 'U'; Sub = 'deep\apply-here' },
+        @{ Id = 'S16D'; Source = 'S13C'; Letter = 'V'; Sub = '' }
+    )
+    $sums = [System.Collections.Generic.List[string]]::new()
+    foreach ($ap in $applies) {
+        $id = $ap.Id
+        $out = Join-Path $OutDir "$id.manifest.tsv"
+        $state = @{}
+        $okAp = Invoke-Sample $id {
+            $rows = @($sourceRows | Where-Object { $_[0] -eq $ap.Source })
+            if ($rows.Count -ne 1) { throw "$id`: expected one $($ap.Source) row in the sample manifest, found $($rows.Count)" }
+            $row = $rows[0]
+            if ($row.Count -ne 8 -or $row[7] -ne 'produced') { throw "$id`: $($ap.Source) row is not 'produced': $($row -join ' | ')" }
+            if ($row[1] -cne "$($ap.Source).wim") { throw "$id`: unexpected file name '$($row[1])'" }
+            $wim = Join-Path $src $row[1]
+            $sha = Get-Sha256 $wim
+            if ($sha -ne $row[3]) { throw "$id`: $($row[1]) SHA-256 $sha differs from the manifest's $($row[3])" }
+            if (@($sumLines | Where-Object { $_ -ceq ('{0}  {1}' -f $sha, $row[1]) }).Count -ne 1) {
+                throw "$id`: $($row[1]) is not listed with this SHA-256 in SHA256SUMS"
+            }
+            Add-Text $CommandsLog ('{0} {1} source {2} sha256 {3}' -f [datetime]::UtcNow.ToString('o'), $id, $row[1], $sha)
+            Save-WimInfo "$id-source" $wim $null
+            $vhd = Join-Path $WorkDir ("apply-{0}.vhdx" -f $id.ToLowerInvariant())
+            try {
+                $state['vol'] = New-SampleVhd $id $vhd ('USGP' + $id) $ap.Letter
+                $root = "$($state['vol'])\"
+                $noDescend = $VolumeNoDescend
+                if ($ap.Sub.Length -gt 0) {
+                    $root = Join-Path $root $ap.Sub
+                    [void][System.IO.Directory]::CreateDirectory($root)
+                    Add-Text $CommandsLog ('{0} {1} created apply directory {2}' -f [datetime]::UtcNow.ToString('o'), $id, $root)
+                    $noDescend = @()
+                }
+                [void](Invoke-Dism "$id-apply" @('/Apply-Image', "/ImageFile:$wim", '/Index:1', "/ApplyDir:$root") (Join-Path $OutDir "$id.dism.txt"))
+                Save-TreeManifest $id $root $out $noDescend
+                Save-ShortNames $id $root (Join-Path $OutDir "$id.dirx.txt") $noDescend
+            }
+            finally {
+                if (Test-Path -LiteralPath $vhd) { Dismount-SampleVhd $id $vhd }
+            }
         }
-        Add-Text $CommandsLog ('{0} S16 source {1} sha256 {2}' -f [datetime]::UtcNow.ToString('o'), $row[1], $sha)
-        Save-WimInfo 'S16-source' $s13 $null
-        $vhd = Join-Path $WorkDir 'apply-s16.vhdx'
-        try {
-            $state['vol'] = New-SampleVhd 'S16' $vhd 'USGPAPPLY'
-            [void](Invoke-Dism 'S16-apply' @('/Apply-Image', "/ImageFile:$s13", '/Index:1', "/ApplyDir:$($state['vol'])\") (Join-Path $OutDir 'S16.dism.txt'))
-            Save-TreeManifest 'S16' "$($state['vol'])\" $s16 $VolumeNoDescend
-            Save-ShortNames 'S16' "$($state['vol'])\" (Join-Path $OutDir 'S16.dirx.txt') $VolumeNoDescend
-        }
-        finally {
-            if (Test-Path -LiteralPath $vhd) { Dismount-SampleVhd 'S16' $vhd }
-        }
+        Add-ManifestRow $id $out 'none' 1 'reference' $(if ($okAp) { 'produced' } else { 'not-produced' })
+        if ($okAp) { $sums.Add(('{0}  {1}' -f (Get-Sha256 $out), "$id.manifest.tsv")) }
     }
-    Add-ManifestRow 'S16' $s16 'none' 1 'reference' $(if ($ok16) { 'produced' } else { 'not-produced' })
-    $sums = @()
-    if ($ok16) { $sums = @('{0}  {1}' -f (Get-Sha256 $s16), 'S16.manifest.tsv') }
-    Write-LfLines (Join-Path $OutDir 'SHA256SUMS') $sums
+    Write-LfLines (Join-Path $OutDir 'SHA256SUMS') $sums.ToArray()
 }
 
 Write-LfLines (Join-Path $OutDir 'manifest.tsv') $Manifest.ToArray()

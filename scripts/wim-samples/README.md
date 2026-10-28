@@ -32,11 +32,12 @@ M2 WU-W). Observations are recorded in
 
 | File | Purpose |
 |------|---------|
-| `New-SampleTree.ps1` | Writes a deterministic source tree (`-Seed`, `-Profile Standard\|Incompressible\|Large\|LongRun\|Service\|Metadata\|Mixed`) |
+| `New-SampleTree.ps1` | Writes a deterministic source tree (`-Seed`, `-Profile Standard\|Incompressible\|Large\|LongRun\|Service\|Metadata\|Mixed\|Metadata2\|MixedTail\|LargeText`; `-OutsidePath` for Metadata2) |
 | `Build-Samples.ps1` | Runs DISM (`/English`, every command logged), `/Get-WimInfo`, the dumps, and writes the manifest (`-Set Standard\|Large\|Metadata\|Reference`); VHD helpers (DiskPart, `fsutil`) and tree manifests for the Metadata and Reference sets |
 | `Dump-WimStructure.ps1` | Hex and labelled fields of the header, lookup table, metadata heads, XML, integrity table and chunk tables; the whole of each uncompressed metadata resource (4 MiB cap per resource and in total) with a labelled security-block head; bounded reads only |
 | `analysis/*.py` | The R1 analysis scripts (lookup walk, instrumented LZ77+Huffman decoder, metadata-to-tree map) and the R2 scripts (`gaps.py` unnamed ranges, `metahash.py` metadata hashes), written only from `specs/standards/wim.md` and `wim-compression.md`; kept so the OBS claims can be re-run (CR-602). Run with `python3 -I`, sample paths as arguments; see each file's header |
 | `analysis/dentry_r3.py`, `treecmp.py`, `reparsecmp.py` | R3 (OBS-024 to OBS-048): a walker for the entry layout the R3 bytes show (`dentry.py`'s 98-byte reading fits no entry, OBS-026), checking each assumption per entry and comparing with a tree manifest; a tree-manifest comparison; a stored-against-`fsutil` reparse comparison. Provenance headers name their only sources |
+| `analysis/reparse_r4.py`, `sdcmp_r4.py` | R4 (OBS-049 to OBS-058). `reparse_r4.py` decodes stored and applied reparse buffers into substitute and print names with offsets and lengths, from `specs/standards/reparse-and-security-descriptors.md` §2 to §5. `sdcmp_r4.py` reads the stored descriptors' fixed part per that file's §9, finding the metadata through `wim.md` §2, §3 and §5 (OBS-007, OBS-008, OBS-024, OBS-026), and compares them with the manifests' `sd-binary` (.NET's re-serialisation). Provenance headers name their only sources |
 | `analysis/dentry.py` | M3 (WU-W3): walks the security block and directory entries of each metadata resource and prints every field beside its offset, written only from `wim.md` §6 and the sections it relies on; nothing `wim.md` leaves open is assumed (alignment is `--align`, bytes after the name are shown as hex). Compressed metadata needs `--xpr analysis/xpr.py`; a chunk whose stored size equals its expanded size is not decoded (OPEN-WIM-5) |
 
 All three need PowerShell 7.2 or later; `Build-Samples.ps1` needs an
@@ -74,6 +75,32 @@ and `wim-samples-reference`, first produced by run R3):
 | S16 | `/Apply-Image` of this run's S13 index 1 to the root of a fresh NTFS VHD volume, then a tree manifest | S13.wim | reference | DISM's apply result as text: the fidelity oracle (M-20, REQ-PE-017) |
 | S17 | `/Capture-Image /Compress:fast` | tree-mixed | accept | A chunk that does not shrink inside a compressed resource (OPEN-WIM-5 chunk level, M-21) |
 
+R3 follow-up samples (WU-W3 round 2, first produced by run R4; the
+requests are in `docs/formats/wim-observed.md`, "M3 metadata
+questions"):
+
+| ID | DISM command (all with `/English`) | Source | Expected by our parser | Question |
+|----|------------------------------------|--------|------------------------|----------|
+| S13B | `/Capture-Image /Compress:none` | tree-meta2 on `T:` | accept | In-tree absolute symbolic links and junctions with `RP_FIX` (M-13); reparse-point descriptors (M-14); sparse files with several holes (M-15); named-stream order (M-09) |
+| S13C | `/Capture-Image /Compress:none /NoRpFix` | tree-meta2 on `T:` | accept | The same tree without the reparse fix; absolute targets outside the capture root in both (M-13) |
+| S16B | `/Apply-Image` of S13B index 1 to the root of a fresh volume lettered `S:` | S13B.wim | reference | Apply to another drive letter: copy or re-base (M-13, blocking for absolute targets and junctions) |
+| S16C | `/Apply-Image` of S13B index 1 to `U:\deep\apply-here` | S13B.wim | reference | Apply to a subdirectory (M-13) |
+| S16D | `/Apply-Image` of S13C index 1 to the root of a fresh volume lettered `V:` | S13C.wim | reference | Apply of a `/NoRpFix` capture (M-13) |
+| S17B | `/Capture-Image /Compress:fast` | tree-mixed-tail | accept | Short final chunks (100, 5000 and 32767 bytes) that do not shrink (OPEN-WIM-5) |
+| S08B | `/Capture-Image /Compress:fast` | tree-large-text (4.5 GiB of repeated text, seed 302) | accept | A compressed resource over 4 GiB: 8-byte chunk-table entries (OPEN-WIM-10, M-22); observations only, like S08 |
+
+tree-meta2 is profile Metadata2, seed 602 (contents listed in
+`New-SampleTree.ps1`), on a second VHD volume lettered `T:`, with its
+out-of-tree targets in `T:\outside-tree` (manifest
+`outside-tree.manifest.tsv`). Requests that these samples do **not**
+cover, because no documented input is known to produce them:
+security index −1 (M-14) and non-zero values at entry offsets +24, +32
+and +84 (M-03, the S13F request). They stay open, noted in the
+observation record. A byte comparison of stored descriptors with what
+Windows returns uses the new `sd-binary` column, which is .NET's binary
+form of the descriptor, not the raw bytes Windows returned; a record
+must say so.
+
 tree-meta is profile Metadata, seed 601, written by `Build-Samples.ps1`
 on a fresh 2 GiB expandable VHD (GPT, one NTFS partition, made with
 DiskPart) with short-name generation enabled on that volume only
@@ -93,8 +120,8 @@ manifest shows its real attributes. tree-mixed is profile Mixed, seed
 bytes) and `mixed-reverse-65536.bin` (the halves swapped).
 
 The VHDs stay in the work directory and are detached at the end; they
-are never uploaded. S16 uploads only text. S08 (large) and S10 (long
-runs) come from the same run R3 (below).
+are never uploaded. S16 to S16D upload only text. S08 (large) and S10
+(long runs) come from the same run R3 (below); S08B from run R4.
 
 Image names are `USGP-<ID>-<nn>`, descriptions
 `usgp-sample-<ID>-index-<nn>-<variant>` (no spaces, so the logged
@@ -122,9 +149,10 @@ file is deleted; the verify job then fails, because that contradicts
 the record. Tree-service holds `serviced.txt`
 and `serviced-40000.bin` (40000 pseudorandom bytes, seed 501).
 
-S08 runs only in the `generate-large` job (manual runs with the `large`
-input). Its WIM is dumped on the runner and deleted; only the text
-observations are uploaded (artifact `wim-samples-large-observations`).
+S08 and S08B run only in the `generate-large` job (manual runs with the
+`large` input). Their WIMs are dumped on the runner and deleted; only
+the text observations are uploaded (artifact
+`wim-samples-large-observations`).
 
 ## Running
 
@@ -188,7 +216,9 @@ is recorded.
 | `tree-meta.manifest.tsv`, `tree-meta.dirx.txt`, `tree-meta.reparse.txt` | Metadata set: tree-meta after the captures, with hashes, streams and SDDL; `dir /x` of each directory; `fsutil reparsepoint query` of each reparse point |
 | `volume-root.manifest.tsv` | Metadata set: S15's source, the VHD volume root (no content read; `System Volume Information` and `$RECYCLE.BIN` listed, not entered) |
 | `S16.manifest.tsv`, `S16.dirx.txt`, `S16.reparse.txt` | Reference set: DISM's apply of S13 index 1, same forms |
-| `VHD-META.diskpart.txt`, `S16.diskpart.txt` | DiskPart and `fsutil` output of the VHD helpers |
+| `S16B`, `S16C`, `S16D` `.manifest.tsv`, `.dirx.txt`, `.reparse.txt` | Reference set (R4): applies of S13B and S13C, same forms |
+| `tree-meta2-before.manifest.tsv`, `tree-meta2.manifest.tsv`, `tree-meta2.dirx.txt`, `tree-meta2.reparse.txt`, `outside-tree.manifest.tsv` | Metadata set (R4): tree-meta2 and its out-of-tree targets |
+| `VHD-META.diskpart.txt`, `VHD-META2.diskpart.txt`, `S16*.diskpart.txt` | DiskPart and `fsutil` output of the VHD helpers |
 
 ## Linux consumer (hand-off to WU-5)
 
@@ -248,10 +278,11 @@ artifacts, so the Standard artifact and the `verify` job above are
 unchanged; no job reads them yet. A consumer written later must:
 
 - Read `manifest.tsv` of each (same format and columns as above). The
-  Metadata artifact has rows S13, S14, S15 and S17; the Reference
-  artifact has one row, S16, whose `file` is `S16.manifest.tsv`,
-  `compression` is S13's (`none`) and `expected` is the new token
-  `reference`. A `reference` row is never passed to `check_wim`; it is
+  Metadata artifact has rows S13, S14, S15, S17 and, from R4, S13B,
+  S13C and S17B; the Reference artifact has S16 and, from R4, S16B,
+  S16C and S16D, whose `file` is `<id>.manifest.tsv`, `compression` is
+  their source's (`none`) and `expected` is the token `reference`. A
+  `reference` row is never passed to `check_wim`; it is
   the oracle an apply is compared with. Any `not-produced` row, missing
   file or SHA-256 mismatch fails.
 - Treat S17 as `accept` only once its OBS record says how DISM stored the
@@ -265,7 +296,11 @@ unchanged; no job reads them yet. A consumer written later must:
   `last-write` (FILETIME integers), `length`, `sha256` (main stream),
   `streams` (`name:length:sha256`, `;`-separated), `sddl`, `link-target`,
   `hard-links` (`|`-separated names as `fsutil hardlink list` prints
-  them), `reparse-tag`. `-` means not applicable or not read; a value that
+  them), `reparse-tag`, and from R4 `sd-binary` (hex of the owner,
+  group and DACL descriptor in .NET's binary form, `Get-Acl`; not
+  reparse points) and `link-dacl` (reparse points only: the link's own
+  DACL in SDDL from `icacls /save /L`). R3 manifests have the first 13
+  columns only. `-` means not applicable or not read; a value that
   could not be read is `error: <message>`. Rows are sorted by path,
   ordinal. Short names are not a column; they are in `<tree>.dirx.txt`.
 - These manifests are produced by PowerShell and `fsutil`, not by WU-5's

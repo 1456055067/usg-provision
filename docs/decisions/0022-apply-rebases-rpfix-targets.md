@@ -34,6 +34,14 @@ without `RP_FIX`.
 3. What the +92 value means is a [reading] (OBS-052). The rule rests on the
    observed combination of the header flag, the +92 value and the stored
    name form, not on a documented field.
+   - Clarified 2026-10-28 after review finding BOOT-R4-001. "Rewritten"
+     means an entry whose +92 value is 0 in a file with `RP_FIX` set, a
+     symbolic link with flags 0 or a mount point, stored in the observed
+     layout with a drive-letter target.
+   - The exact rule is the re-base rule in the M3 run's boot review
+     (`findings-boot-obs-r4.md`), which `wim.md` §13 carries as a
+     [project rule].
+   - The intent of this decision is unchanged.
 4. The owner's lab run (MT-2) confirms that junctions in a real Windows 11
    image resolve after the first boot.
 

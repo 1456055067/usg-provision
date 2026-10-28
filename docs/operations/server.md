@@ -9,26 +9,32 @@ written to a tamper-evident audit chain in PostgreSQL.
 
 **M2 evidence status (read first).** The server's behaviour is tested
 in-process on the in-memory store, on a macOS development host, which is
-functional evidence only (POAM-2). The first CI runs on commit d72b761
-(the M2 commit plus CI fixes) on Linux gave the following results; see
+functional evidence only (POAM-2). The CI runs on commit 5ea03a1 on
+Linux (2026-10-28 UTC; `ci` runs 40633650457 and 40633638960,
+`wim-samples` runs 40633638946 and 40633653170, all successful) gave
+the following results; see
 [ATO_EVIDENCE.md](../compliance/ATO_EVIDENCE.md):
 
+- **PASS:** the PostgreSQL tests (`pg-integration`, CI runs 40633650457
+  and 40633638960): `migrate_pg` 9, including `newer_schema_refused`;
+  `repo_pg` (role grants) 9; `audit_pg` 9; and `e2e_pg` (the end-to-end
+  flow on PostgreSQL, with restart recovery and `audit verify`) 1. On
+  the earlier commit d72b761 this job failed on a stale test (POAM-34,
+  now closed).
 - **PASS:** the 10.5 GiB upload on PostgreSQL with the 256 MiB memory
-  bound (`large-upload`, CI run 40601242085). The server's peak resident
-  memory was 51 MiB, and `audit verify` reported the chain intact.
+  bound (`large-upload`, CI run 40633650457). The server's peak resident
+  memory was 54 MiB (51 MiB on d72b761), and `audit verify` reported the
+  chain intact.
 - **PASS:** 600 s fuzzing of the WIM and XPRESS parsers (`fuzz-smoke`,
-  CI run 40601242085). These runs were built without ASan (POAM-37).
+  CI run 40633650457). These runs were built without ASan (POAM-37).
 - **PASS:** the Linux check of our own DISM-made sample WIMs
-  (`wim-samples` `verify`, runs 40601244164 and 40601244679). This
-  checked the committed WIM rules, before the S11/S12 change described
-  under [WIM acceptance rules](#wim-acceptance-rules-and-reason-codes).
-- **Not fully passed:** the PostgreSQL tests (`pg-integration`, CI runs
-  40601242085 and 40601244276). `audit_pg` passed, and `migrate_pg`
-  passed 8 of 9 tests. `newer_schema_refused` failed because the test
-  was stale; its fix has not yet run. `repo_pg` (role grants) and
-  `e2e_pg` (the end-to-end flow on PostgreSQL) are **NOT RUN** (POAM-34).
+  (`wim-samples` `verify`, runs 40633638946 and 40633653170), with the
+  S11/S12 rules described under
+  [WIM acceptance rules](#wim-acceptance-rules-and-reason-codes). These
+  CI results are not QA results.
 - **NOT RUN:** the manual procedure MT-1 with licensed Windows 11
-  Enterprise media (POAM-33).
+  Enterprise media (M2 exit 1a; POAM-33). M2 is met except exit 1a
+  (MT-1, owner action), so M2 is **not met**.
 
 The example configuration and the service unit in this guide are
 **examples: not shipped and not tested**. Every default below is
@@ -647,8 +653,10 @@ outcome, reason, and `initiating_seq` for later state changes.
 
 - Each record's hash covers the previous record's hash, so the records
   form a SHA-256 chain in PostgreSQL. The application and admin roles
-  cannot UPDATE or DELETE audit rows, and triggers refuse it (CI
-  evidence NOT RUN).
+  cannot UPDATE or DELETE audit rows, and triggers refuse it. CI run
+  40633650457 tests the application role and the triggers (`audit_pg`)
+  and the admin role's UPDATE (`repo_pg`); a DELETE by the admin role
+  is not tested.
 - A mutation and its audit record commit in one transaction. If the
   record cannot be written, the action is refused with 500
   `audit_unavailable` and nothing changes (decision 0015 item 1). The
@@ -943,8 +951,9 @@ download (8 MiB chunks, each verified before it is sent); 16
 [Verifying the chain](#verifying-the-chain). The server's resident memory
 during a 10.5 GiB upload is designed to stay under 256 MiB. That bound is
 asserted only by the CI `large-upload` job. It passed in CI run
-40601242085 on commit d72b761, with a peak of 51 MiB (synthetic content).
-Real media (MT-1) is NOT RUN.
+40601242085 on commit d72b761, with a peak of 51 MiB, and in CI run
+40633650457 on commit 5ea03a1, with a peak of 54 MiB (synthetic content
+both times). Real media (MT-1) is NOT RUN.
 
 ## Network controls
 
@@ -965,8 +974,9 @@ Real media (MT-1) is NOT RUN.
 
 ## Known gaps
 
-See [POAM.md](../compliance/POAM.md): POAM-4 and POAM-5 (server half
-pending CI evidence), POAM-14, and POAM-18 to POAM-37. In short: keys in
+See [POAM.md](../compliance/POAM.md): POAM-4 (relay; the server half's CI
+condition is met), POAM-5 (relay; the server's stdout mirror drops write
+errors), POAM-14, POAM-18 to POAM-33, and POAM-35 to POAM-37. In short: keys in
 files with no HSM; no RFC 5280 policy-tree processing; CRL files only;
 clients do not check server-certificate revocation; CLI software keys
 only; operator-declared facts; non-FIPS password code linked but
@@ -974,12 +984,13 @@ unreachable; audit truncation and unsigned-tail residual; raw-chunk
 refusal; pre-authentication slots; credential refusal budget; CRL number
 high-water mark not persisted; owner-key and local-admin guard limits;
 key buffer reallocation; serviced WIM layouts with few observations;
-`repo_pg`, `e2e_pg` and MT-1 NOT RUN; Linux fuzzing without ASan;
+MT-1 NOT RUN; Linux fuzzing without ASan;
 OPEN-PE-LIC with counsel; no restore event.
 
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-28 | CI on commit 5ea03a1. Rewrote the evidence status: `pg-integration` PASS (`migrate_pg`, `repo_pg`, `audit_pg` 9 each, `e2e_pg` 1); `large-upload` PASS (peak 54 MiB); `fuzz-smoke` and `wim-samples` `verify` PASS with the S11/S12 rules; MT-1 NOT RUN; M2 met except exit 1a (MT-1, owner action), so not met. Audit-row protection now cites `audit_pg` and `repo_pg`, with what each tests. Limits note records both large-upload peaks. Known gaps: POAM-34 closed; `repo_pg` and `e2e_pg` removed from the NOT RUN list. |
 | 2026-10-27 | First M2 CI evidence (commit d72b761) and the S11/S12 WIM rules. Rewrote the evidence status: `large-upload`, `fuzz-smoke` and the `wim-samples` `verify` job PASS; `pg-integration` not fully passed (`repo_pg` and `e2e_pg` NOT RUN); MT-1 NOT RUN. Updated the 256 MiB note under Limits. `wim_resource_overlap` and `wim_metadata_order_not_supported` now describe the S11/S12 rules (OBS-018, OBS-021), matching the working tree, which is not yet committed. Known gaps now go up to POAM-37. |
 | 2026-10-27 | First version for milestone M2 (WU-11): deployment with three certificate-only database roles, key modes and the `serve` admin-key refusal, command line and exit codes, full configuration reference including round-1 and round-2 keys, example configuration and example service unit (not shipped, not tested; REL-M2-P6-003), TLS and CRL refresh with rollback refusal, audit chain, checkpoints, heartbeat, SIEM forwarding and `audit verify` (`--max-unsigned-records` default 251, `--max-checkpoint-age`), time synchronisation, backup and restore with the audit-chain procedure (NIST-012), forward-only migrations with restore from backup as rollback (REL-M2-P6-004), WIM reason codes with remedies, API reason codes, limits, network controls and NOT RUN caveats. |

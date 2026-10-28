@@ -425,6 +425,60 @@ M3 build requests, fix round (spec pass, CR-001 to CR-006, 2026-10-28):
 - Marked AUDITED 2026-10-28: everything the findings list under Status.
   `smbios.md` §2 and §3 stay [primary not read] and uncited.
 
+DISM sample run R3 folded into wim.md (spec request SR-5, 2026-10-28):
+
+- No research, no fetches and no searches. No vendor source and no
+  Microsoft page was opened. The researcher read the clean-room
+  protocol, the run's spec request, earlier spec report and spec-pass
+  findings, the dirty-side spec and provenance files, and, at the
+  orchestrator's direction (as for R2), only the "Runs examined" rows,
+  the M-01 to M-23 section and records OBS-024 to OBS-048 of the
+  observation record `docs/formats/wim-observed.md`. No code, script,
+  decision record or other docs file was opened, and the scripts the
+  records name were not followed.
+- The observation-record table has a new R3 row (OBS-024 to OBS-048,
+  workflow run 40754869824, commit 27f7237). `wim.md` cites the records
+  under the [observed] label, in its own words, with no hex dumps,
+  sample file names or tree contents copied.
+- Main point: OBS-026 contradicts the [derived] 98-byte fixed part of a
+  directory entry; the files show 102 bytes. §6 marks the derivation
+  contradicted for the R3 files examined (including S01, rebuilt in R3
+  with the R1 command), and §6.1 gives the observed positions. Placing
+  the four extra bytes before the 8-byte union is labelled [derived]:
+  derived from the paper's order and the observed tag position; not
+  seen directly.
+- EFS refusal is recorded as a [project rule] resting on DEC-0006
+  (fail closed); the stored EFS form stays undocumented.
+- INDEX topic 9 updated.
+- Audit (2026-10-28, approve with comments): CR-R3-001 (EFS rule cites
+  DEC-0006), CR-R3-002 ([derived] wording), CR-R3-003 (scope is the R3
+  files, S01 rebuilt in R3) and CR-R3-005 (contradiction as its own
+  [observed] bullet) applied. The R3 notes in wim.md §3 to §7 and §13,
+  and INDEX topic 9, are marked AUDITED 2026-10-28. CR-R3-004, 006
+  and 007 concern the observation record and were left to the agent
+  fixing it.
+- Boot-protocol "Spec drift" (2026-10-28, AUDITED 2026-10-28): the
+  researcher read
+  only that section of the run's boot-protocol findings. The
+  consecutive-raw-chunk point (OBS-046 as corrected, with S14) was
+  taken from the coordinator's text; the corrected record was not
+  reopened. wim.md §4, §6.1 and §13 gained [observed, DRAFT] notes:
+  raw chunks at any position; 8-byte alignment where the paper says 4;
+  +92 not always zero; unnamed stream entries; DISM's apply not shown
+  to copy or re-base absolute targets (stays open, S13B). New
+  OPEN-WIM-12 (product handling of rewritten absolute targets on apply
+  to another root or letter; unsourced, so OPEN; refused until
+  decided).
+- One AUDITED sentence in wim.md §6.1 (that on apply DISM wrote the
+  stored reparse bytes back as they were) was withdrawn and replaced
+  by a DRAFT note that S16 cannot show copy versus re-base; the
+  auditor checked the replacement on 2026-10-28 (NIT-B).
+- Re-check (pass with comments): CR-R3-008 applied; the OPEN-WIM-12
+  refusal is now a [project rule, pending decision], and the item
+  stays OPEN. NIT-C: the R3 row lists OPEN-WIM-12. The new §4, §6.1
+  and §13 notes, the M-13 bullet and the OPEN-WIM-12 wording are
+  marked AUDITED 2026-10-28.
+
 ## Project decisions cited
 
 These are project design decisions, not product behaviour. They are
@@ -434,7 +488,7 @@ recorded in the repository and need no public-access check.
 |----|-------|-----------|------|--------|------------------|
 | DEC-0003 | Boot service never leases addresses (ProxyDHCP only) | `docs/decisions/0003-proxy-dhcp-only.md` | 2026-10-25 (Accepted) | Project decision, not product behaviour | REQ-BOOT-010, REQ-BOOT-011, REQ-BOOT-012; INDEX BOOT-1 and Unconfirmed (DHCP coexistence); standards/proxy-dhcp.md header |
 | DEC-0004 | M1 network-boot scope and per-device boot suppression | `docs/decisions/0004-m1-boot-scope-and-suppression.md` | 2026-10-26 (Accepted by the owner, 2026-10-26) | Project decision, not product behaviour | REQ-BOOT-003 (x86-64 and IPv4 scope), REQ-BOOT-005 (M1 architecture set), REQ-BOOT-007 (operator part), REQ-BOOT-050, REQ-BOOT-051; INDEX BOOT-2, BOOT-5. (M2 citations for REQ-OS-002 and REQ-PE-005 removed in M2 fix round 1, CR-506; those now rest on DEC-0009.) M3: REQ-DISK-011, REQ-PE-020 (UEFI x64 scope) |
-| DEC-0006 | WIM format details from our own test files | `docs/decisions/0006-wim-format-by-black-box-test-files.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-IMG-038 (LZMS refused in M2); os-images.md OPEN-IMG-C1; preinstall-env.md OPEN-PE-LIC (counsel question on the method); standards/wim.md §13; standards/wim-compression.md §4.2, §7 (OPEN-WIMC-2, OPEN-WIMC-3); standards/winpe.md §7; method for the [observed] notes in standards/wim.md and wim-compression.md (drift round); INDEX IMG-2 |
+| DEC-0006 | WIM format details from our own test files | `docs/decisions/0006-wim-format-by-black-box-test-files.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-IMG-038 (LZMS refused in M2); os-images.md OPEN-IMG-C1; preinstall-env.md OPEN-PE-LIC (counsel question on the method); standards/wim.md §13; standards/wim-compression.md §4.2, §7 (OPEN-WIMC-2, OPEN-WIMC-3); standards/winpe.md §7; method for the [observed] notes in standards/wim.md and wim-compression.md (drift round); standards/wim.md §6.1 and §13 OPEN-WIM-7 (EFS entries refused, fail closed; CR-R3-001); INDEX IMG-2, topic 9 |
 | DEC-0007 | Operator authentication by mutual TLS (PIV/CAC) | `docs/decisions/0007-operator-authentication-mtls.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-RBAC-005, REQ-IMG-053, REQ-AUD-001 (unauthenticated requests audited); operator-access.md OPEN-ACC-1, OPEN-ACC-3; INDEX IMG-2, RBAC-2, AUD-2 |
 | DEC-0009 | M2 image scope: Windows 11 Enterprise x64 | `docs/decisions/0009-m2-image-scope.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-OS-001, 002, 004, 005, 007, 008, 009 (unknown status blocks readiness; moved from States, CR-511); REQ-PE-005; REQ-AUD-001 (refusals audited); os-support.md Purpose, OPEN-OS-2; INDEX OS-1, PE-1, AUD-2; M3: REQ-TGT-003, REQ-DISK-011, REQ-PE-020 (M3 scope); INDEX TGT-1, DISK-1 |
 | DEC-0010 | Every operator action is audited | `docs/decisions/0010-audit-every-operator-action.md` | 2026-10-26 (Accepted by owner 2026-10-26) | Project decision, not product behaviour | REQ-AUD-001, 002, 005; REQ-RBAC-003 (refusal audited); REQ-IMG-015, 043 (auditing); operator-access.md OPEN-AUD-2; INDEX IMG-1, IMG-2 (CR-604), RBAC-2, AUD-2; M3: named in REQ-TGT-016 Basis only to say it does not cover device-side actions (D-M3-8) |
@@ -460,6 +514,7 @@ cited in specs only under the [observed] label.
 |----|-------|-----------|--------------|--------|----------|
 | OBS-001 to OBS-017 (run R1) | WIM format: observations from our own DISM-made files | `docs/formats/wim-observed.md` | Workflow run 40535666995, attempt 1, commit ba23bed (branch of the WIM sample job); DISM 10.0.26100.32860 on Windows build 26100.33650; 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R1 files only | standards/wim.md Sources, labels, §2, §3, §4, §5, §7, §8, §9, §10, §12, §13; standards/wim-compression.md Sources, §1, §3, §3.1, §3.3, §3.4, §3.6, §7; REQ-IMG-038 Status (OPEN-WIMC-1 confirmed for R1); INDEX header, topics 9 and 20 |
 | OBS-018 to OBS-023 (run R2) | WIM format: observations from our own DISM-made files changed after capture (identical images, append, export, commit, delete) | `docs/formats/wim-observed.md` | Workflow run 40599556702, attempt 1, commit 5d3c8c7 (job `generate`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1); 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R2 files only (OBS-020 also notes R1's 12-image file) | standards/wim.md Sources, labels, §3, §5, §13 (OPEN-WIM-6, status table, never-observed list, samples recorded and still needed), §14; INDEX header and topic 9 |
+| OBS-024 to OBS-048 (run R3) | WIM format: observations of metadata resources (directory entries, streams, security data), raw chunks, a file over 4 GiB, XML counts and DISM's apply | `docs/formats/wim-observed.md` | Workflow run 40754869824, attempt 1, commit 27f7237 (jobs `generate`, `generate-large`, `generate-metadata`, `reference`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1 and R2); 2026-10-28 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for the R3 files examined (including S01, rebuilt in R3 with the R1 command) only. Records were read from the "Runs examined" rows, the M-01 to M-23 section and the records themselves | standards/wim.md Sources, labels, §3, §4, §5, §6 (fixed part contradicted by OBS-026; new §6.1), §7, §13 (OPEN-WIM-5, 7, 10, status table, never-observed list, samples recorded in R3 and still needed), §13 OPEN-WIM-12 (via OBS-037); INDEX topic 9. EFS refusal: [project rule, DEC-0006]. AUDITED 2026-10-28 (CR-R3-001 to 003, 005 applied) |
 
 ## Sources used
 

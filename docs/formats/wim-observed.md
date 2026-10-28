@@ -11,9 +11,10 @@ the standards summaries
 [specs/standards/wim-compression.md](../../specs/standards/wim-compression.md),
 whose OPEN items it settles one record at a time.
 
-**Status: records from two runs (R1 and R2, 2026-10-27).** Records
-OBS-001 to OBS-017 come from run R1 and OBS-018 to OBS-023 from run R2
-of the `wim-samples` workflow (see [Runs examined](#runs-examined)).
+**Status: records from three runs (R1 and R2, 2026-10-27; R3,
+2026-10-28).** Records OBS-001 to OBS-017 come from run R1, OBS-018 to
+OBS-023 from run R2 and OBS-024 to OBS-048 from run R3 of the
+`wim-samples` workflow (see [Runs examined](#runs-examined)).
 They describe the files of those runs only; rule 6 below applies to
 every conclusion. OPEN items not
 listed as confirmed stay open, and parser constants that rest on them
@@ -44,16 +45,18 @@ stay marked `// FORMAT: derived, unconfirmed`.
 | OPEN-WIM-11 integrity table | partly: chunk size 10485760; hashed range is end of header to end of lookup table; only a one-entry table was seen | OBS-015 |
 | OPEN-WIM-9 split-set matching | partly: all parts share one GUID at offset 24, new for the set; part and total at 40 and 42 | OBS-016 |
 | Split flags and part contents | confirmed for S06; differs from our §10 summary (every part has its own lookup table and full XML; resource flag `0x08` is never set) | OBS-017 |
-| OPEN-WIM-7 directory entries | open (not examined; not needed in M2) | none |
+| OPEN-WIM-7 directory entries (R3) | partly: security block, entry and stream-entry layout, names, short names, alignment, end marker, times, attributes, hard links, reparse points and sibling order recorded for S01, S13 to S15; the fixed part is **102 bytes, not the [derived] 98**; EFS form, the sparse entry's extra block and two union fields stay open (see [M3 metadata questions](#m3-metadata-questions-m-01-to-m-23)) | OBS-024 to OBS-045, OBS-048 |
+| OPEN-WIM-5 chunk level (R3) | confirmed for S17 and S14: a chunk that does not shrink is stored as its 32768 plain bytes inside a compressed resource, at any position, including consecutive chunks | OBS-046 |
+| OPEN-WIM-10 (R3) | still open: S08's 4.5 GiB pseudorandom file was stored uncompressed, so it has no chunk table; its 7-byte stored size above 2^32 is recorded | OBS-047 |
 
 **Still needed:**
 
-- **S08** (large run, `-f large=true`): chunk-table width above 4 GiB
-  (OPEN-WIM-10). R1 had no `generate-large` job output.
-- **A new sample with a mixed file** (for example 32 KiB of text then
-  32 KiB of pseudorandom bytes, `/Compress:fast`): whether a chunk that
-  does not shrink is stored raw inside a compressed resource
-  (OPEN-WIM-5, chunk level).
+- **A compressible sample over 4 GiB** (OPEN-WIM-10): R3's S08 was
+  pseudorandom and DISM stored it uncompressed (OBS-047), so no chunk
+  table over 4 GiB exists yet. Text or a repeated pattern over 4 GiB
+  with `/Compress:fast` is needed.
+- **The M3 metadata gaps** listed under
+  [M3 metadata questions](#m3-metadata-questions-m-01-to-m-23).
 - **A `/CheckIntegrity` sample over 10 MiB**: more than one integrity
   entry and the chunk boundary rule (OPEN-WIM-11).
 - **More serviced layouts** (OPEN-WIM-6): S12A (R2) gave one file whose
@@ -83,8 +86,8 @@ stay marked `// FORMAT: derived, unconfirmed`.
   16-bit length extension and multi-chunk tables of long matches.
 - **A bootable sample** (BOOT-006): how the boot metadata header relates
   to the boot image's lookup entry; waits on OPEN-PE-LIC.
-- **Other DISM builds or runner images**: every claim is for R1 or R2
-  (same DISM build and runner image).
+- **Other DISM builds or runner images**: every claim is for R1, R2 or
+  R3 (same DISM build and runner image).
 
 ## Contents
 
@@ -94,6 +97,7 @@ stay marked `// FORMAT: derived, unconfirmed`.
 - [Record template](#record-template)
 - [Runs examined](#runs-examined)
 - [Open items and samples](#open-items-and-samples)
+- [M3 metadata questions (M-01 to M-23)](#m3-metadata-questions-m-01-to-m-23)
 - [Observations](#observations)
 
 ## Provenance rules
@@ -192,6 +196,7 @@ required; "n/a" is allowed only where stated.
 |-----|--------|---------|--------|--------------|----------|--------------|------------|
 | R1 | 40535666995 | 1 | ba23bedea96e5d1c68c8f77e8bff4ce9cb012825 (branch `m2-wim-samples`, job `generate`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-27T15:54:56Z |
 | R2 | 40599556702 | 1 | 5d3c8c701506ff780ff8a86c5e692f725634a6bd (job `generate`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-27T23:05:02Z |
+| R3 | 40754869824 | 1 | 27f7237d99c67a9cc575268398dd4193ae1fbccf (branch `m3/prebuild`; jobs `generate`, `generate-large`, `generate-metadata`, `reference`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-28T19:30:25Z to 19:31:14Z |
 
 R1 identity, from `host.txt`: PowerShell 7.6.7, `RUNNER_ARCH` X64.
 The DISM file version and the version in DISM's own banner differ;
@@ -350,6 +355,102 @@ The product's own reader confirms the layout facts in a committed
 test: `crates/usgp-image/tests/dism_samples.rs`
 (`serviced_layouts_match_observations`, feature `dism-samples`).
 
+R3 checks done before any record was written (macOS, local copies of
+the four artifacts of run 40754869824, downloaded by the orchestrator;
+an earlier attempt, run 40752616665, failed in a script step and is not
+used):
+
+- `shasum -a 256 -c SHA256SUMS`: `wim-samples` 19 files, `OK`;
+  `wim-samples-metadata` 4 files, `OK`; `wim-samples-reference` 1 file,
+  `OK`. `wim-samples-large-observations` has no `SHA256SUMS` (S08 is not
+  uploaded; its manifest row gives its length and SHA-256).
+- `manifest.tsv`: every row `produced` (S08 `produced (not uploaded)`).
+- `commands.log`: every command `EXIT 0` in all four jobs (86, 18, 8
+  and 4 commands); no `NOTE` line, so the EFS file was encrypted.
+- `host.txt` of all four jobs: the same commit, runner image, OS build
+  and DISM version as in the table. The metadata job also records
+  `fsutil behavior query disablelastaccess`: `DisableLastAccess = 3
+  (System Managed, Last Access Time Updates DISABLED)` and the system
+  short-name state `2 (Per volume setting - the default)`; the VHD
+  volume had short names enabled by the script (`VHD-META.diskpart.txt`).
+- The `reference` job applied S13 after checking its SHA-256 against the
+  metadata artifact (`S16 source S13.wim sha256 6d7db6b9...` in its
+  `commands.log`). Both VHD volumes were given the letter `R:`.
+
+R3 sample files used by OBS-024 to OBS-048 (SHA-256 from `SHA256SUMS`,
+checked; S08 from its manifest row):
+
+| Sample | File | Bytes | SHA-256 |
+|--------|------|-------|---------|
+| S01 | S01.wim | 972691 | c9a867bf22a6b8ea03361d5b3fe7e8d454c361f5a32430d7fc56078c3be4a431 |
+| S08 | S08.wim (not uploaded) | 4831839906 | a7e05acd463be3adc00c1f0fbe8490be9afcb06fe6b793def743bc7876584d4d |
+| S13 | S13.wim | 1051069 | 6d7db6b9a24da4a14c408013c046143b6fdf8a440b88baf7083d9b41c3ac634a |
+| S14 | S14.wim | 546335 | 57ec13c10c79987f1e849dc062a70869a8842ebeff0b63d077176776e2d3db61 |
+| S15 | S15.wim | 1051537 | bc1380fe88df68cae7708c27202aa2be05836d9c0586bda632dce908ad0007cd |
+| S16 | S16.manifest.tsv (text) | 830598 | dddc1363f72d755e619b66abc1c356b26e061b3b47391fe4c71d9055215b8a60 |
+| S17 | S17.wim | 79678 | 1342001c1e684d482445df136d02f4d89ab9ad863f93b76b143fc8fa6389fbb3 |
+
+R3 commands for these samples (from `commands.log`; S01 as in R1):
+
+```text
+S08 dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-work-large\S08.wim /CaptureDir:D:\a\_temp\wim-work-large\tree-large /Name:USGP-S08-01 /Description:usgp-sample-S08-index-01-large /Compress:fast
+S13 dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S13.wim /CaptureDir:R:\tree-meta /Name:USGP-S13-01 /Description:usgp-sample-S13-index-01-metadata-uncompressed /Compress:none
+S14 dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S14.wim /CaptureDir:R:\tree-meta /Name:USGP-S14-01 /Description:usgp-sample-S14-index-01-metadata-fast /Compress:fast
+S15 dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S15.wim /CaptureDir:R:\ /Name:USGP-S15-01 /Description:usgp-sample-S15-index-01-volume-root /Compress:none
+S16 dism.exe /English /Apply-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S13.wim /Index:1 /ApplyDir:R:\
+    (on a fresh NTFS VHD volume, short names enabled; then the tree manifest)
+S17 dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S17.wim /CaptureDir:D:\a\_temp\wim-work-metadata\tree-mixed /Name:USGP-S17-01 /Description:usgp-sample-S17-index-01-mixed /Compress:fast
+```
+
+Source trees: tree-meta is profile Metadata, seed 601, on the VHD
+volume `R:` (3033 files and 3057 manifest rows including its root);
+tree-mixed is profile Mixed, seed 701 (`trees.txt`); tree-large is
+profile Large, seed 301 (one 4831838208-byte file). The tree manifests
+(`tree-meta-before.manifest.tsv`, `tree-meta.manifest.tsv`,
+`volume-root.manifest.tsv`, `S16.manifest.tsv`), the `dir /x` listings
+(`*.dirx.txt`) and the `fsutil reparsepoint query` output
+(`*.reparse.txt`) were written on the runner by Windows' own tools, not
+by our analysis scripts.
+
+How the R3 bytes were examined: `xxd` and `shasum`; `xpr.py`
+unchanged; and four scripts under `scripts/wim-samples/analysis/`,
+each with a provenance header naming its only sources:
+
+| Script | Use | SHA-256 |
+|--------|-----|---------|
+| `dentry.py` | the walker written before R3 from `wim.md` §6 alone (98-byte fixed part); its R3 output is the evidence that the [derived] layout fits no entry (OBS-026) | 498a2efeaff75c6a889e45cf58dbd94aa659c1f2ba53c621bac8693d19c5bfe6 |
+| `dentry_r3.py` | walker for the layout the R3 bytes show, checking each assumption per entry; compares entries with a tree manifest; prints reparse resources (OBS-024 to OBS-044, OBS-048) | f2e2686e8b4a25c12a6c5e3557335d6ac7b8e7e9a178ff02bca5124c72c9670a |
+| `treecmp.py` | compares two tree manifests column by column (OBS-045) | 88871dbced26aa3b0f0fbde2c82b65795976f04ce219fa60fc4a843799bc3061 |
+| `reparsecmp.py` | compares stored reparse resources with `fsutil` output on the source and on DISM's applied tree (OBS-036, OBS-037) | 6e4758b9e5f15a31b80183994678d3f33f10a4d78e37be5dedc9fc12c22ae9cb |
+
+Notes on the headers, which are left as run because the files are
+hashed above (CR-R3-004, CR-R3-006):
+
+- `reparsecmp.py`'s header says it was used for OBS-033; it was used
+  for OBS-036 and OBS-037.
+- `dentry_r3.py` also rests on `wim.md` §4 (chunk tables, for S14) and,
+  through `xpr.py`, on `wim-compression.md`; its header lists only
+  sections 2, 3, 5 and 6.
+
+Run with Python 3.15.1, `python3 -I`. The figures quoted in the R3
+records come from these commands (paths shortened):
+
+```text
+python3 -I dentry.py S01.wim | S13.wim | S15.wim; dentry.py --xpr xpr.py S14.wim
+python3 -I dentry_r3.py S01.wim
+python3 -I dentry_r3.py --resource-hex --manifest tree-meta.manifest.tsv S13.wim
+python3 -I dentry_r3.py --manifest tree-meta-before.manifest.tsv S13.wim
+python3 -I dentry_r3.py --xpr xpr.py S14.wim
+python3 -I dentry_r3.py --manifest volume-root.manifest.tsv S15.wim
+python3 -I treecmp.py --strip-links '\tree-meta' tree-meta.manifest.tsv S16.manifest.tsv
+python3 -I reparsecmp.py <dentry_r3 S13 output> tree-meta.reparse.txt S16.reparse.txt
+python3 -I xpr.py S17.wim
+```
+
+`dentry_r3.py` reports for S01, S13, S14 and S15 every entry it read
+and every assumption that failed ("MISFIT"); the only misfit in any of
+them is the sparse file's entry (OBS-029, OBS-039).
+
 ## Open items and samples
 
 Status `pending` means no record exists yet. Questions listed here are
@@ -363,21 +464,75 @@ the samples can address; the samples are defined in
 | OPEN-WIM-2 | Values of the version field | S01, S02, S03, S07 | header (`@12`) | partly: OBS-003 (values seen; validity in general open) |
 | OPEN-WIM-3 | What the field at offset 20 holds | S01, S02, S04 | header (`@20`) | partly: OBS-004 (not the file size; meaning a reading) |
 | OPEN-WIM-4 | Flags of `recovery` (`.esd`) output | S07 | header (`@16`), lookup | partly: OBS-006 (flags recorded; format undocumented) |
-| OPEN-WIM-5 | How an incompressible chunk is stored | S09 (with `trees.txt` chunk bytes), S02 | chunks | partly: OBS-010 (resource level); chunk level needs a mixed sample |
+| OPEN-WIM-5 | How an incompressible chunk is stored | S09 (with `trees.txt` chunk bytes), S02, S17 | chunks | resource level: OBS-010; chunk level: OBS-046 (R3, S17) |
 | OPEN-WIM-6 | Lookup entry packing; metadata entry to image index | S01, S04, S11A, S11B, S12A, S12B | lookup, metadata, xml | packing confirmed: OBS-008; index mapping partly: OBS-009, OBS-018, OBS-021, OBS-023 (lookup order gives the index in every file seen) |
-| OPEN-WIM-7 | Directory entry alignment, short names | S01 | metadata | pending (needed only when applying images; M2 does not) |
+| OPEN-WIM-7 | Directory entry alignment, short names | S01, S13, S14, S15, S16 | metadata (full dump), `dentry_r3.py` | partly: OBS-024 to OBS-045 and OBS-048 (R3); open parts in [M3 metadata questions](#m3-metadata-questions-m-01-to-m-23) |
 | OPEN-WIM-8 | Content of `NAME`, `DESCRIPTION`, `FLAGS`, `WINDOWS` | S04 | xml | partly: OBS-014 (no `FLAGS`, no `WINDOWS` in our samples; edition, architecture and version facts cannot be observed from them, see decision 0013) |
 | OPEN-WIM-9 | How parts of a split set are matched | S06 parts | header (`@24`, `@40`, `@42`) | partly: OBS-016 (shared GUID) |
-| OPEN-WIM-10 | Chunk-table entry width above 4 GB | S08 (large observations artifact) | chunks (width 4 and 8 checks) | pending (R1 had no S08); width 4 below 4 GiB: OBS-011 |
+| OPEN-WIM-10 | Chunk-table entry width above 4 GB | S08 (large observations artifact) | chunks (width 4 and 8 checks) | still open: R3's S08 was stored uncompressed, no chunk table (OBS-047); width 4 below 4 GiB: OBS-011 |
 | OPEN-WIM-11 | Integrity chunk size unit; hashed range | S05 | integrity | partly: OBS-015 (one-entry table only) |
 | OPEN-WIMC-1 | WIM XPRESS is [MS-XCA] LZ77+Huffman; block rule; end symbol | S02, S04, S09 | chunks (first chunk: 256-byte table and first symbols) | confirmed for R1: OBS-012, OBS-013 |
 | LZX flag | Header flag value DISM writes for `max` | S03 | header (`@16`) | confirmed `0x00040000`: OBS-005 |
 | Split flags | Header and resource flags of `.swm` parts | S06 parts | header, lookup | confirmed for S06: OBS-017 |
 
+## M3 metadata questions (M-01 to M-23)
+
+The questions of plan M3 §1.4 (run
+`20261028-104815-m3-preboot-apply`), all part of OPEN-WIM-7 unless
+noted, with their status after R3. "Answered" means answered for the
+R3 files only (rule 6); a WIM layout that no record shows stays
+refused by the product.
+
+| ID | Question (short) | Samples | Status after R3 |
+|----|------------------|---------|-----------------|
+| M-01 | Security block: length includes header? count? 8-byte lengths? padding | S01, S13, S15 | answered: OBS-024 |
+| M-02 | Root entry offset; root name and parent fields | S01, S13, S15 | answered: OBS-024 (offset), OBS-025 (root) |
+| M-03 | Offsets and values of the fixed part | S01, S13, S15 | answered for positions: OBS-026 (102 bytes, contradicting the [derived] 98); what the always-zero fields at +24, +32 and +84 mean stays open |
+| M-04 | Name encoding, length, terminator, non-BMP | S01 `names\` | answered: OBS-027 |
+| M-05 | Short name position, length field, terminator | S13 | answered: OBS-028 |
+| M-06 | Entry length against bytes used; alignment | S01, S13, S15 | answered: OBS-029 (one exception: the sparse file's entry carries a further block, OBS-039) |
+| M-07 | End-of-directory marker; children offset; empty directory | S01, S13 | answered: OBS-030 |
+| M-08 | Empty file: zero hash, no lookup entry | S01, S13 | answered: OBS-031 |
+| M-09 | Stream entries: layout, unnamed entry, zero-length, on a directory | S01, S13 | answered: OBS-032; the rule behind the order of named streams stays open |
+| M-10 | Captured attribute values | S13 | answered: OBS-033; DISM's apply differs for the archive attribute (OBS-045) |
+| M-11 | Which time field is which | S13 | answered: OBS-034 |
+| M-12 | Hard-link group identifier | S13 | answered: OBS-035 |
+| M-13 | Reparse entries: tag, reserved, data location, `RP_FIX` | S13, S16 | partly: OBS-036 (tag, data location), OBS-037 (in-tree absolute targets lose the capture root on capture). Open, **blocking for absolute targets and junctions (S13B)**: what DISM's apply does with them; S16 applied to `R:\` from a capture root on `R:`, so copying the stored bytes and re-basing them give the same result there. Also open: the meaning of the union's last 4 bytes (OBS-036); absolute targets outside the capture root (not sampled) |
+| M-14 | Descriptors: self-relative as Windows returns them; stored once; index −1 | S13, S16 | partly: OBS-038 (stored once, shared index; DISM's apply gives the same SDDL on the 3052 rows that have one). Open: byte equality with the descriptor Windows returns (no binary reference was captured); index −1 (never seen); descriptors of reparse points (the manifests hold no SDDL for them) |
+| M-15 | Sparse, NTFS-compressed, EFS files | S13, S16 | partly: OBS-039 (sparse and compressed: attributes kept, data stored expanded; the sparse entry's extra block is unexplained), OBS-040 (EFS: stored form is not the plaintext; undocumented, so refused) |
+| M-16 | Paths over 260 UTF-16 units | S13, S16 | answered: OBS-041 |
+| M-17 | 3000 entries in one directory: sibling order; metadata over many chunks | S13, S14, S15 | answered: OBS-042 (order), OBS-043 (16 chunks) |
+| M-18 | XPRESS metadata equals S13's bytes | S14 | answered: OBS-043 |
+| M-19 | Volume root capture | S15 | answered: OBS-044 (`$RECYCLE.BIN` did not exist on the volume, so its handling is not shown) |
+| M-20 | DISM's apply result as a tree manifest | S16 | answered: OBS-045 |
+| M-21 | A chunk that does not shrink inside a compressed resource (OPEN-WIM-5) | S17, S14 | answered: OBS-046 (any position, including consecutive chunks) |
+| M-22 | 8-byte chunk-table entries (OPEN-WIM-10) | S08 | open: OBS-047 (S08 stored uncompressed; no chunk table) |
+| M-23 | XML `DIRCOUNT` and `FILECOUNT` against entries | S01, S13, S15 | answered for `DIRCOUNT` and `FILECOUNT`: OBS-048; the `HARDLINKBYTES` rule is not determined (one group seen) |
+
+Samples still needed for the open parts (requests for the next run):
+
+- **S13B** (blocking for absolute targets and junctions): tree-meta
+  captured from `R:` and applied to a volume with another letter, and to
+  a subdirectory (M-13: copy or re-base on apply); the manifests to
+  record the SDDL of reparse points too (M-14).
+- **S13C**: an absolute symbolic link whose target is outside the
+  capture root, with and without `/NoRpFix` (M-13).
+- **S13D**: a file with an explicit protected descriptor that has no
+  inheritable ACEs, plus a binary dump of the descriptors Windows
+  returns for the tree, reparse points included (M-14 byte equality),
+  and any file DISM writes with security index −1 if one can be made.
+- **S13E**: two more sparse files with one and with three
+  deallocated ranges (M-15 sparse block).
+- **S13F**: files with three and more named streams created in
+  different orders (M-09 order).
+- **S08B**: a compressible file over 4 GiB (M-22, OPEN-WIM-10).
+
 ## Observations
 
 Records are in ID order. OBS-001 to OBS-017 are from run R1, OBS-018
-to OBS-023 from run R2. The R2 identity line reads: Windows NT
+to OBS-023 from run R2, OBS-024 to OBS-048 from run R3 (identity
+line: as R2, but run 40754869824, attempt 1, commit 27f7237). The R2
+identity line reads: Windows NT
 10.0.26100.0, build 26100.33650; `Dism.exe` 10.0.26100.32860 (banner
 10.0.26100.5074); runner image `win25-vs2026` 20261021.278.1; run
 40599556702, attempt 1, commit 5d3c8c7; R2 commands and SHA-256 values
@@ -1437,3 +1592,859 @@ Multi-byte values are read little-endian (OBS-002).
 - Also seen in: none
 - Cited by: `crates/usgp-image/src/wim/lookup.rs`,
   `crates/usgp-image/tests/dism_samples.rs`
+
+### OBS-024: security block length includes its header; root follows
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: the security block (M-01) and the root
+  entry offset (M-02)
+- Sample: S01 (S01.wim, c9a867bf22a6b8ea); S13 (S13.wim,
+  6d7db6b9a24da4a1); S15 (S15.wim, bc1380fe88df68ca)
+- Command: R1 command S01; R3 commands S13 and S15
+- Source tree: tree-01 (seed 101); tree-meta (seed 601); the VHD volume
+  root holding tree-meta
+- Host, DISM, runner, run: R3 identity line
+- Location: start of each metadata resource: S01 file offset 966053
+  (0xEBDA5), S13 401545 (0x62089), S15 401665 (0x62101)
+- Bytes (S01, then S13):
+
+  ```text
+  000ebda5: 8c01 0000 0200 0000 e800 0000 0000 0000  ................
+  000ebdb5: 8c00 0000 0000 0000                      ........
+  00062089: 4404 0000 0700 0000 e800 0000 0000 0000  D...............
+  ```
+
+- Observation: S01: first 4 bytes 396, next 4 bytes 2, then two 8-byte
+  values 232 and 140; 8 + 2 × 8 + 232 + 140 = 396, equal to the first
+  field. The 4 bytes from 396 to 400 are zero and the root entry starts
+  at 400. S13: 1092, 7 descriptors, 8 + 56 + their lengths = 1092, root
+  at 1096. S15: 1308, 8 descriptors, sum 1308, root at 1312.
+  `dentry_r3.py` reads every descriptor to the computed end without a
+  gap in all three.
+- Conclusion: in these files the first field is the length of the whole
+  security block including its 8-byte header, the second is the
+  number of descriptors (the [reading] of `wim.md` §6 is
+  **confirmed**), each descriptor length is 8 bytes, the descriptors
+  follow with no padding between them, and the root entry starts at the
+  next multiple of 8 after the block, with zero bytes in between.
+- Also seen in: S14 (decoded metadata, identical to S13: OBS-043)
+- Cited by: none yet
+
+### OBS-025: the root entry has an empty name and no parent field
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: the root entry (M-02)
+- Sample: S01, S13, S15
+- Command: R1 command S01; R3 commands S13 and S15
+- Source tree: as OBS-024
+- Host, DISM, runner, run: R3 identity line
+- Location: S01 file offset 966453 (0xEBF35), 104 bytes; S15 file
+  offset 402977 (0x62621), 104 bytes
+- Bytes (S01 root):
+
+  ```text
+  000ebf35: 6800 0000 0000 0000 1000 0000 0000 0000  h...............
+  000ebf45: 0002 0000 0000 0000 0000 0000 0000 0000  ................
+  000ebf55: 0000 0000 0000 0000 0000 8192 b17a dc01  .............z..
+  000ebf65: 0000 8192 b17a dc01 0000 8192 b17a dc01  .....z.......z..
+  000ebf75: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  000ebf85: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  000ebf95: 0000 0000 0000 0000                      ........
+  ```
+
+- Observation: the root is one entry of length 104 (0x68), not part of
+  a list; its name-length field (+100, OBS-026) is 0, followed by two
+  zero bytes; its children offset is 512 (0x200), where the top-level
+  list starts. No entry in any R3 file has a field that holds its
+  parent's offset; the walker rebuilds paths from the lists it walks.
+  In S13 the root carries tree-meta's attributes, security and times
+  (OBS-033, OBS-034); in S15 the volume root's (OBS-044).
+- Conclusion: the root entry has the same layout as any entry, with a
+  zero-length name; there is no parent field, so a reader must keep the
+  parent path itself (as `wim.md` §6 says: "rebuilt by walking").
+- Also seen in: S13 (offset 1096), S14
+- Cited by: none yet
+
+### OBS-026: the entry's fixed part is 102 bytes, not the derived 98
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: field positions of the fixed part
+  (M-03); **contradicts** the [derived] 98-byte fixed part of `wim.md`
+  §6
+- Sample: S01, S13, S15 (all 33, 3057 and 3058 entries)
+- Command: R1 command S01; R3 commands S13 and S15
+- Source tree: as OBS-024
+- Host, DISM, runner, run: R3 identity line
+- Location: S01 entry `bin`, file offset 966565 (0xEBFA5), 112 bytes
+- Bytes:
+
+  ```text
+  000ebfa5: 7000 0000 0000 0000 1000 0000 0000 0000  p...............
+  000ebfb5: d004 0000 0000 0000 0000 0000 0000 0000  ................
+  000ebfc5: 0000 0000 0000 0000 0000 8192 b17a dc01  .............z..
+  000ebfd5: 0000 8192 b17a dc01 0000 8192 b17a dc01  .....z.......z..
+  000ebfe5: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  000ebff5: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  000ec005: 0000 0000 0600 6200 6900 6e00 0000 0000  ......b.i.n.....
+  ```
+
+- Observation: the name `bin` (6 bytes) is at entry offset 102, and its
+  length (6) at 100. `dentry.py`, which reads `wim.md` §6's 98-byte
+  layout (name length at 96), reads every name in S01, S13 and S15 as
+  empty and stops on the first stream entry ("length 40 out of range").
+  Read with `dentry_r3.py`, every entry fits this layout: +0 length (8),
+  +8 attributes (4), +12 security index (4), +16 children offset (8),
+  +24 and +32 (8 each, zero in every entry), +40, +48, +56 times (8
+  each), +64 hash (20), **+84 four bytes (zero in every entry)**, +88
+  the 8-byte reparse or hard-link union (OBS-035, OBS-036), +96 stream
+  count (2), +98 short-name length (2), +100 name length (2), +102
+  name. The order of the fields named by `wim.md` §6 is unchanged; the
+  four bytes at +84 are not in the summary. Placing them before the
+  union rather than after it is **[derived]** from the `wim.md` §6
+  field order and OBS-036: with the union at +88 the reparse tag is its
+  first half, as §6 orders it; read from +84, the tag would fall in the
+  second half. Counts of non-zero values
+  from `dentry_r3.py`: +24: 0, +32: 0, +84: 0 in each file.
+- Conclusion: in these files the fixed part is 102 bytes; four zero
+  bytes at +84 (placement before the union [derived]); the [derived] 98
+  is wrong for them. What +24, +32 and +84 hold when non-zero is not
+  shown (always zero here).
+- Also seen in: S14
+- Cited by: none yet
+
+### OBS-027: names are UTF-16LE, then a 2-byte zero terminator
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: name encoding (M-04)
+- Sample: S01 (`names\`), S13
+- Command: R1 command S01; R3 command S13
+- Source tree: tree-01 `names\` (Standard profile), tree-meta
+- Host, DISM, runner, run: R3 identity line
+- Location: S01 entry `names\<U+10400>-supplementary.txt`, file offset
+  968901 (0xEC8C5), 144 bytes
+- Bytes (from +32):
+
+  ```text
+  000ec8e5: 0000 0000 0000 0000 0000 8192 b17a dc01  .............z..
+  000ec8f5: 0000 8192 b17a dc01 0000 8192 b17a dc01  .....z.......z..
+  000ec905: 6639 623d 0df6 1f7a b55e ed28 a8b1 d3c5  f9b=...z.^.(....
+  000ec915: 1d3c cd4d 0000 0000 0000 0000 0000 0000  .<.M............
+  000ec925: 0000 0000 2800 01d8 00dc 2d00 7300 7500  ....(.....-.s.u.
+  000ec935: 7000 7000 6c00 6500 6d00 6500 6e00 7400  p.p.l.e.m.e.n.t.
+  000ec945: 6100 7200 7900 2e00 7400 7800 7400 0000  a.r.y...t.x.t...
+  ```
+
+- Observation: name length 40 (0x28); the name starts `01 d8 00 dc`,
+  the UTF-16LE surrogate pair of U+10400, then `-supplementary.txt`;
+  two zero bytes follow; the entry length 144 is exactly 102 + 40 + 2.
+  All 33 S01 names (including U+00E9, U+03A9, U+65E5 U+672C and a
+  space) and all 3057 S13 names decode as UTF-16LE to the names in the
+  source manifests, and every name is followed by two zero bytes.
+- Conclusion: the name is UTF-16LE (the [reading] is **confirmed**),
+  its length field counts bytes without the terminator, a 2-byte zero
+  terminator follows, and characters outside the BMP are stored as
+  surrogate pairs.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-028: the short name follows the name's terminator
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: short-name placement (M-05)
+- Sample: S13
+- Command: R3 command S13
+- Source tree: tree-meta `shortnames\` on a volume with short names
+  enabled; `dir /x` in `tree-meta.dirx.txt`
+- Host, DISM, runner, run: R3 identity line
+- Location: entry `shortnames\explicit-short-name-target.txt`, file
+  offset 895545 (0xDAA39), 192 bytes; bytes from +96
+- Bytes:
+
+  ```text
+  000daa99: 0000 1800 3c00 6500 7800 7000 6c00 6900  ....<.e.x.p.l.i.
+  000daaa9: 6300 6900 7400 2d00 7300 6800 6f00 7200  c.i.t.-.s.h.o.r.
+  000daab9: 7400 2d00 6e00 6100 6d00 6500 2d00 7400  t.-.n.a.m.e.-.t.
+  000daac9: 6100 7200 6700 6500 7400 2e00 7400 7800  a.r.g.e.t...t.x.
+  000daad9: 7400 0000 4500 5800 5000 4c00 4900 4300  t...E.X.P.L.I.C.
+  000daae9: 4900 5400 2e00 5400 5800 5400 0000 0000  I.T...T.X.T.....
+  ```
+
+- Observation: +98 holds 24 (0x18), the byte length of `EXPLICIT.TXT`,
+  the name set with `fsutil file setshortname`; the short name follows
+  the long name's 2-byte terminator and is itself followed by two zero
+  bytes. Generated short names (`LONGFI~1.TXT`, `LONGFI~2.TXT`,
+  `NAMEWI~1.TXT`, `LONGDI~1`, the 3000 names in `many\`) are stored the
+  same way and equal the `dir /x` listing. Names that need no short name
+  (`SHORT.TXT`, `lower.txt`, `hard-two.txt`) have 0 at +98 and nothing
+  after the name's terminator but padding. S01, captured from a runner
+  volume without short names, has 0 at +98 in every entry.
+- Conclusion: the short-name length is at +98 in bytes (UTF-16LE,
+  without terminator); a non-empty short name is stored after the
+  name's terminator, followed by its own 2-byte zero terminator.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-029: entry length is the used size rounded up to 8
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: entry alignment (M-06)
+- Sample: S01, S13, S15
+- Command: R1 command S01; R3 commands S13 and S15
+- Source tree: as OBS-024
+- Host, DISM, runner, run: R3 identity line
+- Location: every entry; examples in OBS-026 to OBS-028
+- Bytes: S01 `bin` (OBS-026): 102 + 6 + 2 = 110, length 112, two zero
+  bytes of padding; `<U+10400>-supplementary.txt` (OBS-027): 144 = 144,
+  no padding; `explicit-short-name-target.txt` (OBS-028): 102 + 60 +
+  2 + 24 + 2 = 190, length 192.
+- Observation: `dentry_r3.py` checks for each entry that the length
+  field equals the used size (fixed part, name, terminator, short name
+  and its terminator) rounded up to a multiple of 8 and that the padding
+  is zero, and for each stream entry the same with 38 + name + 2. It
+  holds for all 33, 3057 and 3058 entries and all stream entries except
+  one: the entry of `special\sparse-196608.bin` (S13 and S15), whose
+  length is 192 for a used size of 164; the bytes after the padding to
+  168 are not zero (OBS-039). Each entry's stream entries start at the
+  entry's offset plus its length; the next sibling starts where the
+  last stream entry ends; there is no other gap. Every length is a
+  multiple of 8, so every entry starts at a multiple of 8.
+- Conclusion: entries and stream entries are 8-byte aligned by their
+  own length fields; a reader must advance by the length field, not by
+  the size it computes, because at least one entry kind (sparse files)
+  carries further bytes inside its length.
+- Also seen in: S14
+- Cited by: none yet
+
+### OBS-030: lists end with 8 zero bytes; empty directories point at one
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: end marker, children offset, empty
+  directory (M-07)
+- Sample: S01, S13
+- Command: R1 command S01; R3 command S13
+- Source tree: tree-01 `empty-dir\`; tree-meta
+- Host, DISM, runner, run: R3 identity line
+- Location: S01 entry `empty-dir`, file offset 966677 (0xEC015), and
+  bytes 2328 to 2344 of the metadata, file offset 968381 (0xEC6BD)
+- Bytes:
+
+  ```text
+  000ec015: 8000 0000 0000 0000 1000 0000 0000 0000  ................
+  000ec025: 2009 0000 0000 0000                       .......
+  000ec6bd: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  ```
+
+- Observation: `empty-dir` has children offset 2336 (0x920); the 8
+  bytes at 2336 are zero, and the next list (`names`, offset 2344)
+  follows them. Every list in S01 (12), S13 (21) and S15 (22) ends with
+  8 zero bytes where the next entry's length would be. Each non-zero
+  children offset is the offset, from the start of the metadata
+  resource, of the first entry of that directory's list. Files,
+  symbolic links and junctions have children offset 0.
+- Conclusion: in these files the children offset points at the first
+  child entry; a list ends with a 64-bit zero; an empty directory has a
+  non-zero children offset that points directly at that zero.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-031: empty content has an all-zero hash and no lookup entry
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: empty files and streams (M-08)
+- Sample: S01, S13
+- Command: R1 command S01; R3 command S13
+- Source tree: tree-01 `text\empty.txt`; tree-meta `streams\`
+- Host, DISM, runner, run: R3 identity line
+- Location: S01 `text\empty.txt` hash, file offset 970117 (0xECD85),
+  20 bytes
+- Bytes: `0000 0000 0000 0000 0000 0000 0000 0000 0000 0000`
+- Observation: `text\empty.txt` (0 bytes) has an all-zero hash, and no
+  lookup entry has an all-zero hash. In S13 the unnamed stream entry of
+  `streams\empty-main.txt` (empty main stream) and the named stream
+  `usgp-zero` (0 bytes) also have all-zero hashes. Every non-zero hash
+  in S01, S13 and S15 entries and stream entries names a lookup entry
+  (`dentry_r3.py` prints no `NOT IN LOOKUP`).
+- Conclusion: empty content, in a main or a named stream, is stored as
+  an all-zero hash with no resource (consistent with OBS-008).
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-032: stream entries follow the entry; unnamed one carries data
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: alternate stream entries (M-09)
+- Sample: S01 (`text\with-stream.txt`), S13 (`streams\`)
+- Command: R1 command S01; R3 command S13
+- Source tree: tree-01; tree-meta `streams\` (`tree-meta.manifest.tsv`
+  lists each named stream with its length)
+- Host, DISM, runner, run: R3 identity line
+- Location: S13 `streams\two-streams.txt` bytes +84 to +104, file
+  offset 897733 (0xDB2C5), and its three stream entries, file offset
+  897809 (0xDB311), 152 bytes
+- Bytes:
+
+  ```text
+  000db2c5: 0000 0000 0000 0000 0000 0000 0300 1800  ................
+  000db2d5: 1e00 7400                                ..t.
+  000db311: 2800 0000 0000 0000 0000 0000 0000 0000  (...............
+  000db321: bbad 271f c8d9 ecd5 7404 38d1 f0a5 3423  ..'.....t.8...4#
+  000db331: f0ab 899d 0000 0000 3800 0000 0000 0000  ........8.......
+  000db341: 0000 0000 0000 0000 b05a d91f 2c48 a44f  .........Z..,H.O
+  000db351: 6910 c81d 6ae6 79d5 fa91 333e 1000 7500  i...j.y...3>..u.
+  000db361: 7300 6700 7000 2d00 7400 7700 6f00 0000  s.g.p.-.t.w.o...
+  000db371: 3800 0000 0000 0000 0000 0000 0000 0000  8...............
+  000db381: 76b1 f347 cb55 9200 a35f 25ad 9180 89c8  v..G.U..._%.....
+  000db391: 2bd8 8616 1000 7500 7300 6700 7000 2d00  +.....u.s.g.p.-.
+  000db3a1: 6f00 6e00 6500 0000                      o.n.e...
+  ```
+
+- Observation: the stream count at +96 is 3 for a file with two named
+  streams. The entry's own hash is zero; the first stream entry (length
+  40) has an empty name and the hash of the 46-byte main stream; then
+  `usgp-two` and `usgp-one` (the order they were *not* written in).
+  Each stream entry: +0 length (8), +8 (8, zero in every one), +16 hash
+  (20), +36 name length (2), +38 name, 2 zero bytes, zero padding to the
+  length. Other S13 cases: `empty-main.txt` count 2, unnamed entry with
+  a zero hash then `usgp-named`; `zero-length-stream.txt` count 2,
+  unnamed with the main data, then `usgp-zero` with a zero hash;
+  `dir-with-stream` (a directory) count 1, only `usgp-dir-stream`, no
+  unnamed entry. S01 `with-stream.txt`: count 2, unnamed then
+  `usgp-sample`. Files without named streams have count 0 and keep
+  their data hash in the entry. Every named stream's name and size equal
+  the source manifest (3057 of 3057 entries).
+- Conclusion: a file with named streams has an unnamed stream entry
+  first, which carries the main data's hash (the entry's own hash is
+  then zero), and the count includes it; a directory with a named
+  stream has no unnamed entry. Which rule orders named streams is not
+  shown.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-033: the attributes field holds the attribute value Windows reports
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: captured attributes (M-10)
+- Sample: S13
+- Command: R3 command S13
+- Source tree: tree-meta; `tree-meta.manifest.tsv` `attributes` column
+  (read by PowerShell on the runner)
+- Host, DISM, runner, run: R3 identity line
+- Location: +8 of every entry; for example `attrs\read-only.txt`, file
+  offset 405265 (0x62F11): `0100 0000`
+- Bytes: values seen at +8, one per kind: `0x01` read-only, `0x02`
+  hidden, `0x04` system, `0x10` directory, `0x16` hidden system
+  directory, `0x20` archive, `0x30` directory with the archive bit,
+  `0x80` none set, `0x220` sparse, `0x410` and `0x420` reparse points,
+  `0x820` NTFS-compressed, `0x2000` not content-indexed, `0x4020`
+  encrypted
+- Observation: for all 3057 entries the 4-byte value at +8 equals the
+  `attributes` column of the source manifest (`dentry_r3.py --manifest`:
+  equal 3057, differ 0).
+- Conclusion: DISM stores the attribute value the file system reports,
+  unchanged, including the sparse, compressed, encrypted and reparse
+  bits. On apply, DISM did not restore it exactly in every case
+  (OBS-045).
+- Also seen in: S14, S15 (3058 of 3058 against `volume-root.manifest.tsv`)
+- Cited by: none yet
+
+### OBS-034: times at +40, +48, +56 are creation, last access, last write
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: time fields (M-11)
+- Sample: S13
+- Command: R3 command S13
+- Source tree: tree-meta with distinct times per item and field
+  (creation in 2021, last access in 2022, last write in 2023, each with
+  1234567 extra 100-ns units); manifests store FILETIME values
+- Host, DISM, runner, run: R3 identity line
+- Location: S13 root, file offset 402681 (0x624F9), 24 bytes
+- Bytes: `8756 480c d1df d601 8716 0f85 a2fe d701 87d6 d5fd 731d d901`
+- Observation: the root's three values are 132539328001234567,
+  132854688001234567 and 133170048001234567, which are the FILETIME
+  values of 2021-01-01, 2022-01-01 and 2023-01-01 00:00:00.1234567 UTC
+  in the manifest. For all 3057 entries +40 equals the manifest's
+  creation time, +48 its last-access time and +56 its last-write time,
+  to the 100-ns unit (`tree-meta.manifest.tsv`, taken after the
+  captures). Against the manifest taken before any capture, 3055 are
+  equal; the two others are hard-link names whose times the "before"
+  manifest read differently from the "after" one (OBS-035); the WIM
+  agrees with the "after" values. Last-access updates were disabled on
+  the runner (`host.txt`).
+- Conclusion: +40 is creation, +48 last access and +56 last write, each
+  a FILETIME value as Windows reports it.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-035: hard links share a non-zero group value; others hold zero
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: hard-link groups (M-12)
+- Sample: S13
+- Command: R3 command S13
+- Source tree: tree-meta `links\hard-original.txt`, `links\hard-two.txt`
+  and `links\sub\hard-three.txt`, three names for one file
+  (`hard-links` column of `tree-meta.manifest.tsv`)
+- Host, DISM, runner, run: R3 identity line
+- Location: +88 of the three entries, file offsets 405937 (0x631B1),
+  406105 (0x63259) and 407561 (0x63809); hash at 405913 (0x63199)
+- Bytes:
+
+  ```text
+  000631b1: 2a00 0000 0000 0100 0000 1800 2200 6800  *...........".h.
+  00063259: 2a00 0000 0000 0100 0000 0000 1800 6800  *.............h.
+  00063809: 2a00 0000 0000 0100 0000 0000 1c00 6800  *.............h.
+  00063199: fd7f 7e7b 963f ecf0 6e61 d43b 6ece 166f  ..~{.?..na.;n..o
+  000631a9: b232 3ee5                                .2>.
+  ```
+
+- Observation: the three names carry the same 8 bytes at +88
+  (0x000100000000002A); each is a full entry with its own name, short
+  name and the same hash `fd7f7e7b…` (one 27-byte lookup entry). Every
+  other entry without the 0x400 attribute bit has 8 zero bytes there
+  (3049 entries in S13, 3050 in S15). The XML gives `HARDLINKBYTES` 54 (OBS-048).
+- Conclusion: in this file, names of one hard-linked file share a
+  non-zero 8-byte value at +88 and each is a complete entry with the
+  same hash; a file with one name has zero. What the value is derived
+  from is not shown.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-036: reparse points: tag at +88; data in a resource named by a hash
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: reparse entries (M-13)
+- Sample: S13
+- Command: R3 command S13
+- Source tree: tree-meta `links\`: a junction, symbolic links to a file
+  and to a directory, each relative and absolute (in-tree);
+  `tree-meta.reparse.txt` (fsutil output)
+- Host, DISM, runner, run: R3 identity line
+- Location: entry `links\junction`, file offset 406145 (0x63281), 120
+  bytes; `links\sym-file-rel.txt` +80, file offset 406881 (0x63561), and
+  its stream entries, file offset 406969 (0x635B9)
+- Bytes:
+
+  ```text
+  00063281: 7800 0000 0000 0000 1004 0000 0000 0000  x...............
+  00063291: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  000632a1: 0000 0000 0000 0000 dde5 56cd 1267 dd01  ..........V..g..
+  000632b1: dde5 56cd 1267 dd01 dde5 56cd 1267 dd01  ..V..g....V..g..
+  000632c1: 1b45 a326 3b8e 882a 7b8c 458e 79c5 fabf  .E.&;..*{.E.y...
+  000632d1: 17c4 260d 0000 0000 0300 00a0 0000 0000  ..&.............
+  000632e1: 0000 0000 1000 6a00 7500 6e00 6300 7400  ......j.u.n.c.t.
+  000632f1: 6900 6f00 6e00 0000                      i.o.n...
+  00063561: 0000 0000 0000 0000 0c00 00a0 0000 0100  ................
+  000635b9: 2800 0000 0000 0000 0000 0000 0000 0000  (...............
+  000635c9: edd9 d6d8 33af d090 6215 ccf8 33b8 b9c4  ....3...b...3...
+  000635d9: 923c 6b7f 0000 0000 2800 0000 0000 0000  .<k.....(.......
+  000635e9: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+  ```
+
+- Observation: with attribute bit 0x400 set, the 4 bytes at +88 hold
+  the tag `fsutil` reports (0xA0000003 for the junction, 0xA000000C for
+  the four symbolic links). The next 4 bytes are `0000 0100` for the
+  two relative links and `0000 0000` for the two absolute links and the
+  junction. Directory reparse points (junction, two directory links)
+  have stream count 0 and a non-zero entry hash; file symbolic links
+  have a zero entry hash and stream count 2: two unnamed stream
+  entries, the first with a non-zero hash, the second with a zero hash.
+  The resource named by the non-zero hash (entry or first stream)
+  holds, for the two relative links, exactly the bytes `fsutil
+  reparsepoint query` prints as "Reparse Data" (52 and 72 bytes;
+  `reparsecmp.py`: stored==source True); `fsutil` prints the tag and
+  the data length separately. Absolute targets: OBS-037.
+- Conclusion: in this file a reparse point stores its tag at +88 and its
+  reparse data, without tag and length, as a resource named by the
+  entry hash (directories) or by the first unnamed stream (files).
+  The meaning of the 4 bytes at +92 is not shown; they correlate with
+  relative targets in these five entries only.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-037: in-tree absolute targets lose the capture root on capture
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: what `RP_FIX` does on capture and apply
+  (M-13)
+- Sample: S13; S16 (apply of S13 index 1)
+- Command: R3 commands S13 and S16
+- Source tree: tree-meta `links\` on `R:\tree-meta`; S16 applied to the
+  root of another volume, also lettered `R:`
+- Host, DISM, runner, run: R3 identity line
+- Location: the resources named by `links\junction`,
+  `links\sym-dir-abs` and `links\sym-file-abs.txt` (`dentry_r3.py
+  --resource-hex`); `tree-meta.reparse.txt`; `S16.reparse.txt`
+- Bytes (`links\sym-file-abs.txt`: source, from `fsutil`, then the
+  stored resource):
+
+  ```text
+  source 0000: 44 00 4c 00 00 00 44 00 00 00 00 00 52 00 3a 00   D.L...D.....R.:.
+  source 0010: 5c 00 74 00 72 00 65 00 65 00 2d 00 6d 00 65 00   \.t.r.e.e.-.m.e.
+  stored 0000: 00 00 38 00 3a 00 30 00 00 00 00 00 5c 00 3f 00   ..8.:.0.....\.?.
+  stored 0010: 3f 00 5c 00 52 00 3a 00 5c 00 6c 00 69 00 6e 00   ?.\.R.:.\.l.i.n.
+  ```
+
+- Observation: header flag 0x80 (`RP_FIX`) is set in S13 (`@16 dwFlags
+  0x00000080`). For the three reparse points whose targets were absolute
+  paths inside the capture directory, the stored data differ from the
+  source (136, 136 and 156 bytes on disk; 96, 100 and 120 stored): the
+  paths no longer contain `\tree-meta`, so `R:\tree-meta\links\…` is
+  stored as `R:\links\…`, and the name strings are laid out
+  differently. The two relative links are stored unchanged (OBS-036).
+  After DISM's apply (S16), all five reparse points hold exactly the
+  stored bytes (`reparsecmp.py`: stored==applied True for 5 of 5), and
+  their targets read `R:\links\…`.
+- Conclusion: DISM rewrote in-tree absolute targets on capture by
+  removing the capture-root part of the path. What its apply does with
+  them is **not shown**: S16 applied to `R:\` an image captured from a
+  root on `R:`, so copying the stored bytes unchanged and re-basing them
+  onto the apply root give the same bytes there. S13B (another letter,
+  and a subdirectory) is needed and blocks applying absolute targets
+  and junctions. Targets outside the capture root were not sampled.
+- Also seen in: S14, S15 (S15 captured the volume root, so `\tree-meta`
+  stays in its paths)
+- Cited by: none yet
+
+### OBS-038: identical descriptors are stored once and shared by index
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: security descriptors (M-14)
+- Sample: S13; S16
+- Command: R3 commands S13 and S16
+- Source tree: tree-meta `acl\` (four `icacls` variants and a twin with
+  the same commands); `sddl` columns of `tree-meta.manifest.tsv` and
+  `S16.manifest.tsv`
+- Host, DISM, runner, run: R3 identity line
+- Location: +12 of every entry; security block (OBS-024)
+- Bytes: `acl\protected.txt` and `acl\protected-twin.txt` both
+  `0500 0000` at +12; `acl\deny-ace.txt` `0100 0000`;
+  `acl\owner-system.txt` `0400 0000`; `acl\inherit-dir` `0200 0000`;
+  its child `0300 0000`; other files `0600 0000`, other directories
+  `0000 0000`
+- Observation: S13 holds 7 descriptors with 7 different SHA-256
+  values. Joined with the manifest, each index is used by entries with
+  exactly one SDDL string, and different indexes by different strings;
+  the twin files share index 5. No entry in S01, S13, S14 or S15 has
+  index −1 (`security -1: 0`). Every descriptor starts with the bytes
+  `01 00 04`. After DISM's apply (S16) the 3052 rows that have an SDDL
+  value have the same SDDL as the source; the 5 reparse points have
+  none in either manifest (the script does not read it), so their
+  descriptors were not compared.
+- Conclusion: identical descriptors are stored once and entries refer to
+  them by index; DISM's apply reproduces them, as Windows reads them
+  back, on every entry compared (reparse points excluded).
+  Whether the stored bytes equal the descriptor bytes Windows returns
+  was not checked (only SDDL text was captured), and index −1 was never
+  seen.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-039: sparse and compressed files: data stored expanded
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: sparse and NTFS-compressed files (M-15)
+- Sample: S13
+- Command: R3 command S13
+- Source tree: tree-meta `special\sparse-196608.bin` (196608 bytes,
+  range 65536 to 131072 deallocated with `fsutil sparse setrange`) and
+  `special\compressed.txt` (`compact /c`)
+- Host, DISM, runner, run: R3 identity line
+- Location: sparse entry bytes +160 to +192, file offset 897345
+  (0xDB141)
+- Bytes:
+
+  ```text
+  000db141: 4e00 0000 0000 0000 0300 0000 1000 0000  N...............
+  000db151: 0000 0100 0000 0000 0000 0200 0000 0000  ................
+  ```
+
+- Observation: the two entries keep attributes 0x220 and 0x820
+  (OBS-033). Their hashes name resources of 196608 and 121679 bytes
+  whose SHA-256 equals the files' content in the manifest (the read
+  data, zeros included): DISM stored the expanded content. The sparse
+  entry's length is 192; after the short name's terminator and two
+  zero bytes (to 168) it holds 24 more bytes: `03000000 10000000`, then
+  65536 and 131072 as 8-byte values, equal to the start and end of the
+  range deallocated (that they describe it is a [reading]). No other
+  entry has bytes there (OBS-029).
+- Conclusion: sparse and NTFS-compressed files are stored with their
+  attributes and their full expanded data; a sparse file's entry
+  carries a further 24-byte block whose last two values equal its
+  deallocated range ([reading]).
+  The meaning of the first 8 bytes of that block, and its form for
+  other ranges, are not shown.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-040: an EFS file is stored in a form that is not its plaintext
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: EFS files (M-15)
+- Sample: S13; S16
+- Command: R3 commands S13 and S16
+- Source tree: tree-meta `special\encrypted.txt` (22 bytes, encrypted
+  with `File.Encrypt`; attribute 0x4020)
+- Host, DISM, runner, run: R3 identity line
+- Location: lookup entry 3024, resource at file offset 202846
+  (0x3185E), 1844 bytes
+- Bytes (first 48 of the resource):
+
+  ```text
+  00 01 00 00 52 00 4f 00 42 00 53 00 00 00 00 00
+  00 00 00 00 1e 00 00 00 4e 00 54 00 46 00 53 00
+  00 00 00 00 00 00 00 00 00 00 00 00 02 00 00 00
+  ```
+
+- Observation: the entry has attribute 0x4020 and no stream entries;
+  its hash names a 1844-byte resource that does not contain the file's
+  plaintext and whose SHA-256 differs from the content in the manifest.
+  After DISM's apply (S16) on another runner the file exists with
+  attribute 0x4020 and length 22, and reading it fails with "Access to
+  the path … is denied".
+- Conclusion: DISM captured the EFS file in a form other than its
+  plaintext, which its own apply turned back into an encrypted file.
+- Product rule: refused under decision 0006 ([project rule, DEC-0006]):
+  the form is not described in Microsoft's documentation or by any
+  observation.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-041: paths over 260 UTF-16 units need nothing special
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: long paths (M-16)
+- Sample: S13; S16
+- Command: R3 commands S13 and S16
+- Source tree: tree-meta `longpath\` (six 50-character directories and
+  a 34-character file name: 349 units below the root)
+- Host, DISM, runner, run: R3 identity line
+- Location: `longpath` at metadata offset 1560; the seven entries below
+  it at metadata offsets 6208 to 7600 (the last list ends at 7800)
+- Bytes: as any entry (OBS-026); each name is one path component
+- Observation: each component is its own entry in its parent's list,
+  with a 100-byte name and a generated short name; no entry holds a
+  full path. The file's content SHA-256, attributes and times equal the
+  manifest, and after DISM's apply (S16) the file exists with the same
+  content (`treecmp.py`).
+- Conclusion: entries hold single components, so path length has no
+  effect on the metadata; a reader must build the full path itself and
+  handle its length.
+- Also seen in: S14, S15
+- Cited by: none yet
+
+### OBS-042: sibling order: no-children entries first, by folded name
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: sibling order (M-17)
+- Sample: S01, S13, S15
+- Command: R1 command S01; R3 commands S13 and S15
+- Source tree: tree-01; tree-meta `many\` (3000 files with mixed-case
+  word prefixes, created in another order) and its other lists
+- Host, DISM, runner, run: R3 identity line
+- Location: S13 list `many`, metadata offset 7808 onward: `alpha-0000`,
+  `alpha-0018`, `alpha-0021`, …
+- Bytes: names as in OBS-027
+- Observation: `dentry_r3.py` compares each list with candidate orders.
+  In all lists of S01 (12), S13 (21) and S15 (22), the order is: entries
+  with children offset 0 (files, symbolic links, junctions) first, then
+  entries with a children offset, each group sorted by the upper-cased
+  name. `many\` is in upper-cased order and not in ordinal order
+  (`Bravo`, `Delta`, `Foxtrot`, `Zulu` sort among the lower-case
+  words). `links\` lists `junction` and the directory links among the
+  files, and `sub` and `target-dir` after them.
+- Conclusion: in these files DISM wrote siblings in that order. The
+  folding rule was compared only with Python's upper-casing on these
+  names; a reader must not depend on the order.
+- Also seen in: S14
+- Cited by: none yet
+
+### OBS-043: XPRESS metadata decodes to the uncompressed capture's bytes
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: compressed metadata (M-17, M-18)
+- Sample: S14; S13
+- Command: R3 commands S14 and S13
+- Source tree: tree-meta (the same tree, captured twice)
+- Host, DISM, runner, run: R3 identity line
+- Location: lookup entry 0 of each file
+- Bytes:
+
+  ```text
+  S14 [0] raw: 71 63 02 00 00 00 00 06 b4 9e 03 00 00 00 00 00 28 95 07 00 00 00 00 00
+  S13 [0] raw: 28 95 07 00 00 00 00 02 89 20 06 00 00 00 00 00 28 95 07 00 00 00 00 00
+  ```
+
+- Observation: S14's metadata entry has flags 0x06 and stored size
+  156529 for original size 496936, which is 16 chunks; S13's has flags
+  0x02 and 496936 for 496936. Decoded through the chunk table (OBS-011)
+  with `xpr.py`, S14's metadata has SHA-1 `563ec27b6c9b587a…`, the same
+  as its lookup entry and as S13's metadata; no chunk had stored size
+  equal to its expanded size. Every entry line of `dentry_r3.py` is the
+  same for both.
+- Conclusion: XPRESS-compressed metadata of 16 chunks decodes to the
+  same bytes as the uncompressed capture of the same tree.
+- Also seen in: none
+- Cited by: none yet
+
+### OBS-044: volume-root capture keeps the root's own metadata
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: volume-root capture (M-19)
+- Sample: S15
+- Command: R3 command S15
+- Source tree: the VHD volume `R:\` holding tree-meta;
+  `volume-root.manifest.tsv`
+- Host, DISM, runner, run: R3 identity line
+- Location: S15 root, file offset 402977 (0x62621), 104 bytes
+- Bytes:
+
+  ```text
+  00062621: 6800 0000 0000 0000 1600 0000 0000 0000  h...............
+  00062631: 9005 0000 0000 0000 0000 0000 0000 0000  ................
+  00062641: 0000 0000 0000 0000 5353 0ecd 1267 dd01  ........SS...g..
+  00062651: 1d22 4dcd 1267 dd01 4313 4dcd 1267 dd01  ."M..g..C.M..g..
+  ```
+
+- Observation: the root entry has an empty name, attributes 0x16 and
+  security index 0, and its times equal the volume root's row in the
+  manifest. Descriptor 0 (208 bytes) is new to S15; descriptors 1 to 7
+  equal S13's 0 to 6. The top-level list holds only `tree-meta`;
+  `System Volume Information`, present on the volume, is not in the
+  image (3058 entries against 3059 manifest rows; the one missing is
+  that folder). The XML `DIRCOUNT` is 21 (S13: 20).
+- Conclusion: capturing a volume root stores the root directory's own
+  attributes, descriptor and times in the root entry and leaves out
+  `System Volume Information`. `$RECYCLE.BIN` did not exist on the
+  volume, so its handling is not shown.
+- Also seen in: none
+- Cited by: none yet
+
+### OBS-045: DISM's apply of S13 (S16) matches its source but for 10 values
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: the apply-fidelity oracle (M-20)
+- Sample: S16 (`S16.manifest.tsv`, dddc1363f72d755e; `S16.dirx.txt`,
+  `S16.reparse.txt`), against tree-meta's manifest
+- Command: R3 command S16
+- Source tree: tree-meta, through S13
+- Host, DISM, runner, run: R3 identity line (job `reference`)
+- Location: n/a (text artifacts); `treecmp.py` output
+- Bytes: n/a; the compared values are the manifest columns
+- Observation: 3057 paths in both; the applied volume also holds
+  `System Volume Information`. Equal for every path: type, the three
+  times, length, named streams, SDDL, hard-link names and reparse tag.
+  Short names in `dir /x` are equal in every directory, including the
+  explicit `EXPLICIT.TXT`. Differences: attributes of 6 paths (the
+  volume root kept its own 0x16 instead of 0x10; the five files without
+  the archive bit, 0x80, 0x02, 0x04, 0x01 and 0x2000, gained 0x20). The
+  volume root's state before the apply was not recorded; after it, the
+  root has the image root's times and SDDL but kept its own attributes;
+  link targets of the 3 in-tree absolute links (OBS-037); the EFS file
+  could not be read (OBS-040). Content SHA-256 is equal for every other
+  file.
+- Conclusion: S16 is a usable fidelity reference for every column
+  listed, except reparse-point SDDL (not recorded), absolute link targets
+  (OBS-037), EFS (OBS-040) and the root's attributes; an apply that
+  matches DISM sets the archive bit on files, and applies the image
+  root's times and SDDL, but not its attributes, to the volume root.
+- Also seen in: none
+- Cited by: none yet
+
+### OBS-046: a chunk that does not shrink is stored raw
+
+- Status: Recorded
+- Settles: OPEN-WIM-5, chunk level (M-21)
+- Sample: S17 (S17.wim, 1342001c1e684d48)
+- Command: R3 command S17
+- Source tree: tree-mixed (seed 701): `mixed-65536.bin` (32768 bytes of
+  text, then 32768 pseudorandom bytes) and `mixed-reverse-65536.bin`
+  (the halves swapped); SHA-1 in `trees.txt`
+- Host, DISM, runner, run: R3 identity line
+- Location: lookup entry 1, resource at 208 (0xD0), stored 38954;
+  lookup entry 2 at 39162 (0x98FA), stored 38954
+- Bytes:
+
+  ```text
+  000000d0: 2618 0000                                &...
+  000098fa: 0080 0000                                ....
+  000018fa: b708 2530 dfc2 c3cd f4d1 d709 98d9 41b8  ..%0..........A.
+  ```
+
+- Observation: both resources have flag 0x04 and original size 65536,
+  so a one-entry chunk table. Entry 1's table holds 6182: chunk 0 is
+  6182 bytes and decodes to 32768 bytes of text; chunk 1 is 38954 − 4 −
+  6182 = 32768 bytes. Entry 2's table holds 32768: chunk 0 is 32768
+  bytes, chunk 1 is 6182. Taking each 32768-byte chunk as plain bytes
+  and decoding the other gives each resource's lookup SHA-1
+  (`xpr.py`: `RAW?32768`, `sha1_match=True` for both). The two raw
+  chunks are byte-for-byte equal (SHA-1 `6814f417…`); they begin
+  `b708 2530 dfc2 c3cd`.
+- Conclusion: inside a compressed resource, DISM stores a chunk that
+  would not shrink as its 32768 plain bytes, recognisable by a stored
+  size equal to the expanded size, at any position, including
+  consecutive chunks.
+- Also seen in: S14 (S14.wim, 57ec13c10c79987f), lookup entry 3030
+  (the sparse file, 196608 bytes, 6 chunks): chunks 0, 1, 4 and 5 are
+  raw, 2 and 3 compressed (263 bytes each); `xpr.py` gives the lookup
+  SHA-1 (`sha1_match=True`)
+- Cited by: none yet
+
+### OBS-047: S08's 4.5 GiB pseudorandom file was stored uncompressed
+
+- Status: Recorded
+- Settles: nothing in OPEN-WIM-10 (M-22 stays open); confirms the
+  7-byte stored size above 2^32
+- Sample: S08 (S08.wim, a7e05acd463be3ad, not uploaded; dump in
+  `S08.wim.dump.txt`)
+- Command: R3 command S08
+- Source tree: tree-large (seed 301), `random-large.bin`, 4831838208
+  bytes
+- Host, DISM, runner, run: R3 identity line (job `generate-large`)
+- Location: lookup entries 0 and 1; the record rests on lines 49 and 50
+  of `S08.wim.dump.txt` (`wim-samples-large-observations`), because the
+  WIM itself is deleted on the runner
+- Bytes:
+
+  ```text
+  [1] raw: 00 00 00 20 01 00 00 00 d0 00 00 00 00 00 00 00 00 00 00 20 01 00 00 00
+  [0] raw: ae 01 00 00 00 00 00 06 d0 00 00 20 01 00 00 00 90 02 00 00 00 00 00 00
+  ```
+
+- Observation: the file's resource has flags 0x00, stored and original
+  size 4831838208 (0x120000000; the 7-byte stored size uses its fifth
+  byte), offset 208. The metadata (flags 0x06) lies at 4831838416, an
+  offset above 2^32. No resource over 4 GiB is compressed, so no chunk
+  table over 4 GiB exists in the file.
+- Conclusion: with `/Compress:fast`, a pseudorandom file over 4 GiB is
+  stored raw (as OBS-010 for smaller files); stored sizes and offsets
+  above 2^32 use the 7-byte and 8-byte fields as `wim.md` §3 reads
+  them. The 8-byte chunk-table width (OPEN-WIM-10) needs a compressible
+  sample over 4 GiB.
+- Also seen in: none
+- Cited by: none yet
+
+### OBS-048: what `DIRCOUNT`, `FILECOUNT` and `HARDLINKBYTES` count
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly: XML counts against entries (M-23)
+- Sample: S01, S13, S15
+- Command: R1 command S01; R3 commands S13 and S15
+- Source tree: tree-01; tree-meta; the volume root
+- Host, DISM, runner, run: R3 identity line
+- Location: XML of each file; entry counts from `dentry_r3.py`
+- Bytes: XML values (from `dentry.py`): S01 `DIRCOUNT` 11, `FILECOUNT`
+  21, `HARDLINKBYTES` 0; S13 20, 3036, 54; S15 21, 3036, 54
+- Observation: S01 has 33 entries: the root, 11 directories and 21
+  files. S13 has 3057: the root, 20 directories without the reparse bit,
+  3031 files and 5 reparse points (3 of them directories); 3031 + 5 =
+  3036. The three hard-link names count as three files. S15 adds the
+  `tree-meta` directory. Stream entries are not counted. In S13,
+  `HARDLINKBYTES` 54 equals twice the 27-byte size of the hard-linked
+  file.
+- Conclusion: in these files `DIRCOUNT` is the number of directories
+  other than the root and reparse points, and `FILECOUNT` the number of
+  all other entries, reparse points included. The `HARDLINKBYTES` rule
+  is **not determined**: one hard-link group was seen, and 54 fits more
+  than one rule.
+- Also seen in: S14 (same as S13)
+- Cited by: none yet

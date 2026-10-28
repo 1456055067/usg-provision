@@ -358,7 +358,19 @@ decide.
    contradict the earlier "no gap" note), and lookup order giving the
    image index when offset order differs; OPEN-WIM-6 is narrowed and
    samples S12C, S12D, S11C and S11D are still needed; these R2 notes
-   were audited 2026-10-27). Codecs are topic 20.
+   were audited 2026-10-27. After run R3 (2026-10-28), OBS-024 to
+   OBS-048 added [observed] notes, mainly a new §6.1 on the metadata
+   resource: the fixed part of a directory entry is 102 bytes, which
+   contradicts the [derived] 98; names, short names, stream entries,
+   alignment (with a sparse-file exception), attributes, times, hard
+   links, reparse data, descriptors, long paths, XML counts and DISM's
+   apply differences. A full-size chunk that does not shrink is stored
+   raw (OPEN-WIM-5 narrowed). OPEN-WIM-7 is partly settled (M-13 to
+   M-15 partly open); OPEN-WIM-10 stays open (M-22); EFS entries are
+   refused as a [project rule, DEC-0006]. Samples S13B to S13F and S08B are
+   needed. The R3 notes were audited 2026-10-28, approve with
+   comments; fixes CR-R3-001 to 003 and 005 applied).
+   Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.
 11. Windows PE: building from the Windows ADK, adding drivers, startup

@@ -23,9 +23,10 @@ Sources:
   OBS-017; workflow run 40535666995, commit ba23bed), **R2**
   (OBS-018 to OBS-023; workflow run 40599556702, commit 5d3c8c7),
   **R3** (OBS-024 to OBS-048; workflow run 40754869824, commit
-  27f7237) and **R4** (OBS-049 to OBS-058; workflow run 40766748266,
-  commit 4ba76cd). All four runs used DISM file version
-  10.0.26100.32860 on Windows build 26100.33650. The M3
+  27f7237), **R4** (OBS-049 to OBS-058; workflow run 40766748266,
+  commit 4ba76cd) and **R5** (OBS-059 and OBS-060; workflow run
+  40774638308, commit 0bf3044). All five runs used DISM file
+  version 10.0.26100.32860 on Windows build 26100.33650. The M3
   boot-protocol review of R4 (findings BOOT-R4-001 to 008) led to
   corrections of some R4 records, committed at d38b584; this file
   cites the corrected records, marked "(OBS-0nn, corrected)".
@@ -37,12 +38,14 @@ by Microsoft. Each has an OPEN item in §13 where it matters.
 
 Two further labels were added in M2 fix round 1 (drift):
 
-- **[observed]** marks what was seen in the R1 to R4 files, cited
+- **[observed]** marks what was seen in the R1 to R5 files, cited
   by record (OBS-nnn). It is evidence about those files only, not a
   statement by Microsoft, and says nothing about other DISM builds or
   other tools. The R2 notes were added after run R2 (2026-10-27). The
   R3 notes were added after run R3 and audited (2026-10-28). The R4
   notes (marked R4) were added after run R4 and audited (2026-10-28).
+  The R5 notes (marked R5) were added after run R5 and audited
+  (2026-10-28).
   An observation can confirm or contradict a [derived] or [reading]
   point, or the paper itself; each note below says which.
 - **[project rule]** marks a rule the product applies that neither
@@ -524,6 +527,29 @@ those files only.
   the root directory's own attributes, descriptor and times, and the
   volume's system-information folder was left out of the image
   (OBS-044). Handling of a recycle-bin folder was not shown.
+- **[observed, R5, AUDITED 2026-10-28] Apply of a volume-root
+  capture** (OBS-060): applied to a drive root and to a subdirectory,
+  the image reproduced content, named streams, times and non-root
+  descriptors as for a directory capture (as in OBS-045, OBS-053 and
+  OBS-054, including the archive bit gained by files without it; one
+  EFS file not comparable; EFS is refused, OBS-040). At the apply
+  root:
+  - DISM wrote the image root's three times to the apply root, in
+    both cases;
+  - on a subdirectory apply root DISM did not set the image root's
+    attributes (the directory has the plain directory value 0x10), and
+    gave it the image root's access entries with the DACL marked
+    protected, a protection the stored descriptor does not carry;
+  - on a drive root the attributes and descriptor read the same as
+    the source volume root's, which a fresh volume root already has,
+    so whether DISM wrote them is not shown.
+- **[observed, R5, AUDITED 2026-10-28]** The stored root descriptor
+  holds the same
+  access entries as .NET's form of the source volume root, in a
+  different order. Which order Windows itself returned is not shown
+  (OBS-060).
+- What the product does with a subdirectory apply root is
+  OPEN-WIM-14 (§13).
 
 **Names and short names** (OBS-027, OBS-028).
 
@@ -717,8 +743,19 @@ those files only.
 - **Answered in R4** (OPEN-WIM-7, M-13) by samples S13B and S13C,
   for the drive-letter and subdirectory forms above. What the
   product does is the [project rule, DEC-0022] in §13 (formerly
-  OPEN-WIM-12). A volume-root capture with rewritten entries was never
-  applied (OPEN-WIM-13).
+  OPEN-WIM-12). (R5, AUDITED 2026-10-28: the volume-root case,
+  OPEN-WIM-13, is answered in the next bullet.)
+- **[observed, R5, AUDITED 2026-10-28] Volume-root capture applied**
+  (OBS-059):
+  the volume-root capture with header flag 0x80 (S15) was applied to
+  the root of another drive letter and to a subdirectory two levels
+  down on a third letter. The three entries with zero at +92 were
+  re-based: the stored letter was replaced by the apply root and the
+  rest of the stored path (here the whole path below the volume root)
+  was kept, with offsets and lengths rewritten and the same layout.
+  The two relative links were copied byte for byte. All 10 applied
+  buffers (5 entries, 2 applies) are what the [project rule,
+  DEC-0022] in §13 predicts. This holds for this DISM build only.
 - **See also (SR-6, AUDITED 2026-10-28)**: Microsoft's published
   layouts of the
   reparse buffers (tags, substitute and print names, the relative
@@ -1062,7 +1099,14 @@ own limits before using it.
     - Product questions raised by R4, not format questions: whether
       the product warns that file links lose their own DACL at capture
       (open); how the product treats the volume-root capture form
-      (OPEN-WIM-13).
+      (OPEN-WIM-13; R5, AUDITED 2026-10-28: closed for the project,
+      OBS-059, see below).
+  - **After R5 (AUDITED 2026-10-28; OBS-059, OBS-060):** M-13 for a
+    volume-root
+    capture, re-based as for a directory capture; M-10, M-14, M-19
+    and M-20 for applying a volume-root capture: content, streams,
+    times and non-root descriptors as stored. At the apply root, see
+    §6.1 "Root entry" and OPEN-WIM-14.
 - **OPEN-WIM-8**: the content of `NAME`, `DESCRIPTION`, `FLAGS` and
   `WINDOWS` in the XML data, in particular where edition, architecture,
   version and languages are recorded (§7).
@@ -1141,11 +1185,15 @@ Inputs, for one reparse-point entry:
      or a name would exceed 32760 characters.
 3. **Refuse** with a named reason in every other case.
 
-How well R4 supports the rule:
+How well R4 and R5 support the rule:
 
 - The records show 8 re-based cases (four entries, each applied to
   another drive letter and to a subdirectory) whose applied data DISM
   wrote byte for byte as the rule gives (OBS-050 to OBS-052).
+- (R5, AUDITED 2026-10-28) For a volume-root capture, all 10 applied
+  buffers (3
+  re-based and 2 copied entries, each applied to a drive root and to
+  a subdirectory) match the rule byte for byte (OBS-059).
 - The M3 boot-protocol review of R4 (not a record) reports that,
   across 34 reparse entries, M = 0 coincided exactly with "symbolic
   link with `Flags` 0 or mount point, target inside the captured
@@ -1166,20 +1214,32 @@ Never seen, and therefore refused under the rule:
 DEC-0022 also names an owner lab run (MT-2), on a real Windows 11
 image, that is to confirm junctions resolve after first boot.
 
-- **OPEN-WIM-13** (R4; wording AUDITED 2026-10-28; still OPEN): what
-  applying a **volume-root
-  capture** with header flag 0x80 should produce. In such a capture
-  (S15) entries with M = 0 were stored with nothing stripped (§6.1),
-  and no such image was ever applied, so the re-base rule's result for
-  it is untested. Needs a sample: apply S15 to another letter and to a
-  subdirectory.
+- **OPEN-WIM-13** (R4): what applying a **volume-root capture** with
+  header flag 0x80 should produce. In such a capture (S15) entries
+  with M = 0 were stored with nothing stripped (§6.1).
+  - **Closed for the project (R5, AUDITED 2026-10-28)**: DISM's
+    behaviour (OBS-059, Dism 10.0.26100.32860) matches the [project
+    rule, DEC-0022], so the rule applies unchanged to volume-root
+    captures; other DISM builds not covered. All 10 buffers matched
+    byte for byte, applied to a drive root and to a subdirectory.
+- **OPEN-WIM-14** (R5, AUDITED 2026-10-28; product behaviour, not a
+  format question): when the apply root is a **subdirectory**, what
+  does the product do with that directory's attributes and DACL
+  protection? DISM (OBS-060) did not set the image root's attributes
+  on it and marked its DACL protected although the stored descriptor
+  is not. No public source on the product describes this, so it is
+  OPEN. [project rule, REQ-PE-017] In M3 the apply root is the Windows
+  partition's root, so OPEN-WIM-14 does not arise. The DEC-0022 rule
+  defines normalisation for a directory root as well; the directory
+  case is outside M3 scope, not forbidden.
 
-**Status after R1 to R4** (R1 in M2 fix round 1, drift; R2 added
+**Status after R1 to R5** (R1 in M2 fix round 1, drift; R2 added
 2026-10-27; R3 added and audited 2026-10-28; R4 added and audited
-2026-10-28). An observation settles a point for the files of its run only;
-other DISM builds are not covered.
+2026-10-28; R5 added and audited 2026-10-28). An observation settles a
+point for the files of its run only; other DISM builds are not
+covered.
 
-| Item | Status after R1 to R4 | Records |
+| Item | Status after R1 to R5 | Records |
 |------|-----------------------|---------|
 | OPEN-WIM-1 | Settled for R1: little-endian | OBS-002 |
 | OPEN-WIM-2 | Partly: values written are known; which to accept is open | OBS-003 |
@@ -1187,13 +1247,14 @@ other DISM builds are not covered.
 | OPEN-WIM-4 | Partly: `.esd` flags recorded; its compression is undocumented | OBS-006 |
 | OPEN-WIM-5 | Answered for forms seen (R4) | OBS-010, 046, 057 |
 | OPEN-WIM-6 | Packing settled; metadata first; lookup order gives the index in every file seen, including when offset order differs (R2); other cases open (see above) | OBS-008, OBS-009, OBS-018, OBS-021, OBS-023 |
-| OPEN-WIM-7 | Partly (R3, R4): see above | OBS-024 to 045, 048 to 056 |
+| OPEN-WIM-7 | Partly (R3 to R5): see above | OBS-024 to 045, 048 to 060 |
 | OPEN-WIM-8 | Partly: encoding and element set for non-Windows content; edition, architecture, version not observable (decision 0013) | OBS-014 |
 | OPEN-WIM-9 | Partly: shared GUID, part and total | OBS-016 |
 | OPEN-WIM-10 | Answered for form seen; threshold open | OBS-011, 047, 058 |
 | OPEN-WIM-11 | Partly: unit is 10 MiB; range confirmed; multi-entry open | OBS-015 |
 | OPEN-WIM-12 | Settled: [project rule, DEC-0022] | OBS-049 to 052 |
-| OPEN-WIM-13 | Open (volume-root capture never applied) | none |
+| OPEN-WIM-13 | Closed for the project (R5; DEC-0022 rule) | OBS-059 |
+| OPEN-WIM-14 | Open: product question; not in M3 (R5) | OBS-060 |
 
 **Never observed in R1 to R4** (the 8-byte chunk-table entry and the
 short raw final chunk, listed here after R3, were seen in R4: OBS-058,
@@ -1203,8 +1264,8 @@ differs from its index order (file-offset order does differ in
 OBS-021); a commit of any index other than 1; more than two images
 sharing one metadata copy; a security index of −1; a non-zero value at
 directory entry offsets +24, +32 or +84; a compressed resource of
-exactly 2^32 bytes; an LZX resource over 4 GiB; an apply of a
-volume-root capture.
+exactly 2^32 bytes; an LZX resource over 4 GiB. (An apply of a
+volume-root capture, listed here after R4, was seen in R5: OBS-059.)
 
 **Samples recorded in R2** (asked for by the M2 boot-protocol review
 as S11 and S12):
@@ -1246,7 +1307,7 @@ to M-23):
   re-serialisation only, so its byte-equality part is still needed.
 
 **Samples still needed** (from the M2 boot-protocol review and runs R2
-to R4):
+to R5):
 
 - a tree with long runs (for example 32 KiB of zero bytes and a
   repeated 300-byte pattern), to exercise long matches and many-chunk
@@ -1271,14 +1332,15 @@ to R4):
   Windows itself returns for the tree, not a .NET re-serialisation,
   and any entry with security index −1 if DISM can be made to write
   one (M-14, OPEN-WIM-7);
-- an apply of the volume-root capture S15 to another drive letter and
-  to a subdirectory (OPEN-WIM-13);
 - a compressible resource of exactly 2^32 bytes, and an LZX resource
   over 4 GiB (OPEN-WIM-10);
 - stream names that differ only in case (M-09 case folding).
 - Recorded in R4 and no longer needed: S08B, S13B, S13C, S13E (as
   part of S13B), S13F (as part of S13B) and the short final chunk
-  (S17B).
+  (S17B). Recorded in R5 (AUDITED 2026-10-28): the apply of the
+  volume-root capture
+  S15 to another drive letter and to a subdirectory (S16E, S16F;
+  OBS-059, OBS-060).
 
 Any [reading] or OPEN point can be settled by testing against files made
 with Microsoft's DISM. That is interoperability testing with Microsoft's

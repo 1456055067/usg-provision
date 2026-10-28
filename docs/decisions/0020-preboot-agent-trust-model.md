@@ -18,7 +18,9 @@ a secret.
 1. The operator adds the project's agent binary and a public configuration
    file to their own Windows PE. The configuration holds the server
    address and the server trust anchor. The product never modifies the
-   PE.
+   PE. Clarified 2026-10-28: the configuration also carries the public
+   keys that verify the signed job plan and the content manifest. Nothing
+   in it is secret.
 2. The device carries no secret. The agent authenticates the server
    through TLS with the configured trust anchor.
 3. The server accepts a device session as "a provisioning environment it

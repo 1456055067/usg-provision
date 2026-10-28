@@ -384,7 +384,16 @@ decide.
    DEC-0022] re-base rule; new OPEN-WIM-13 (volume-root capture never
    applied). The R4 notes were audited 2026-10-28, approve with
    comments; fixes CR-R4-001 to 009 applied against the corrected
-   records at d38b584).
+   records at d38b584. After run R5 (2026-10-28), OPEN-WIM-13 is
+   closed for the project: DISM re-bases a volume-root capture exactly
+   as the DEC-0022 rule predicts (OBS-059), so the rule applies
+   unchanged. OBS-060 adds what DISM does at the apply root (image
+   root's times written; on a subdirectory, attributes not set and the
+   DACL marked protected). New OPEN-WIM-14 asks what the product does
+   with a subdirectory apply root; [project rule, REQ-PE-017] in M3
+   the apply root is the Windows partition's root, so it does not
+   arise. The R5 notes were audited 2026-10-28, approve with comments;
+   fixes CR-R5S-001 to 005 applied).
    Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.

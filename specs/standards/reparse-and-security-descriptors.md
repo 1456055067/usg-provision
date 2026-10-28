@@ -246,8 +246,11 @@ These rules are the same for both buffer types.
     apply root;
   - everything else is refused with a named reason.
 
-  Copied and re-based data must meet this file's §3 to §5 bounds. The
-  volume-root capture case was never applied (OPEN-WIM-13).
+  Copied and re-based data must meet this file's §3 to §5 bounds.
+  (R5, AUDITED 2026-10-28) The volume-root capture case (OPEN-WIM-13)
+  is now
+  answered for this DISM build: DISM re-based it exactly as the rule
+  predicts [WIM, OBS-059].
 
 ## 6. Setting a reparse point (FSCTL_SET_REPARSE_POINT, background)
 
@@ -458,7 +461,8 @@ the parts may overlap (OPEN-RPSD-4).
   or share bytes? [MS-DTYP] is silent.
 - Related, not settled here: OPEN-WIM-7 (M-13, M-14) and OPEN-WIM-12
   in `wim.md` §13. (R4) OPEN-WIM-12 is now settled for the
-  project by DEC-0022; OPEN-WIM-13 (volume-root capture) is open.
+  project by DEC-0022; OPEN-WIM-13 (volume-root capture) is closed
+  for the project (R5, AUDITED 2026-10-28; OBS-059).
 
 ## 12. Not summarised
 

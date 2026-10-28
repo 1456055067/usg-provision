@@ -11,11 +11,11 @@ the standards summaries
 [specs/standards/wim-compression.md](../../specs/standards/wim-compression.md),
 whose OPEN items it settles one record at a time.
 
-**Status: records from four runs (R1 and R2, 2026-10-27; R3 and R4,
-2026-10-28).** Records OBS-001 to OBS-017 come from run R1, OBS-018 to
-OBS-023 from run R2, OBS-024 to OBS-048 from run R3 and OBS-049 to
-OBS-058 from run R4 of the `wim-samples` workflow (see
-[Runs examined](#runs-examined)).
+**Status: records from five runs (R1 and R2, 2026-10-27; R3, R4 and
+R5, 2026-10-28).** Records OBS-001 to OBS-017 come from run R1, OBS-018
+to OBS-023 from run R2, OBS-024 to OBS-048 from run R3, OBS-049 to
+OBS-058 from run R4 and OBS-059 to OBS-060 from run R5 of the
+`wim-samples` workflow (see [Runs examined](#runs-examined)).
 They describe the files of those runs only; rule 6 below applies to
 every conclusion. OPEN items not
 listed as confirmed stay open, and parser constants that rest on them
@@ -51,6 +51,7 @@ stay marked `// FORMAT: derived, unconfirmed`.
 | OPEN-WIM-10 (R3) | still open: S08's 4.5 GiB pseudorandom file was stored uncompressed, so it has no chunk table; its 7-byte stored size above 2^32 is recorded | OBS-047 |
 | OPEN-WIM-10 (R4) | partly: S08B (compressible, original size 4831838208) has 8-byte chunk-table entries, though every entry value is below 2^32; the exact threshold (2^32, over or at) is still open | OBS-058 |
 | OPEN-WIM-5 short final chunk (R4) | confirmed for S17B: a final chunk shorter than 32768 that does not shrink is stored as its plain bytes | OBS-057 |
+| OPEN-WIM-13 volume-root capture applied (R5) | answers OPEN-WIM-13's sample question (what DISM's apply produces): for S15, DISM's apply re-bases its in-tree absolute targets onto the apply root exactly as in OBS-050, keeping the path below the capture root (`\tree-meta\…`); relative targets copied. The product behaviour is the [project rule, DEC-0022] in `wim.md` §13, which these results match | OBS-059, OBS-060 |
 | RP_FIX on capture and apply (R4) | in-tree absolute targets are stored without the capture directory and **re-based onto the apply root** by DISM's apply; out-of-tree, relative and `/NoRpFix` targets are copied byte for byte; the entry bytes at +92 are zero exactly on in-tree absolute targets with RP_FIX on | OBS-049 to OBS-052 |
 
 **Still needed:**
@@ -201,6 +202,7 @@ required; "n/a" is allowed only where stated.
 | R2 | 40599556702 | 1 | 5d3c8c701506ff780ff8a86c5e692f725634a6bd (job `generate`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-27T23:05:02Z |
 | R3 | 40754869824 | 1 | 27f7237d99c67a9cc575268398dd4193ae1fbccf (branch `m3/prebuild`; jobs `generate`, `generate-large`, `generate-metadata`, `reference`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-28T19:30:25Z to 19:31:14Z |
 | R4 | 40766748266 | 1 | 4ba76cd6fb9c65b3782e47e6a176e8e248c01a61 (branch `m3/samples-r4`; jobs `generate`, `generate-large`, `generate-metadata`, `reference`) | `win25-vs2026` 20261021.278.1 (windows-2025) | as R3 | as R3 | 2026-10-28T20:50Z to 20:54Z |
+| R5 | 40774638308 | 1 | 0bf3044af1333017252c237c485286c6a85c3865 (`main`; artifacts of jobs `generate-metadata` and `reference` examined) | `win25-vs2026` 20261021.278.1 (windows-2025) | as R3 | as R3 | 2026-10-28T21:46Z to 21:48Z |
 
 R1 identity, from `host.txt`: PowerShell 7.6.7, `RUNNER_ARCH` X64.
 The DISM file version and the version in DISM's own banner differ;
@@ -555,6 +557,58 @@ The reparse decode rests on our AUDITED summary
 `specs/standards/reparse-and-security-descriptors.md` (Microsoft's
 [MS-FSCC] buffers); the descriptor decode on its §9 ([MS-DTYP]).
 
+R5 checks done before any record was written (macOS, local copies of
+the `wim-samples-metadata` and `wim-samples-reference` artifacts of run
+40774638308, downloaded by the orchestrator):
+
+- `shasum -a 256 -c SHA256SUMS`: metadata 7 files, reference 6 files,
+  all `OK`.
+- `manifest.tsv`: every row `produced` (S13 to S17B; S16 to S16F).
+- `commands.log`: every command `EXIT 0` in both jobs; no `NOTE` line.
+- `host.txt` of both jobs: commit 0bf3044, run 40774638308, the same
+  runner image, OS build and DISM version as R3 and R4.
+- The `reference` job checked S15's SHA-256 before both applies
+  (`S16E source S15.wim sha256 d529e30f...`, the same for S16F) and
+  created `X:\deep\apply-here` empty before S16F.
+- R5's S15 walks as R3's and R4's (`dentry_r3.py`: 3058 entries, 8
+  descriptors, one misfit, 22 lists in split order; attributes and
+  times equal `volume-root.manifest.tsv` for 3058 of 3058).
+
+R5 files used by OBS-059 and OBS-060 (`SHA256SUMS`, checked, for the
+first three; `shasum -a 256` on the local copy for the rest):
+
+| Artifact | File | Bytes | SHA-256 |
+|----------|------|-------|---------|
+| metadata | S15.wim | 1051537 | d529e30f125a6d3ff764f53e7dfaf1583b487a742433256468f5826fc2404b17 |
+| reference | S16E.manifest.tsv | 1729812 | ed0c5f314337f6971ca6c882a99ee589dccd5c68a81cdde38cf1baa8048db50b |
+| reference | S16F.manifest.tsv | 1729705 | 0b3903cbc54f013ea0a80d7ab0d5f904856db7587f8157d808a5aedcd9eaef28 |
+| metadata | volume-root.manifest.tsv | 1538431 | 0f19a72e9e1ed822a9daad16bd1daf4dddfe0fddcb3fc006aa10b813022accf2 |
+| metadata | volume-root.reparse.txt | 4009 | 01325e6356d505a1fd216407ff853e293fadad0bd6e5d02a013bd79f6470540c |
+| reference | S16E.reparse.txt | 3982 | e7d70ede6c8d109adee47ae6fe6f386549caffe56b20eaa23c0acfc3f9cfbe8a |
+| reference | S16F.reparse.txt | 4915 | 5d00e32ffce8c7bfacd5300a415e7aed2329085048793e2bd090e561b8b793f5 |
+
+R5 commands (from `commands.log`):
+
+```text
+S15  dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S15.wim /CaptureDir:R:\ /Name:USGP-S15-01 /Description:usgp-sample-S15-index-01-volume-root /Compress:none
+S16E dism.exe /English /Apply-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S15.wim /Index:1 /ApplyDir:W:\
+S16F dism.exe /English /Apply-Image /ImageFile:D:\a\_temp\wim-samples-metadata\S15.wim /Index:1 /ApplyDir:X:\deep\apply-here
+```
+
+How the R5 bytes were examined: the R3 and R4 scripts unchanged
+(`dentry_r3.py`, `reparse_r4.py`, `reparsecmp.py`, `treecmp.py`,
+`sdcmp_r4.py`; hashes above); no new script:
+
+```text
+python3 -I dentry_r3.py --resource-hex --manifest volume-root.manifest.tsv S15.wim
+python3 -I reparse_r4.py S15.dentry source=volume-root.reparse.txt S15=S15.dentry \
+    S16E=S16E.reparse.txt S16F=S16F.reparse.txt
+python3 -I reparsecmp.py S15.dentry volume-root.reparse.txt S16E.reparse.txt   (also S16F)
+python3 -I dentry_r3.py --manifest S16E.manifest.tsv S15.wim                   (also S16F)
+python3 -I sdcmp_r4.py S15.wim S15.dentry S16E.manifest.tsv                    (also S16F)
+python3 -I treecmp.py volume-root.manifest.tsv S16E.manifest.tsv               (also S16F)
+```
+
 ## Open items and samples
 
 Status `pending` means no record exists yet. Questions listed here are
@@ -601,8 +655,8 @@ refused by the product.
 | M-10 | Captured attribute values | S13 | answered: OBS-033; DISM's apply differs for the archive attribute (OBS-045) |
 | M-11 | Which time field is which | S13 | answered: OBS-034 |
 | M-12 | Hard-link group identifier | S13 | answered: OBS-035 |
-| M-13 | Reparse entries: tag, reserved, data location, `RP_FIX` | S13, S16, S13B, S13C, S16B to S16D | answered for the R4 cases: OBS-036, OBS-037; OBS-049 (what is stored: both names rewritten to `\??\<capture letter>:\<path below the capture root>` and `<letter>:\…`, offsets and lengths rewritten); OBS-050 (**DISM's apply re-bases** them onto the apply root, letter or subdirectory); OBS-051 (out-of-tree absolute, relative and `/NoRpFix` targets are copied byte for byte); OBS-052 (entry bytes +92, the second half of the union whose placement is [derived], OBS-026: `0000 0000` exactly on in-tree absolute targets with RP_FIX on, including S15's volume-root capture where nothing was stripped; `0000 0100` on all others; meaning a [reading]). Not covered: DISM builds other than R1 to R4's |
-| M-14 | Descriptors: self-relative as Windows returns them; stored once; index −1 | S13, S16, S13B, S16B to S16D | partly: OBS-038; OBS-053 (reparse points: file links without their own explicit DACL lose it **at capture**: they point at the ordinary files' descriptor, and DISM's apply writes that stored descriptor faithfully); OBS-054 (stored descriptors are self-relative per `reparse-and-security-descriptors.md` §9, and equal .NET's re-serialisation except the PS Control bit). Open: equality with the raw bytes Windows returns (only .NET's form was captured); index −1 (never seen; no documented input produces it) |
+| M-13 | Reparse entries: tag, reserved, data location, `RP_FIX` | S13, S16, S13B, S13C, S16B to S16D | answered for the R4 cases: OBS-036, OBS-037; OBS-049 (what is stored: both names rewritten to `\??\<capture letter>:\<path below the capture root>` and `<letter>:\…`, offsets and lengths rewritten); OBS-050 (**DISM's apply re-bases** them onto the apply root, letter or subdirectory); OBS-051 (out-of-tree absolute, relative and `/NoRpFix` targets are copied byte for byte); OBS-052 (entry bytes +92, the second half of the union whose placement is [derived], OBS-026: `0000 0000` exactly on in-tree absolute targets with RP_FIX on, including S15's volume-root capture where nothing was stripped; `0000 0100` on all others; meaning a [reading]); OBS-059 (R5, OPEN-WIM-13: S15's volume-root capture, applied to `W:\` and to `X:\deep\apply-here`, is re-based by the same rule: the stored letter is replaced by the apply root and the path below the capture root kept). Not covered: DISM builds other than R1 to R5's |
+| M-14 | Descriptors: self-relative as Windows returns them; stored once; index −1 | S13, S16, S13B, S16B to S16D | partly: OBS-038; OBS-053 (reparse points: file links not set with `icacls /L` lose their own DACL **at capture**, although the source shows them with an explicit protected DACL: they point at the ordinary files' descriptor, and DISM's apply writes that stored descriptor faithfully; S15's file links likewise, OBS-060); OBS-054 (stored descriptors are self-relative per `reparse-and-security-descriptors.md` §9, and equal .NET's re-serialisation except the PS Control bit). Open: equality with the raw bytes Windows returns (only .NET's form was captured); index −1 (never seen; no documented input produces it) |
 | M-15 | Sparse, NTFS-compressed, EFS files | S13, S16, S13B | partly: OBS-039; OBS-055 (the sparse block: `03000000`, 16 × the number of ranges, then one start/end pair per deallocated range in descending order; no block without a hole); OBS-040 (EFS refused). Open: the meaning of the constant 3; whether DISM's apply re-creates the holes (not measured) |
 | M-16 | Paths over 260 UTF-16 units | S13, S16 | answered: OBS-041 |
 | M-17 | 3000 entries in one directory: sibling order; metadata over many chunks | S13, S14, S15 | answered: OBS-042 (order), OBS-043 (16 chunks) |
@@ -632,7 +686,8 @@ Records are in ID order. OBS-001 to OBS-017 are from run R1, OBS-018
 to OBS-023 from run R2, OBS-024 to OBS-048 from run R3 (identity
 line: as R2, but run 40754869824, attempt 1, commit 27f7237), OBS-049
 to OBS-058 from run R4 (identity line: as R2, but run 40766748266,
-attempt 1, commit 4ba76cd). The R2
+attempt 1, commit 4ba76cd), OBS-059 to OBS-060 from run R5 (identity
+line: as R2, but run 40774638308, attempt 1, commit 0bf3044). The R2
 identity line reads: Windows NT
 10.0.26100.0, build 26100.33650; `Dism.exe` 10.0.26100.32860 (banner
 10.0.26100.5074); runner image `win25-vs2026` 20261021.278.1; run
@@ -2952,5 +3007,126 @@ Multi-byte values are read little-endian (OBS-002).
   would fit 4 bytes; the width follows the original size, as the paper
   says. Whether the
   change happens at exactly 2^32 or above it is still open.
+- Also seen in: none
+- Cited by: none yet
+
+### OBS-059: a volume-root capture is re-based onto the apply root too
+
+- Status: Recorded
+- Settles: OPEN-WIM-13 for these files (what applying a volume-root
+  capture with header flag 0x80 produces); OPEN-WIM-7, partly (M-13)
+- Sample: S15 (S15.wim, R5, d529e30f125a6d3f; header `@16 dwFlags
+  0x00000080`); S16E (`S16E.reparse.txt`, apply to `W:\`); S16F
+  (`S16F.reparse.txt`, apply to `X:\deep\apply-here`)
+- Command: R5 commands S15, S16E and S16F
+- Source tree: the VHD volume root `R:\`, holding tree-meta
+  (`tree-meta\links\`); `volume-root.reparse.txt` (fsutil on the source)
+- Host, DISM, runner, run: R5 identity line
+- Location: the 5 reparse-point entries of S15 and their stored
+  resources; the "Reparse Data" of the same paths in the two apply
+  dumps
+- Bytes: entry bytes +88 to +96: `junction` `030000a0 00000000`,
+  `sym-dir-abs` and `sym-file-abs.txt` `0c0000a0 00000000`, the two
+  relative links `0c0000a0 00000100` (OBS-052)
+- Observation (`reparse_r4.py`; offsets from the start of PathBuffer,
+  lengths in bytes; every path is under `tree-meta\links\`):
+
+  | Entry | Stored in S15 | Applied to `W:\` (S16E) | Applied to `X:\deep\apply-here` (S16F) |
+  |-------|---------------|-------------------------|----------------------------------------|
+  | `junction` (mount point) | 136; substitute @0+66 `\??\R:\tree-meta\links\target-dir`; print @68+58 `R:\tree-meta\links\target-dir` (equal to the source) | 136; @0+66 `\??\W:\tree-meta\links\target-dir`; @68+58 `W:\tree-meta\links\target-dir` | 200; @0+98 `\??\X:\deep\apply-here\tree-meta\links\target-dir`; @100+90 `X:\deep\apply-here\tree-meta\links\target-dir` |
+  | `sym-dir-abs` (Flags 0) | 140; @0+66 `\??\R:\tree-meta\links\target-dir`; @68+58 `R:\tree-meta\links\target-dir` (source 136, print name first) | 140; @0+66 and @68+58, `W:` in place of `R:` | 204; @0+98 and @100+90, `X:\deep\apply-here\tree-meta\links\target-dir` |
+  | `sym-file-abs.txt` (Flags 0) | 160; @0+76 `\??\R:\tree-meta\links\target-file.txt`; @78+68 `R:\tree-meta\links\target-file.txt` (source 156) | 160; @0+76 and @78+68, `W:` in place of `R:` | 224; @0+108 and @110+100, `X:\deep\apply-here\tree-meta\links\target-file.txt` |
+  | `sym-dir-rel` (Flags 1) | 52; @20+20 `target-dir`; @0+20 `target-dir` | 52, equal | 52, equal |
+  | `sym-file-rel.txt` (Flags 1) | 72; @30+30 `target-file.txt`; @0+30 `target-file.txt` | 72, equal | 72, equal |
+
+  `reparsecmp.py`: the two relative links are stored equal to the
+  source and applied equal to the stored bytes in both applies; the
+  three absolute targets are applied different from the stored bytes in
+  both. Every applied name keeps the layout substitute at 0, a 2-byte
+  null, the print name, a 2-byte null, and each names the applied copy
+  of its target (`tree-meta\links\…` under the apply root).
+- Conclusion: in these files, applying a volume-root capture with
+  RP_FIX on **re-bases** each entry with zero at +92 exactly as for a
+  directory capture (OBS-050): the stored drive letter `R:` is replaced
+  by the apply root (`W:`, or `X:\deep\apply-here`), and the rest of
+  the stored path, here the whole path below the volume root
+  (`\tree-meta\links\…`), is kept; offsets and lengths are rewritten.
+  The relative links are copied byte for byte. So the rule "substitute
+  `\??\D:R` becomes `\??\` + apply root + `R`, print name `D:R` becomes
+  apply root + `R`" predicts all six applied absolute buffers. This
+  answers OPEN-WIM-13's sample question (what DISM's apply produces)
+  for R5's DISM build; other builds are not covered. The product
+  behaviour is the [project rule, DEC-0022] in `wim.md` §13, which
+  these results match.
+- Also seen in: none
+- Cited by: none yet
+
+### OBS-060: S15's apply: content, times and descriptors as stored; root differs
+
+- Status: Recorded
+- Settles: OPEN-WIM-7, partly (M-10, M-14, M-19 and M-20 for a
+  volume-root capture)
+- Sample: S15; S16E (`S16E.manifest.tsv`, ed0c5f314337f697); S16F
+  (`S16F.manifest.tsv`, 0b3903cbc54f013e)
+- Command: R5 commands S15, S16E and S16F
+- Source tree: the volume root `R:\`; `volume-root.manifest.tsv`
+  (written without reading content)
+- Host, DISM, runner, run: R5 identity line (job `reference` for the
+  applies)
+- Location: S15's entries (`dentry_r3.py`) against each applied
+  manifest; S15's descriptor 0 (208 bytes, the root's)
+- Bytes: root Control: stored SD[0] `0x8004`; .NET's form of the source
+  volume root and of `W:\` after S16E `0x8004`; of
+  `X:\deep\apply-here` after S16F `0x9004`
+- Observation:
+  - **Content, streams and times.** Against both applied manifests,
+    the S15 entries' content SHA-256 is equal for all 3030 files whose
+    applied content could be read (`dentry_r3.py`: equal 3030, differ
+    0); the 3031st, `tree-meta\special\encrypted.txt` (EFS), reads as
+    an access error in both applied manifests and could not be compared.
+    Named streams are equal for 3058 of 3058, and the three times for
+    3058 of 3058, the root included.
+  - **Attributes.** The five files without the archive bit gained 0x20
+    in both applies, as in OBS-045. The root: `W:\` has 0x16, which is
+    both the image root's value and the source volume root's; the apply
+    directory `X:\deep\apply-here` has 0x10, not the image root's 0x16.
+  - **Descriptors, non-root.** The stored descriptors against .NET's
+    form of the applied entries (`sdcmp_r4.py`): 3046 rows differ only
+    in the PS Control bit, 5 are equal, and `tree-meta\acl\inherit-dir`
+    differs in length (stored 144, .NET 120), as in OBS-054. SDDL equals
+    the source on every non-root row with one. The two file links' own
+    DACL differs from the source, as in OBS-053 (lost at capture): in
+    S15 they use SD[7], whose ACEs are all inherited, and they are
+    applied as stored.
+  - **Descriptor, root.** S15's SD[0] holds the same seven ACEs (as a
+    set) as .NET's
+    form of the source volume root (compared ACE by ACE, using
+    `AceSize` per `reparse-and-security-descriptors.md` §8), but in a
+    different order: the stored DACL starts with an inheritable
+    full-control ACE for S-1-5-32-544, .NET's with an allow ACE for
+    S-1-1-0; 92 bytes differ. After S16E, `W:\` reads the
+    same SDDL and binary form as the source volume root
+    (`O:SYG:SYD:(A;;0x1200a9;;;WD)…`). After S16F,
+    `X:\deep\apply-here` reads the same owner, group and the same ACEs
+    as the image root (as a set) with the DACL protected (`D:P(…)`,
+    Control 0x9004). Stored SD[0] has no PD (Control 0x8004), so the
+    protection comes from DISM's apply, not from the image.
+  - **Root times.** The image root's times read 2026-10-28T21:46:16Z
+    (S15's root entry); volume `W:` was formatted at 21:47:30Z to
+    21:47:33Z (`commands.log` of job `reference`, S16E-vhd-create);
+    after S16E, `W:\` reads 21:46:16Z. So DISM wrote the image root's
+    times to the volume root.
+- Conclusion: applying a volume-root capture reproduced content,
+  streams, times and the non-root descriptors as for a directory
+  capture. At the root: DISM wrote the image root's times to the apply
+  root in both cases (shown for `W:\` by the format time); it did not
+  apply the root's attributes to a subdirectory; it gave a subdirectory
+  apply root the image root's ACEs (as a set) with the DACL protected,
+  a protection the stored descriptor does not carry. Whether it wrote
+  attributes or a descriptor to `W:\` is not shown, because a fresh
+  volume root already reads the same as the source volume root did.
+  The ACE order difference at SD[0] is between the stored bytes and
+  .NET's re-serialisation; which order Windows itself
+  returned is not shown.
 - Also seen in: none
 - Cited by: none yet

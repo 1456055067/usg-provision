@@ -25,6 +25,10 @@
 #
 # Run R3 (plan M3 WU-W3): a manual run with -f large=true, so S08 (large)
 # and S10 (long runs) are produced with S13 to S17 in one run.
+# Run R4 (WU-W3 round 2, the R3 follow-up requests): the same dispatch;
+# generate-metadata adds S13B, S13C and S17B, reference adds S16B to S16D
+# (applies to another drive letter, to a subdirectory, and of the
+# /NoRpFix capture), generate-large adds S08B (compressible, over 4 GiB).
 #
 # Samples are generated here and never downloaded from anywhere else
 # (decision 0006 item 3). The licence question for DISM-made test files is
@@ -47,7 +51,7 @@ on:
   workflow_dispatch:
     inputs:
       large:
-        description: Also build S08 (4.5 GiB source; observations only)
+        description: Also build S08 and S08B (4.5 GiB sources; observations only)
         type: boolean
         default: true
   push:
@@ -153,7 +157,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build S08 (4.5 GiB pseudorandom file, /Compress:fast) and dump it
+      - name: Build S08 and S08B (4.5 GiB pseudorandom and text files, /Compress:fast) and dump them
         id: build
         run: |
           ./scripts/wim-samples/Build-Samples.ps1 `
@@ -217,7 +221,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build samples S13-S15 and S17 (VHD volume, DISM, every command logged)
+      - name: Build samples S13-S15, S13B, S13C, S17 and S17B (VHD volumes, DISM, every command logged)
         id: build
         run: |
           ./scripts/wim-samples/Build-Samples.ps1 `
@@ -296,7 +300,7 @@ jobs:
         with:
           name: wim-samples-metadata
           path: ${{ runner.temp }}/wim-samples-metadata
-      - name: Build S16 (DISM /Apply-Image of S13 index 1 to a fresh VHD; tree manifest)
+      - name: Build S16 to S16D (DISM /Apply-Image of S13, S13B, S13C to fresh VHDs; tree manifests)
         id: build
         run: |
           ./scripts/wim-samples/Build-Samples.ps1 `

@@ -57,7 +57,9 @@ UUID), and added status notes citing the owner's decisions DEC-0020
 signed boot policy, audited reversal of a stop, double content
 verification). DEC-0019 (Windows API binding) has no spec text. New
 OPEN items: OPEN-DISK-5, OPEN-TGT-3, OPEN-UBM-2, OPEN-WAPI-1 to 3,
-OPEN-SMB-1.
+OPEN-SMB-1. Spec request SR-6 (2026-10-28; AUDITED 2026-10-28 after
+fixes CR-SR6-001 to 008) added topic 24 (reparse data and security
+descriptors) with OPEN-RPSD-1 to 4, which stay open.
 
 Priority is for a **Windows client (10/11 Enterprise) first** release.
 For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64
@@ -455,3 +457,12 @@ decide.
     OPEN-WAPI-4 to 6, AUDITED 2026-10-28 (the OPEN items stay open);
     topic 5 §10.3 gained the Secure Boot state variables, AUDITED
     2026-10-28).
+24. Reparse data and security descriptors ([MS-FSCC] reparse tags and
+    the generic, mount-point and symbolic-link reparse buffers;
+    [MS-DTYP] SID, ACL, ACE header and the self-relative security
+    descriptor). For PE-1 image apply and topic 9 §6.1. **Summarised:
+    `specs/standards/reparse-and-security-descriptors.md`** (spec
+    request SR-6, M3, 2026-10-28; AUDITED 2026-10-28; marks what
+    matters under the WIM `FLAG_HEADER_RP_FIX` flag; OPEN-RPSD-1 to 4.
+    Does not settle OPEN-WIM-7 or OPEN-WIM-12; topic 9 §6.1 and §13
+    gained cross-references, AUDITED 2026-10-28).

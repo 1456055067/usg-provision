@@ -632,17 +632,30 @@ those files only.
   root are stored, with and without DISM's no-fix option (sample
   S13C). How the product itself handles such targets is OPEN-WIM-12
   (§13).
+- **See also (SR-6, AUDITED 2026-10-28)**: Microsoft's published
+  layouts of the
+  reparse buffers (tags, substitute and print names, the relative
+  flag) are summarised in `reparse-and-security-descriptors.md`
+  (topic 24) §1 to §5, which also marks the points that matter when
+  `FLAG_HEADER_RP_FIX` is set. Topic 24 settles neither OPEN-WIM-7
+  nor OPEN-WIM-12.
 
 **Security descriptors** (OBS-038).
 
 - **[observed]** Identical descriptors are stored once, and entries
   refer to them by the index at +12. Different indexes held different
   descriptors. After DISM's apply, every path had the same descriptor
-  as the source, compared as SDDL text.
+  as the source, compared as SDDL text. The descriptors of the 5
+  reparse points were not compared (no SDDL was captured for them;
+  correction added in SR-6, AUDITED 2026-10-28).
 - **Open** (OPEN-WIM-7, sample S13D): whether the stored bytes are
   exactly the self-relative descriptor Windows returns (no binary
   reference was captured), and what an index of −1 looks like (never
   seen in any file).
+- **See also (SR-6, AUDITED 2026-10-28)**: the self-relative
+  descriptor, SID and
+  ACL layouts from [MS-DTYP] are in topic 24 §7 to §9, the reference
+  for checking sample S13D.
 
 **Sparse, compressed and encrypted files** (OBS-039, OBS-040).
 
@@ -928,6 +941,10 @@ own limits before using it.
   OPEN. [project rule, pending decision] Until it is decided, such
   targets are refused (fail closed). Related: OPEN-WIM-7 (M-13),
   samples S13B and S13C.
+  - See also (SR-6, AUDITED 2026-10-28): topic 24
+    (`reparse-and-security-descriptors.md`) §5 and OPEN-RPSD-2 and 3
+    summarise the published buffer formats this question concerns.
+    The formats do not answer it; it stays OPEN.
 
 **Status after R1, R2 and R3** (R1 in M2 fix round 1, drift; R2 added
 2026-10-27; R3 added and audited 2026-10-28). An observation settles a

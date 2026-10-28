@@ -503,6 +503,54 @@ DISM sample run R3 folded into wim.md (spec request SR-5, 2026-10-28):
   and §13 notes, the M-13 bullet and the OPEN-WIM-12 wording are
   marked AUDITED 2026-10-28.
 
+Reparse data and security descriptors (spec request SR-6, M3,
+2026-10-28; AUDITED 2026-10-28):
+
+- Standards summary only; no vendor material was searched for, opened
+  or used. The researcher read the clean-room protocol, the run's
+  spec report, INDEX, this file, and only `wim.md` §6.1 (reparse and
+  descriptor notes) and §13 (OPEN-WIM-7, OPEN-WIM-12), plus the
+  sources and labels preamble and §9 to cite the byte order. In the
+  first pass no observation record, code or decision record was
+  opened.
+- Fetched anonymously from learn.microsoft.com: SRC-140 to SRC-153.
+  Three searches, limited to learn.microsoft.com, found page URLs; no
+  query named the vendor or its product (see "Consulted, not used").
+- New file `specs/standards/reparse-and-security-descriptors.md`
+  (topic 24) with OPEN-RPSD-1 to 4. Cross-references added to
+  `wim.md` §6.1 (reparse points and security descriptors) and §13
+  OPEN-WIM-12. OPEN-WIM-7 and OPEN-WIM-12 are not settled. INDEX topic
+  24 and header updated.
+- Field names, sizes, constants and tag values are Microsoft's, used
+  under the Open Specifications notice; wording is the researcher's.
+  No sample code (the driver page's structure declaration included)
+  was copied. Control-flag masks come from SRC-153 and the reparse-tag
+  bit masks are [derived] from the bit diagram and listed values.
+- Audit (2026-10-28, pass; 0 BLOCKER, 0 MAJOR, 5 MINOR, 3 NIT).
+  For the fixes, at the coordinator's direction, the researcher also
+  read records OBS-036, OBS-037 and OBS-038 of
+  `docs/formats/wim-observed.md`, and nothing else in that file. No
+  bytes or sample names were copied from them.
+  - CR-SR6-001: dropped the claim that a rewritten target is no longer
+    a full path (OBS-037 shows a full path without the capture root);
+    "not shown" became "not recorded in wim.md". OPEN-RPSD-3 stays.
+  - CR-SR6-002: topic 24 §2 now quotes `wim.md`'s wording and cites
+    OBS-037 for `Reserved` not being stored.
+  - CR-SR6-003: the +92 note is its own bullet, about the directory
+    entry, and says it is not the symbolic-link `Flags` field.
+  - CR-SR6-004: absolute form is the RPC representation and cannot be
+    sent as an opaque structure; stored byte order is a [reading].
+  - CR-SR6-005: this run note's long line wrapped.
+  - CR-SR6-006: SRC-141 paraphrased more closely (symlink exception).
+  - CR-SR6-007: the "only the mask matters" note labelled [reading].
+  - CR-SR6-008: OBS-038's caveat (descriptors of the 5 reparse points
+    not compared) added to topic 24 §9 and to `wim.md` §6.1. The
+    `wim.md` addition is a small correction to AUDITED text.
+  - Marked AUDITED 2026-10-28: topic 24 (all sections), the `wim.md`
+    "See also" notes and correction, INDEX topic 24 and header
+    sentence, SRC-140 to SRC-153 and this run note. OPEN-RPSD-1 to 4
+    stay open.
+
 ## Project decisions cited
 
 These are project design decisions, not product behaviour. They are
@@ -538,7 +586,7 @@ cited in specs only under the [observed] label.
 |----|-------|-----------|--------------|--------|----------|
 | OBS-001 to OBS-017 (run R1) | WIM format: observations from our own DISM-made files | `docs/formats/wim-observed.md` | Workflow run 40535666995, attempt 1, commit ba23bed (branch of the WIM sample job); DISM 10.0.26100.32860 on Windows build 26100.33650; 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R1 files only | standards/wim.md Sources, labels, §2, §3, §4, §5, §7, §8, §9, §10, §12, §13; standards/wim-compression.md Sources, §1, §3, §3.1, §3.3, §3.4, §3.6, §7; REQ-IMG-038 Status (OPEN-WIMC-1 confirmed for R1); INDEX header, topics 9 and 20 |
 | OBS-018 to OBS-023 (run R2) | WIM format: observations from our own DISM-made files changed after capture (identical images, append, export, commit, delete) | `docs/formats/wim-observed.md` | Workflow run 40599556702, attempt 1, commit 5d3c8c7 (job `generate`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1); 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R2 files only (OBS-020 also notes R1's 12-image file) | standards/wim.md Sources, labels, §3, §5, §13 (OPEN-WIM-6, status table, never-observed list, samples recorded and still needed), §14; INDEX header and topic 9 |
-| OBS-024 to OBS-048 (run R3) | WIM format: observations of metadata resources (directory entries, streams, security data), raw chunks, a file over 4 GiB, XML counts and DISM's apply | `docs/formats/wim-observed.md` | Workflow run 40754869824, attempt 1, commit 27f7237 (jobs `generate`, `generate-large`, `generate-metadata`, `reference`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1 and R2); 2026-10-28 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for the R3 files examined (including S01, rebuilt in R3 with the R1 command) only. Records were read from the "Runs examined" rows, the M-01 to M-23 section and the records themselves | standards/wim.md Sources, labels, §3, §4, §5, §6 (fixed part contradicted by OBS-026; new §6.1), §7, §13 (OPEN-WIM-5, 7, 10, status table, never-observed list, samples recorded in R3 and still needed), §13 OPEN-WIM-12 (via OBS-037); INDEX topic 9. EFS refusal: [project rule, DEC-0006]. AUDITED 2026-10-28 (CR-R3-001 to 003, 005 applied) |
+| OBS-024 to OBS-048 (run R3) | WIM format: observations of metadata resources (directory entries, streams, security data), raw chunks, a file over 4 GiB, XML counts and DISM's apply | `docs/formats/wim-observed.md` | Workflow run 40754869824, attempt 1, commit 27f7237 (jobs `generate`, `generate-large`, `generate-metadata`, `reference`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1 and R2); 2026-10-28 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for the R3 files examined (including S01, rebuilt in R3 with the R1 command) only. Records were read from the "Runs examined" rows, the M-01 to M-23 section and the records themselves | standards/wim.md Sources, labels, §3, §4, §5, §6 (fixed part contradicted by OBS-026; new §6.1), §7, §13 (OPEN-WIM-5, 7, 10, status table, never-observed list, samples recorded in R3 and still needed), §13 OPEN-WIM-12 (via OBS-037); INDEX topic 9. EFS refusal: [project rule, DEC-0006]. AUDITED 2026-10-28 (CR-R3-001 to 003, 005 applied). SR-6: OBS-036 to OBS-038 cited in standards/reparse-and-security-descriptors.md §2, §5, §9 and in the wim.md §6.1 descriptor correction (AUDITED 2026-10-28) |
 
 ## Sources used
 
@@ -683,6 +731,20 @@ cited in specs only under the [observed] label.
 | SRC-137 | Microsoft Learn (Windows Console): GetStdHandle, GetConsoleMode, SetConsoleMode | https://learn.microsoft.com/en-us/windows/console/getstdhandle ; https://learn.microsoft.com/en-us/windows/console/getconsolemode ; https://learn.microsoft.com/en-us/windows/console/setconsolemode | 2026-10-28 | Yes: as SRC-048 | standards/windows-storage-firmware-api.md §18 |
 | SRC-138 | Microsoft Learn: FindFirstStreamW, FindNextStreamW, WIN32_FIND_STREAM_DATA, FindFirstFileNameW, FindNextFileNameW | https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirststreamw ; https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextstreamw ; https://learn.microsoft.com/en-us/windows/win32/api/fileapi/ns-fileapi-win32_find_stream_data ; https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilenamew ; https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilenamew | 2026-10-28 | Yes: as SRC-048 | standards/windows-storage-firmware-api.md §19, OPEN-WAPI-6 |
 | SRC-139 | Microsoft Learn: GetFileSecurityW, ConvertSecurityDescriptorToStringSecurityDescriptorW, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO | https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-getfilesecurityw ; https://learn.microsoft.com/en-us/windows/win32/api/sddl/nf-sddl-convertsecuritydescriptortostringsecuritydescriptorw ; https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex ; https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_attribute_tag_info | 2026-10-28 | Yes: as SRC-048 | standards/windows-storage-firmware-api.md §19 |
+| SRC-140 | Microsoft Open Specifications: [MS-FSCC] File System Control Codes, landing page (revision 60.0, 2025-11-21; IP rights notice) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/efbfe127-73ad-4140-9967-ec6500e66d5e | 2026-10-28 | Yes: anonymous fetch of public Microsoft Learn page, no login or click-through; the notice permits copies for implementation | standards/reparse-and-security-descriptors.md Sources (AUDITED 2026-10-28) |
+| SRC-141 | [MS-FSCC]: Reparse Tags | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4 | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §1 (AUDITED 2026-10-28) |
+| SRC-142 | [MS-FSCC]: REPARSE_DATA_BUFFER | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/c3a420cb-8a72-4adf-87e8-eee95379d78f | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §2 (AUDITED 2026-10-28) |
+| SRC-143 | [MS-FSCC]: Mount Point Reparse Data Buffer (§2.1.2.5) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/ca069dad-ed16-42aa-b057-b6b207f447cc | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §3, §5 (AUDITED 2026-10-28) |
+| SRC-144 | [MS-FSCC]: Symbolic Link Reparse Data Buffer (§2.1.2.4) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/b41f1cbf-10df-4a47-98d4-1c52a833d913 | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §4, §5 (AUDITED 2026-10-28) |
+| SRC-145 | [MS-FSCC]: Pathname (§2.1.5) and Dot Directory Names (§2.1.5.1) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/ffb795f3-027d-4a3c-997d-3085f2332f6f ; https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/fccd0313-0364-45bd-b75c-924fd6a5662f | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §5, OPEN-RPSD-2 (AUDITED 2026-10-28) |
+| SRC-146 | Microsoft Learn (Windows drivers): REPARSE_DATA_BUFFER structure (ntifs.h) | https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer | 2026-10-28 | Yes: as SRC-048. Structure declaration on the page not copied | standards/reparse-and-security-descriptors.md §2 (third-party form out of scope), §5 (background) (AUDITED 2026-10-28) |
+| SRC-147 | Microsoft Learn: FSCTL_SET_REPARSE_POINT control code | https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_set_reparse_point | 2026-10-28 | Yes: as SRC-048. Sample code not copied | standards/reparse-and-security-descriptors.md §6, OPEN-RPSD-1 (AUDITED 2026-10-28) |
+| SRC-148 | Microsoft Open Specifications: [MS-DTYP] Windows Data Types, landing page (revision 42.0, 2024-11-19; IP rights notice) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/cca27429-5689-4a16-b2b4-9325d93e4ba2 | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md Sources (AUDITED 2026-10-28) |
+| SRC-149 | [MS-DTYP]: SECURITY_DESCRIPTOR (§2.4.6) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/7d4dac05-9cef-4563-a058-f108abecce1d | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md byte order, §9, OPEN-RPSD-4 (AUDITED 2026-10-28) |
+| SRC-150 | [MS-DTYP]: SID (§2.4.2), SID packet representation (§2.4.2.2), SID_IDENTIFIER_AUTHORITY | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/78eb9013-1c3a-4970-ad1f-2b1dad588a25 ; https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f992ad60-0fe4-4b87-9fed-beb478836861 ; https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/c6ce4275-3d90-4890-ab3a-514745e4637e | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §7 (AUDITED 2026-10-28) |
+| SRC-151 | [MS-DTYP]: ACL | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/20233ed8-a6c6-4097-aafa-dd545ed24428 | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §8 (AUDITED 2026-10-28) |
+| SRC-152 | [MS-DTYP]: ACE_HEADER (§2.4.4.1) | https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/628ebb1d-c509-4ea0-a10f-77ef97ca4586 | 2026-10-28 | Yes: as SRC-140 | standards/reparse-and-security-descriptors.md §8 (AUDITED 2026-10-28) |
+| SRC-153 | Microsoft Learn (Windows drivers): SECURITY_DESCRIPTOR_CONTROL | https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/security-descriptor-control | 2026-10-28 | Yes: as SRC-048 | standards/reparse-and-security-descriptors.md §9 (flag masks, 0x0040 naming note), §10 (absent DACL) (AUDITED 2026-10-28) |
 
 ## Consulted, not used
 
@@ -716,6 +778,7 @@ cited in specs only under the [observed] label.
 | DMTF DSP0134 3.8.0 PDF | https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.8.0.pdf | 2026-10-28 | Public, anonymous download. Text not extractable (fetch tool cannot decompress; no local PDF renderer). Logged under SRC-043; content came only from the dmtf.org-limited search summary. |
 | Public web search, M3 build run (dmtf.org only, on the SMBIOS System UUID byte order) | n/a (search engine results page) | 2026-10-28 | Content route for SRC-043 only. The summary's example values come from the DMTF text and were not copied; `smbios.md` refers to the made-up example in `uefi-guid-text.md`. |
 | Public web searches, SR-3b (two queries, learn.microsoft.com only: volume-extents error for CD-ROM or RAM-disk volumes; NT status to Win32 error mapping) | n/a (search engine results pages) | 2026-10-28 | No query named the vendor or its product. Summaries contained the search tool's own guesses and links to Microsoft Q&A posts; none were fetched or used. Only the ntddvol driver page found through the first search was fetched (SRC-131). |
+| Public web searches, SR-6 (three queries, learn.microsoft.com only: the [MS-FSCC] symbolic-link buffer and relative flag; an [MS-FSCC] byte-order statement; the [MS-DTYP] self-relative descriptor) | n/a (search engine results pages) | 2026-10-28 | No query named the vendor or its product. Used only to find page URLs, which were then fetched (SRC-141 to SRC-153). The summaries also cited [MS-SMB2], [MS-CFB], [MS-ECS] and other pages; none of those were fetched or used. No [MS-FSCC] byte-order statement was found, which is why topic 24 marks the reparse byte order as [reading]. |
 | Microsoft Learn: BCDEdit /set (Windows drivers) | https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/bcdedit--set | 2026-10-27 | Public. Read for RAM-disk TFTP settings; the page does not document them. Nothing used. |
 | Public web searches, M3 run (three queries, all limited to learn.microsoft.com: PXE server for Windows PE with the UEFI boot manager and RAM-disk files; RAM-disk TFTP block and window size; UEFI network boot program file names) | n/a (search engine results pages) | 2026-10-27 | No query named the vendor or its product. Used only to find Microsoft pages, then fetched and logged as SRC-091 to SRC-094. Result summaries also drew on Microsoft Q&A and archived forum threads (community posts, some quoting third-party product settings); none were fetched and nothing from them was used. The block-size defaults in `winpe-network-boot.md` come from SRC-093 itself, not from the summaries. |
 | Public web searches, M2 run (eight queries, all on Microsoft or NIST documentation: WIM format paper; WIMGetImageInformation XML; MS-XCA decompression; MS-PATCH LZXD sections (two queries); the Cabinet SDK LZX document; Windows PE redistribution licensing; MS-DTYP DWORD byte order) | n/a (search engine results pages) | 2026-10-26 | No query named the vendor or its product. Used only to find Microsoft pages, which were then fetched and logged as SRC-046 to SRC-063. Some result lists included third-party WIM and LZX tools and open-source decoder code (wimlib documentation, Wine, ReactOS and libmspack sources, a WIM parser crate); none were fetched and nothing from them was used. One result summary mentioned a Microsoft errata page for [MS-XCA] §2.2.4; it was not fetched. The MS-DTYP search found no statement of byte order, which is why `wim.md` §9 is OPEN-WIM-1. |

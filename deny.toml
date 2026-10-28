@@ -66,6 +66,16 @@ deny = [
   # AWS_LC_{FIPS_,}SYS_USE_SYSTEM=0 so pkg-config never selects a system lib.
   { crate = "pkg-config", wrappers = ["aws-lc-fips-sys", "aws-lc-sys"] },  # 0001 Amendment 1
   { crate = "libloading", wrappers = ["clang-sys"] },         # 0001 Amendment 1
+  # Decision 0019 (M3 WU-0): Windows API declarations. Only usgp-winapi may
+  # use windows-sys directly; tokio, socket2, mio and errno reach it on
+  # Windows targets as before. windows-link (the raw-dylib `link!` macro) is
+  # confined to its existing direct users so no crate can declare Windows
+  # imports around usgp-winapi.
+  { crate = "windows-sys", wrappers = ["usgp-winapi", "tokio", "socket2", "mio", "errno"] },
+  { crate = "windows-link", wrappers = ["windows-sys", "libloading", "parking_lot_core"] },
+  # M3 plan section 4: the HTTP/1.1 parser, for hyper and the pre-boot
+  # agent's minimal client only.
+  { crate = "httparse", wrappers = ["hyper", "usgp-preboot-agent"] },
 ]
 
 [sources]

@@ -245,6 +245,24 @@ else
     "cargo test -p usgp-image --features dism-samples"
 fi
 
+# ------------------------------------------- Windows agent target (M3) --
+
+# Plan WU-0, decision 0019. Off Windows, only the crates with no C in their
+# tree can be checked for x86_64-pc-windows-msvc (the FIPS module needs MSVC),
+# so this lints the cfg(windows) code of those crates. The FIPS module build,
+# linkage and native tests run only in the CI windows-agent job.
+win_target="x86_64-pc-windows-msvc"
+if rustup target list --installed 2> /dev/null | grep -qx "$win_target"; then
+  run cargo clippy --locked --target "$win_target" --all-targets \
+    -p usgp-winapi -p usgp-disk -p usgp-common -p usgp-proto -p usgp-wincfg \
+    -- -D warnings
+else
+  skip "rustup target $win_target not installed" \
+    "cargo clippy --target $win_target (C-free Windows crates)"
+fi
+skip "needs a Windows runner with MSVC; CI windows-agent job" \
+  "windows-agent: FIPS module build, static CRT, native tests"
+
 # ------------------------------------------- testing/ workspaces (M1) --
 
 host_triple="$(cd testing/uefi-payload && rustc -vV | sed -n 's/^host: //p')"

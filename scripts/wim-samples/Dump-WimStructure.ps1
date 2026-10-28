@@ -24,7 +24,15 @@
                    50-byte entries (at most 4096) when the region is not
                    flagged compressed
       metadata     first 128 bytes of each metadata-flagged resource (at most
-                   16 resources)
+                   16 resources); then, for each one stored without the
+                   COMPRESSED flag, the whole resource as hex (at most 4 MiB
+                   per resource and 4 MiB in total; plan M3 section 1.4),
+                   preceded by a labelled reading of its security block
+                   head (wim.md section 6: total length, count, the first
+                   64 per-descriptor lengths, and the 8-byte-aligned end
+                   computed from them). Compressed metadata is not decoded
+                   here; analysis/xpr.py and analysis/dentry.py do that
+                   offline.
       xml          hex of the first 256 bytes, then the UTF-16LE text when it
                    starts with FF FE (at most 4 MiB)
       integrity    hex of the table head and first entries, the stored
@@ -50,7 +58,8 @@
     COMPLIANCE MAPPING:
     - NIST 800-53: SA-11 (Developer Testing and Evaluation), SI-10 (input
       lengths checked before use, also in test tooling)
-    - SPEC: specs/standards/wim.md sections 2 to 9, section 13;
+    - SPEC: specs/standards/wim.md sections 2 to 9, section 13
+      (OPEN-WIM-7: the full metadata dump);
       specs/standards/wim-compression.md section 7 (OPEN-WIMC-1)
     - Decision 0006 items 1 to 3
 #>
@@ -76,6 +85,9 @@ $Cap = @{
     LookupEntries = 4096
     MetadataRes   = 16
     MetadataBytes = 128
+    MetadataFull  = 4194304
+    MetadataTotal = 4194304
+    SecLengths    = 64
     XmlBytes      = 4194304
     IntegrityHead = 12 + 20 * 8
     IntegrityHash = 64
@@ -141,6 +153,56 @@ function ConvertTo-HexText([byte[]] $B, [int] $Start, [int] $Count) {
     if ($Count -le 0) { return '' }
     $parts = for ($i = $Start; $i -lt $Start + $Count; $i++) { '{0:x2}' -f $B[$i] }
     return ($parts -join ' ')
+}
+
+# Hex dump for large regions: same layout as Out-HexDump, built row by row
+# with BitConverter so that a 4 MiB region stays practical.
+function Out-HexDumpFast([byte[]] $B, [long] $Base) {
+    $sb = [System.Text.StringBuilder]::new()
+    for ($row = 0; $row -lt $B.Length; $row += 16) {
+        $n = [Math]::Min(16, $B.Length - $row)
+        $hex = [BitConverter]::ToString($B, $row, $n).Replace('-', ' ').ToLowerInvariant()
+        $ascii = [char[]]::new($n)
+        for ($i = 0; $i -lt $n; $i++) {
+            $c = $B[$row + $i]
+            $ascii[$i] = if ($c -ge 0x20 -and $c -le 0x7e) { [char]$c } else { '.' }
+        }
+        [void]$sb.Append(('{0:x10}  {1,-47}  |{2}|' -f ($Base + $row), $hex, [string]::new($ascii))).Append("`n")
+        if ($sb.Length -ge 1048576) {
+            Out-Line ($sb.ToString().TrimEnd("`n"))
+            [void]$sb.Clear()
+        }
+    }
+    if ($sb.Length -gt 0) { Out-Line ($sb.ToString().TrimEnd("`n")) }
+}
+
+# Labelled reading of a metadata resource's security block head (wim.md
+# section 6): 4-byte total length, 4-byte count, then one 8-byte length per
+# descriptor. Prints the end computed from the lengths and the next 8-byte
+# boundary, next to the total length field, so the record can say which
+# reading the bytes support (M-01, M-02). Readings only; bytes are in the
+# hex dump.
+function Out-SecurityHead([byte[]] $B, [long] $Base) {
+    if ($B.Length -lt 8) { Out-Line 'security head: fewer than 8 bytes'; return }
+    $total = [long](Get-U32 $B 0)
+    $count = [long](Get-U32 $B 4)
+    Out-Line ('security head @{0}: total-length field {1} ({2}); count field {3} ({4})' -f
+        $Base, $total, (ConvertTo-HexText $B 0 4), $count, (ConvertTo-HexText $B 4 4))
+    $shown = [Math]::Min($count, [long]$Cap.SecLengths)
+    $sum = [decimal]0
+    $complete = $true
+    for ($k = 0L; $k -lt $count; $k++) {
+        $o = 8 + 8 * $k
+        if ($o + 8 -gt $B.Length) { $complete = $false; break }
+        $len = Get-U64 $B ([int]$o)
+        $sum += [decimal]$len
+        if ($k -lt $shown) { Out-Line ('  length[{0}] @{1}: {2} ({3})' -f $k, ($Base + $o), $len, (ConvertTo-HexText $B ([int]$o) 8)) }
+    }
+    if ($count -gt $shown) { Out-Line ("  (lengths shown capped at {0} of {1})" -f $shown, $count) }
+    if (-not $complete) { Out-Line '  the length array runs past the dumped bytes; end not computed'; return }
+    $end = [decimal]8 + [decimal]8 * $count + $sum
+    $aligned = [decimal]([Math]::Ceiling($end / 8)) * 8
+    Out-Line ('  8 + 8 * count + sum(lengths) = {0}; next 8-byte boundary {1}; total-length field {2}' -f $end, $aligned, $total)
 }
 
 # Classic hex dump; $Base is the file offset of $B[0].
@@ -332,6 +394,30 @@ try {
             if (-not (Test-ResInFile $e.Res)) { Out-Line '  outside this file (another part?)'; continue }
             $n = [Math]::Min($e.Res.Stored, [long]$Cap.MetadataBytes)
             Out-HexDump (Read-At $e.Res.Offset $n) $e.Res.Offset
+        }
+        # Full dump of uncompressed metadata (OPEN-WIM-7), bounded per
+        # resource and in total; resources sharing one range (OBS-018) are
+        # dumped once.
+        $left = [long]$Cap.MetadataTotal
+        $done = @{}
+        $shown = 0
+        foreach ($e in $meta) {
+            if ($shown -ge $Cap.MetadataRes) { break }
+            $shown++
+            Out-Line ''
+            Out-Line ('-- full metadata, lookup [{0}]' -f $e.Index)
+            if (($e.Res.Flags -band 0x04) -ne 0) { Out-Line 'COMPRESSED flag set; not decoded here (analysis/xpr.py, analysis/dentry.py)'; continue }
+            if (-not (Test-ResInFile $e.Res)) { Out-Line 'outside this file'; continue }
+            $key = '{0}:{1}' -f $e.Res.Offset, $e.Res.Stored
+            if ($done.ContainsKey($key)) { Out-Line ('same range as lookup [{0}]; not repeated' -f $done[$key]); continue }
+            $done[$key] = $e.Index
+            if ($e.Res.Stored -gt $Cap.MetadataFull) { Out-Line ('stored size {0} exceeds the {1}-byte cap; not dumped' -f $e.Res.Stored, $Cap.MetadataFull); continue }
+            if ($e.Res.Stored -gt $left) { Out-Line ('stored size {0} exceeds the {1} bytes left of the total cap; not dumped' -f $e.Res.Stored, $left); continue }
+            $left -= $e.Res.Stored
+            $b = Read-At $e.Res.Offset $e.Res.Stored
+            Out-SecurityHead $b $e.Res.Offset
+            Out-Line ('hex of all {0} bytes:' -f $b.Length)
+            Out-HexDumpFast $b $e.Res.Offset
         }
     }
 

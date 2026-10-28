@@ -87,9 +87,14 @@ only exceptions are written decisions:
   `usgp-crypto`.
 - [0002](docs/decisions/0002-fuzz-harness-native-code.md): libFuzzer in the
   separate, unshipped `fuzz/` workspace.
+- [0019](docs/decisions/0019-windows-api-binding.md): `windows-sys`
+  (declarations only, no C), used only by `usgp-winapi`. `usgp-disk`,
+  `usgp-deploy` and `usgp-image` have no `-sys` crate on any target.
 
 `unsafe` is forbidden workspace-wide. A crate that truly needs it requires a
-decision record, and every block carries a `// SAFETY:` comment.
+decision record, and every block carries a `// SAFETY:` comment. The only
+such crate is `usgp-winapi` (decision 0019): it sets `unsafe_code = "deny"`,
+and only its `src/ffi.rs` may allow `unsafe`. The pure-Rust gate checks both.
 
 ## Compliance annotations
 

@@ -12,6 +12,17 @@
 #    build-only tools.
 # 3. aws-lc-rs has no dependents other than usgp-crypto and rustls.
 # 4. No workspace crate depends on libfuzzer-sys in any edge kind (0002).
+# 5. Decision 0019 item 4: usgp-disk, usgp-deploy and usgp-image stay
+#    OS-neutral. Their shipped tree (normal and build edges, every target)
+#    has no native-code crate at all, allowlisted or not; only the FIPS chain
+#    reached through usgp-crypto is pruned. usgp-winapi's tree may hold
+#    windows-sys and nothing else of that kind.
+# 6. Decision 0019 item 4: the agent's shipped tree for x86_64-pc-windows-msvc
+#    allows only the AWS-LC chain under usgp-crypto and windows-sys under
+#    usgp-winapi. With both pruned, nothing of that kind may remain.
+# 7. Decision 0019 item 2: every member uses the workspace lints
+#    (`unsafe_code = "forbid"`) except usgp-winapi, which sets "deny"; and
+#    only crates/usgp-winapi/src/ffi.rs may allow `unsafe_code`.
 #
 # Prints "pure-rust: OK" and exits 0, or lists offenders and exits 1.
 #
@@ -24,6 +35,11 @@ cd "$root"
 allowlist_file="scripts/pure-rust-allowlist.txt"
 crypto_set="aws-lc-fips-sys aws-lc-sys clang-sys cc cmake bindgen pkg-config"
 aws_lc_rs_dependents="usgp-crypto rustls rustls-webpki"
+os_neutral="usgp-disk usgp-deploy usgp-image"
+win_target="x86_64-pc-windows-msvc"
+agent="usgp-preboot-agent"
+winapi="usgp-winapi"
+winapi_ffi="crates/usgp-winapi/src/ffi.rs"
 pattern='^([A-Za-z0-9_-]+-sys|cc|bindgen|cmake|pkg-config|vcpkg|cxx|cxx-build|link-cplusplus|nasm-rs|openssl-src|autotools) v'
 
 allowed=()
@@ -55,7 +71,44 @@ for dir in crates/*/ services/*/ tools/*/; do
     continue
   fi
   members+=("$m")
+  # Rule 7: the lint table. Other members must inherit the workspace lints.
+  if [ "$m" = "$winapi" ]; then
+    grep -qE '^unsafe_code *= *"deny"' "$dir/Cargo.toml" \
+      || offenders+=("$m: Cargo.toml must set unsafe_code = \"deny\" (decision 0019)")
+  else
+    lints="$(awk '/^\[lints\]/ { f = 1; next } f && NF { print; exit }' "$dir/Cargo.toml")"
+    [ "$lints" = "workspace = true" ] \
+      || offenders+=("$m: [lints] must be 'workspace = true' (unsafe_code forbid; decision 0019)")
+    if grep -qE '^\[lints\.' "$dir/Cargo.toml"; then
+      offenders+=("$m: overrides workspace lints (decision 0019)")
+    fi
+  fi
 done
+
+# member_tree <package> <target> <edges> [prune...]: the package's tree, one
+# crate per line, with each named crate pruned if it is in the graph
+# (`--prune` errors on a spec that is not).
+member_tree() {
+  local pkg=$1 target=$2 edges=$3 base p
+  shift 3
+  local args=()
+  base="$(cargo tree --locked -p "$pkg" -e "$edges" --target "$target" --prefix none)"
+  for p in "$@"; do
+    if [ "$p" != "$pkg" ] && grep -qE "^$p v" <<< "$base"; then
+      args+=(--prune "$p")
+    fi
+  done
+  if [ "${#args[@]}" -gt 0 ]; then
+    cargo tree --locked -p "$pkg" -e "$edges" --target "$target" --prefix none "${args[@]}"
+  else
+    echo "$base"
+  fi
+}
+
+# native_hits: crate names matching the gate pattern, from a tree on stdin.
+native_hits() {
+  grep -E "$pattern" | awk '{print $1}' | sort -u || true
+}
 
 for m in "${members[@]}"; do
   tree="$(cargo tree --locked -p "$m" -e normal,build,dev --target all --prefix none)"
@@ -85,6 +138,39 @@ deps="$(cargo tree --locked -i aws-lc-rs -e normal --target all --depth 1 --pref
 for d in $deps; do
   # shellcheck disable=SC2086
   in_list "$d" $aws_lc_rs_dependents || offenders+=("aws-lc-rs: unexpected dependent $d")
+done
+
+# Rule 5 (decision 0019 item 4): OS-neutral crates, no allowlist.
+for m in $os_neutral $winapi; do
+  if ! in_list "$m" "${members[@]}"; then
+    offenders+=("$m: expected workspace member is missing (decision 0019)")
+    continue
+  fi
+  for h in $(member_tree "$m" all normal,build usgp-crypto | native_hits); do
+    if [ "$m" = "$winapi" ] && [ "$h" = "windows-sys" ]; then
+      continue
+    fi
+    offenders+=("$m: depends on $h on some target (decision 0019: OS-neutral, no native-code crate)")
+  done
+done
+
+# Rule 6 (decision 0019 item 4): the agent on the Windows target. The
+# allowed crates are checked under their owners by rules 1 and 5.
+if in_list "$agent" "${members[@]}"; then
+  for h in $(member_tree "$agent" "$win_target" normal,build usgp-crypto "$winapi" | native_hits); do
+    offenders+=("$agent ($win_target): depends on $h outside usgp-crypto and $winapi (decision 0019)")
+  done
+else
+  offenders+=("$agent: expected workspace member is missing")
+fi
+
+# Rule 7 (decision 0019 item 2): unsafe only in usgp-winapi's ffi.rs.
+unsafe_files="$(grep -rlE --include='*.rs' \
+  '(allow|expect|warn)[[:space:]]*\([^)]*unsafe_code' crates services tools || true)"
+for f in $unsafe_files; do
+  if [ "$f" != "$winapi_ffi" ]; then
+    offenders+=("$f: allows unsafe_code; only $winapi_ffi may (decision 0019)")
+  fi
 done
 
 # Decision 0002: libFuzzer stays in the separate fuzz/ workspace.

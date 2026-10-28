@@ -42,6 +42,36 @@
 
       S08  /Capture-Image /Compress:fast                        tree-large
 
+    Set Metadata (job "generate-metadata"; plan M3 section 1.4, OPEN-WIM-7;
+    uploaded as its own artifact, every file under 64 MiB):
+
+      S13  /Capture-Image /Compress:none                        tree-meta
+      S14  /Capture-Image /Compress:fast                        tree-meta
+      S15  /Capture-Image /Compress:none of the volume root     the VHD
+           that holds tree-meta                                 volume
+      S17  /Capture-Image /Compress:fast                        tree-mixed
+
+    tree-meta (profile Metadata, seed 601) is written on a fresh NTFS
+    volume of an expandable VHD that this script creates and attaches with
+    DiskPart, with short-name generation enabled on that volume (fsutil
+    8dot3name). The VHD is detached at the end and never uploaded.
+    tree-mixed (profile Mixed, seed 701) is written in -WorkDir.
+
+    Set Reference (job "reference"; text only, never a sample or a disk
+    image):
+
+      S16  /Apply-Image of S13 index 1 (from -SampleDir, the     S13.wim
+           generate-metadata artifact of the same run) to the
+           root of a fresh NTFS VHD volume, then a tree manifest
+           of the result
+
+    Tree manifests (tree-meta, the volume root, S16) are written by this
+    script (Save-TreeManifest): one row per item with its type, attributes,
+    the three times as FILETIME values, length, SHA-256, named streams,
+    SDDL, link target, hard-link names and reparse tag. Short names come
+    from "dir /x" per directory, reparse data from "fsutil reparsepoint
+    query". They stand in for WU-5's tree_manifest tool until it exists.
+
     Outputs in -OutDir:
       host.txt            OS build, DISM version, runner image, run identity
       commands.log        every DISM command line, UTC time, exit code
@@ -55,7 +85,11 @@
       editions.tsv        id, index, name, description as DISM reported them
       SHA256SUMS          sha256sum-format list of every sample file
       observations.txt    all of the above text, concatenated in order
-      the sample files    (Standard set only)
+      the sample files    (Standard and Metadata sets)
+      <tree>.manifest.tsv tree manifests (Metadata and Reference sets)
+      <tree>.dirx.txt     dir /x of every directory (short names)
+      <tree>.reparse.txt  fsutil reparsepoint query of every reparse point
+      Sxx.diskpart.txt    DiskPart and fsutil output of the VHD helpers
 
     Fail closed: any failed command, any DISM report that differs from the
     names and descriptions we asked for, or any sample over the size cap
@@ -69,7 +103,11 @@
     Scratch directory for the source trees and the Large WIM.
 
 .PARAMETER Set
-    Standard or Large.
+    Standard, Large, Metadata or Reference.
+
+.PARAMETER SampleDir
+    Reference set only: the downloaded generate-metadata artifact (holds
+    manifest.tsv, SHA256SUMS and S13.wim).
 
 .PARAMETER LargeBytes
     Size of the S08 source file (default 4.5 GiB).
@@ -79,11 +117,12 @@
     - NIST 800-53: SA-11 (Developer Testing and Evaluation), SR-4
       (Provenance: every sample's command, tool version and host recorded),
       SI-7 (test inputs for image integrity checks)
-    - SPEC: specs/standards/wim.md section 13 (OPEN-WIM-1 to 6, 10, 11;
-      samples S11 and S12);
+    - SPEC: specs/standards/wim.md section 13 (OPEN-WIM-1 to 7, 10, 11;
+      samples S11 and S12); section 6 (metadata, samples S13 to S17);
       specs/standards/wim-compression.md section 7 (OPEN-WIMC-1);
-      specs/os-images.md REQ-IMG-042 (12 indexes)
-    - Decision 0006 items 1 to 4; decision 0014
+      specs/os-images.md REQ-IMG-042 (12 indexes);
+      specs/preinstall-env.md REQ-PE-017 (apply fidelity reference, S16)
+    - Decision 0006 items 1 to 4; decision 0014; plan M3 section 1.4
 #>
 [CmdletBinding()]
 param(
@@ -93,16 +132,22 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $WorkDir,
 
-    [ValidateSet('Standard', 'Large')]
+    [ValidateSet('Standard', 'Large', 'Metadata', 'Reference')]
     [string] $Set = 'Standard',
 
-    [long] $LargeBytes = 4831838208
+    [long] $LargeBytes = 4831838208,
+
+    [string] $SampleDir = ''
 )
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 $MaxUploadBytes = 64MB
+$VhdMegabytes = 2048
+# Top-level folders of a volume that the tree manifests list but do not
+# enter (Windows creates them; their content is not ours).
+$VolumeNoDescend = @('System Volume Information', '$RECYCLE.BIN')
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $Here = $PSScriptRoot
 
@@ -111,6 +156,9 @@ foreach ($d in @($OutDir, $WorkDir)) {
         throw "refusing to use non-empty directory: $d"
     }
     [void][System.IO.Directory]::CreateDirectory($d)
+}
+if ($Set -eq 'Reference' -and ($SampleDir.Length -eq 0 -or -not (Test-Path -LiteralPath $SampleDir -PathType Container))) {
+    throw "-Set Reference needs -SampleDir, the generate-metadata artifact directory"
 }
 $OutDir = (Resolve-Path -LiteralPath $OutDir).ProviderPath
 $WorkDir = (Resolve-Path -LiteralPath $WorkDir).ProviderPath
@@ -157,6 +205,219 @@ function Invoke-Dism([string] $Id, [string[]] $DismArgs, [string] $OutFile, [swi
         throw "$Id`: dism exited $code ($line)"
     }
     return $code
+}
+
+# Runs another Windows tool (DiskPart, fsutil) the way Invoke-Dism runs
+# DISM: the command line and exit code go to commands.log, the output to
+# $OutFile. Arguments must not contain spaces or quotes.
+function Invoke-Tool([string] $Id, [string] $Exe, [string[]] $ToolArgs, [string] $OutFile, [switch] $AllowFailure) {
+    foreach ($a in $ToolArgs) {
+        if ($a -match '[\s"]') { throw "$Exe argument with space or quote: $a" }
+    }
+    $line = $Exe + ' ' + ($ToolArgs -join ' ')
+    Add-Text $CommandsLog ('{0} {1} RUN  {2}' -f [datetime]::UtcNow.ToString('o'), $Id, $line)
+    $out = & $Exe @ToolArgs 2>&1 | ForEach-Object { $_.ToString() }
+    $code = $LASTEXITCODE
+    Add-Text $CommandsLog ('{0} {1} EXIT {2}' -f [datetime]::UtcNow.ToString('o'), $Id, $code)
+    Add-Text $OutFile ('> ' + $line)
+    Add-Text $OutFile (($out | Out-String -Width 4096).TrimEnd())
+    Add-Text $OutFile ('exit ' + $code)
+    Add-Text $OutFile ''
+    if ($code -ne 0 -and -not $AllowFailure) {
+        throw "$Id`: $Exe exited $code ($line)"
+    }
+    return $code
+}
+
+# Runs a DiskPart script; every script line is logged to commands.log
+# before it runs. DiskPart stops at the first failing line and exits
+# non-zero.
+function Invoke-DiskPart([string] $Id, [string[]] $Lines, [string] $OutFile, [switch] $AllowFailure) {
+    $scriptFile = Join-Path $WorkDir "$Id.diskpart.tmp"
+    [System.IO.File]::WriteAllLines($scriptFile, $Lines, [System.Text.ASCIIEncoding]::new())
+    foreach ($l in $Lines) {
+        Add-Text $CommandsLog ('{0} {1} DISKPART {2}' -f [datetime]::UtcNow.ToString('o'), $Id, $l)
+        Add-Text $OutFile ('diskpart script: ' + $l)
+    }
+    try {
+        return (Invoke-Tool $Id 'diskpart.exe' @('/s', $scriptFile) $OutFile -AllowFailure:$AllowFailure)
+    }
+    finally {
+        Remove-Item -LiteralPath $scriptFile -ErrorAction SilentlyContinue
+    }
+}
+
+# A drive letter no volume uses, from the end of the alphabet.
+function Get-FreeLetter {
+    $used = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() })
+    foreach ($l in 'RSTUVWXYQP'.ToCharArray()) {
+        if ([string]$l -notin $used) { return [string]$l }
+    }
+    throw 'no free drive letter for the sample VHD'
+}
+
+# VHD helper: creates an expandable VHD file in -WorkDir, attaches it, makes
+# one NTFS partition (GPT disk), assigns a free letter and enables
+# short-name generation on that volume only. Returns "X:". The VHD is a
+# scratch disk image of our own content; it is never uploaded.
+function New-SampleVhd([string] $Id, [string] $File, [string] $Label) {
+    if (-not $File.StartsWith($WorkDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Id`: VHD file must be under -WorkDir: $File"
+    }
+    if (Test-Path -LiteralPath $File) { throw "$Id`: VHD file already exists: $File" }
+    $letter = Get-FreeLetter
+    $out = Join-Path $OutDir "$Id.diskpart.txt"
+    [void](Invoke-DiskPart "$Id-vhd-create" @(
+            "create vdisk file=`"$File`" maximum=$VhdMegabytes type=expandable",
+            "select vdisk file=`"$File`"",
+            'attach vdisk',
+            'convert gpt',
+            'create partition primary',
+            "format fs=ntfs quick label=$Label",
+            "assign letter=$letter") $out)
+    $root = "$letter`:\"
+    for ($i = 0; $i -lt 60 -and -not (Test-Path -LiteralPath $root); $i++) { Start-Sleep -Seconds 1 }
+    if (-not (Test-Path -LiteralPath $root)) { throw "$Id`: volume $root did not appear" }
+    [void](Invoke-Tool "$Id-8dot3-set" 'fsutil.exe' @('8dot3name', 'set', "$letter`:", '0') $out)
+    [void](Invoke-Tool "$Id-8dot3-query" 'fsutil.exe' @('8dot3name', 'query', "$letter`:") $out)
+    [void](Invoke-Tool "$Id-fsinfo" 'fsutil.exe' @('fsinfo', 'ntfsinfo', "$letter`:") $out -AllowFailure)
+    return "$letter`:"
+}
+
+# Detaches a VHD made by New-SampleVhd. A failure is recorded, not thrown,
+# so it never hides the error that led here.
+function Dismount-SampleVhd([string] $Id, [string] $File) {
+    $out = Join-Path $OutDir "$Id.diskpart.txt"
+    try {
+        $code = Invoke-DiskPart "$Id-vhd-detach" @("select vdisk file=`"$File`"", 'detach vdisk') $out -AllowFailure
+        if ($code -ne 0) { $Failures.Add("$Id`: detaching $File failed (exit $code)") }
+    }
+    catch {
+        $Failures.Add("$Id`: detaching $File failed: $($_.Exception.Message)")
+    }
+}
+
+# Every item below $Root (not $Root itself), not entering reparse points or
+# the top-level folders in $NoDescend.
+function Get-TreeItems([string] $Root, [string[]] $NoDescend) {
+    $items = [System.Collections.Generic.List[object]]::new()
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($Root)
+    $top = $true
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($c in @(Get-ChildItem -LiteralPath $dir -Force)) {
+            $items.Add($c)
+            $isReparse = ($c.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+            if ($c.PSIsContainer -and -not $isReparse -and -not ($top -and $c.Name -in $NoDescend)) {
+                $stack.Push($c.FullName)
+            }
+        }
+        $top = $false
+    }
+    return , $items.ToArray()
+}
+
+function Get-RelPath([string] $Base, [string] $Full) {
+    $b = $Base.TrimEnd('\')
+    $r = $Full.Substring([Math]::Min($b.Length, $Full.Length)).TrimStart('\')
+    if ($r.Length -eq 0) { return '.' }
+    return $r
+}
+
+# One TSV field: no tab or line break.
+function Format-Field([string] $Text) {
+    if ($null -eq $Text -or $Text.Length -eq 0) { return '-' }
+    return ($Text -replace '[\t\r\n]+', ' ')
+}
+
+# Tree manifest (M-20): one row per item, $Root itself first as ".", the
+# rest sorted by path (ordinal); UTF-8 without BOM, LF, tab-separated.
+# Columns: path, type (dir, file, reparse:<LinkType>), attributes (hex),
+# creation, last-access and last-write as FILETIME (100 ns units since
+# 1601-01-01 UTC), length (files), sha256 (main stream), streams
+# (name:length:sha256 for each named stream, ";"-separated), sddl (owner,
+# group, DACL), link-target, hard-links (fsutil hardlink list, "|"-
+# separated, only for files with more than one name), reparse-tag (fsutil
+# reparsepoint query; its full output goes to <OutFile without
+# .manifest.tsv>.reparse.txt). -NoContent skips sha256 and streams (no file
+# content is read, so no last-access time is touched by this script).
+# A value that cannot be read is "error: <message>", never dropped.
+function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [string[]] $NoDescend = @(), [switch] $NoContent) {
+    $reparseFile = $OutFile -replace '\.manifest\.tsv$', '.reparse.txt'
+    $found = Get-TreeItems $Root $NoDescend
+    [string[]] $keys = @($found | ForEach-Object { Get-RelPath $Root $_.FullName })
+    [object[]] $items = $found
+    if ($items.Count -gt 1) { [Array]::Sort($keys, $items, [System.StringComparer]::Ordinal) }
+    $all = @(Get-Item -LiteralPath $Root -Force) + $items
+    $rows = [System.Collections.Generic.List[string]]::new()
+    $rows.Add("path`ttype`tattributes`tcreation`tlast-access`tlast-write`tlength`tsha256`tstreams`tsddl`tlink-target`thard-links`treparse-tag")
+    foreach ($i in $all) {
+        $rel = Get-RelPath $Root $i.FullName
+        $isReparse = ($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
+        $isDir = $i.PSIsContainer
+        $type = if ($isReparse) { 'reparse:' + (Format-Field ([string]$i.LinkType)) } elseif ($isDir) { 'dir' } else { 'file' }
+        $length = if ($isDir) { '-' } else { [string]$i.Length }
+        $sha = '-'
+        $streams = '-'
+        if (-not $NoContent -and -not $isReparse) {
+            if (-not $isDir) {
+                try { $sha = (Get-FileHash -LiteralPath $i.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+                catch { $sha = 'error: ' + (Format-Field $_.Exception.Message) }
+            }
+            try {
+                $named = @(Get-Item -LiteralPath $i.FullName -Stream * -Force -ErrorAction Stop |
+                        Where-Object { $_.Stream -ne ':$DATA' } | Sort-Object Stream)
+                $parts = foreach ($n in $named) {
+                    $b = [System.IO.File]::ReadAllBytes($i.FullName + ':' + $n.Stream)
+                    '{0}:{1}:{2}' -f $n.Stream, $b.Length, ([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($b))).ToLowerInvariant()
+                }
+                $streams = Format-Field (@($parts) -join ';')
+            }
+            catch { $streams = 'error: ' + (Format-Field $_.Exception.Message) }
+        }
+        $sddl = '-'
+        if (-not $isReparse) {
+            try { $sddl = Format-Field (Get-Acl -LiteralPath $i.FullName).Sddl }
+            catch { $sddl = 'error: ' + (Format-Field $_.Exception.Message) }
+        }
+        $target = Format-Field ([string]$i.LinkTarget)
+        $links = '-'
+        if (-not $isDir -and -not $isReparse -and [string]$i.LinkType -eq 'HardLink') {
+            $o = @(& fsutil.exe hardlink list $i.FullName 2>&1 | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+            $links = if ($LASTEXITCODE -eq 0) { Format-Field ((@($o) | Sort-Object -CaseSensitive) -join '|') } else { 'error: ' + (Format-Field ($o -join ' ')) }
+        }
+        $tag = '-'
+        if ($isReparse) {
+            $o = @(& fsutil.exe reparsepoint query $i.FullName 2>&1 | ForEach-Object { $_.ToString() })
+            Add-Text $reparseFile ("== $Id $rel (exit $LASTEXITCODE)")
+            Add-Text $reparseFile ($o -join "`r`n")
+            $m = [regex]::Match(($o -join "`n"), 'Reparse Tag Value\s*:\s*(0x[0-9A-Fa-f]+)')
+            $tag = if ($LASTEXITCODE -eq 0 -and $m.Success) { $m.Groups[1].Value.ToLowerInvariant() } else { 'error: see reparse.txt' }
+        }
+        $rows.Add(("{0}`t{1}`t0x{2:x8}`t{3}`t{4}`t{5}`t{6}`t{7}`t{8}`t{9}`t{10}`t{11}`t{12}" -f
+                (Format-Field $rel), $type, [int]$i.Attributes,
+                $i.CreationTimeUtc.ToFileTimeUtc(), $i.LastAccessTimeUtc.ToFileTimeUtc(), $i.LastWriteTimeUtc.ToFileTimeUtc(),
+                $length, $sha, $streams, $sddl, $target, $links, $tag))
+    }
+    Write-LfLines $OutFile $rows.ToArray()
+    Add-Text $CommandsLog ('{0} {1} manifest of {2}: {3} rows{4}' -f [datetime]::UtcNow.ToString('o'), $Id, $Root,
+        ($rows.Count - 1), $(if ($NoContent) { ' (no content read)' } else { '' }))
+}
+
+# Short names (M-05): "dir /x /a" of $Root and of every directory below it
+# that Get-TreeItems enters. cmd cannot open paths over 260 characters;
+# such a directory gets its error text, which is recorded too.
+function Save-ShortNames([string] $Id, [string] $Root, [string] $OutFile, [string[]] $NoDescend = @()) {
+    $dirs = @($Root) + @(Get-TreeItems $Root $NoDescend | Where-Object {
+            $_.PSIsContainer -and ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            -not ((Split-Path -Parent $_.FullName).TrimEnd('\') -eq $Root.TrimEnd('\') -and $_.Name -in $NoDescend)
+        } | ForEach-Object { $_.FullName } | Sort-Object -CaseSensitive)
+    foreach ($d in $dirs) {
+        $o = @(& cmd.exe /d /c dir /x /a $d 2>&1 | ForEach-Object { $_.ToString() })
+        Add-Text $OutFile ("== $Id $(Get-RelPath $Root $d) (exit $LASTEXITCODE)")
+        Add-Text $OutFile ($o -join "`r`n")
+    }
 }
 
 # Parses "Index : n", "Name : x", "Description : y" from /Get-WimInfo output.
@@ -224,10 +485,15 @@ function Add-ManifestRow([string] $Id, [string] $File, [string] $Compression, [i
     }
 }
 
-function New-Tree([string] $Name, [int] $Seed, [string] $TreeProfile) {
-    $p = Join-Path $WorkDir $Name
-    $msg = & (Join-Path $Here 'New-SampleTree.ps1') -Path $p -Seed $Seed -TreeProfile $TreeProfile -LargeBytes $LargeBytes
-    Add-Text $CommandsLog ('{0} tree {1}: {2}' -f [datetime]::UtcNow.ToString('o'), $Name, ($msg -join ' '))
+# Writes a source tree under $Parent (default -WorkDir). Every line the
+# tree script prints (its summary, and for profile Metadata each native
+# command and any NOTE) goes to commands.log.
+function New-Tree([string] $Name, [int] $Seed, [string] $TreeProfile, [string] $Parent = $WorkDir) {
+    $p = Join-Path $Parent $Name
+    $msg = @(& (Join-Path $Here 'New-SampleTree.ps1') -Path $p -Seed $Seed -TreeProfile $TreeProfile -LargeBytes $LargeBytes)
+    foreach ($m in $msg) {
+        Add-Text $CommandsLog ('{0} tree {1}: {2}' -f [datetime]::UtcNow.ToString('o'), $Name, $m)
+    }
     return $p
 }
 
@@ -270,6 +536,12 @@ function Save-HostEvidence {
     foreach ($v in @('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH', 'GITHUB_REPOSITORY',
             'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA', 'GITHUB_JOB')) {
         Add-Text $f ('{0}: {1}' -f $v, [Environment]::GetEnvironmentVariable($v))
+    }
+    # Last-access updates and short-name settings change what a capture
+    # can see (M-05, M-11); recorded, never changed.
+    foreach ($q in @(@('behavior', 'query', 'disablelastaccess'), @('8dot3name', 'query'))) {
+        $o = @(& fsutil.exe @q 2>&1 | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+        Add-Text $f ('fsutil {0} (exit {1}): {2}' -f ($q -join ' '), $LASTEXITCODE, ($o -join ' / '))
     }
     $banner = Join-Path $WorkDir 'dism-help.tmp'
     [void](Invoke-Dism 'host' @('/?') $banner -AllowFailure)
@@ -544,7 +816,7 @@ if ($Set -eq 'Standard') {
     foreach ($f in $samples) { $sums.Add(('{0}  {1}' -f (Get-Sha256 $f.FullName), $f.Name)) }
     Write-LfLines (Join-Path $OutDir 'SHA256SUMS') $sums.ToArray()
 }
-else {
+elseif ($Set -eq 'Large') {
     # S08: one large pseudorandom file; the WIM stays in WorkDir and is
     # deleted after it is dumped (never uploaded). Needs room for the source
     # file and a WIM of about the same size (pseudorandom data does not
@@ -573,6 +845,123 @@ else {
         }
     }
 }
+elseif ($Set -eq 'Metadata') {
+    # S13 to S15 (OPEN-WIM-7, plan M3 section 1.4): tree-meta on a fresh
+    # NTFS VHD volume with short names enabled. The VHD stays in -WorkDir
+    # and is detached in every case.
+    $state = @{}
+    $ok = @{}
+    $vhdMeta = Join-Path $WorkDir 'tree-meta.vhdx'
+    $s13Expect = Get-Expect 'S13' 1 'metadata-uncompressed'
+    $s14Expect = Get-Expect 'S14' 1 'metadata-fast'
+    $s15Expect = Get-Expect 'S15' 1 'volume-root'
+    $metaRows = @(
+        @{ Id = 'S13'; Compress = 'none'; Comp = 'none'; Exp = $s13Expect; Root = $false },
+        @{ Id = 'S14'; Compress = 'fast'; Comp = 'xpress'; Exp = $s14Expect; Root = $false },
+        @{ Id = 'S15'; Compress = 'none'; Comp = 'none'; Exp = $s15Expect; Root = $true }
+    )
+    foreach ($r in $metaRows) { $ok[$r.Id] = $false }
+    try {
+        $treeOk = Invoke-Sample 'tree-meta' {
+            $state['vol'] = New-SampleVhd 'VHD-META' $vhdMeta 'USGPMETA'
+            $state['tree'] = New-Tree 'tree-meta' 601 'Metadata' "$($state['vol'])\"
+            # Before any capture or hash reads a file (M-11: last access).
+            Save-TreeManifest 'tree-meta-before' $state['tree'] (Join-Path $OutDir 'tree-meta-before.manifest.tsv') -NoContent
+        }
+        if ($treeOk) {
+            foreach ($r in $metaRows) {
+                $id = $r.Id
+                $wim = Join-Path $OutDir "$id.wim"
+                $dir = if ($r.Root) { "$($state['vol'])\" } else { $state['tree'] }
+                $ok[$id] = Invoke-Sample $id {
+                    Invoke-Capture $id $wim $dir $r.Exp $r.Compress
+                    Save-WimInfo $id $wim @($r.Exp)
+                    Save-Dump $wim
+                }
+            }
+            [void](Invoke-Sample 'tree-meta manifests' {
+                    Save-TreeManifest 'tree-meta' $state['tree'] (Join-Path $OutDir 'tree-meta.manifest.tsv')
+                    Save-ShortNames 'tree-meta' $state['tree'] (Join-Path $OutDir 'tree-meta.dirx.txt')
+                    # S15's source (M-19): the volume root and what Windows
+                    # put there; no content read.
+                    Save-TreeManifest 'volume-root' "$($state['vol'])\" (Join-Path $OutDir 'volume-root.manifest.tsv') $VolumeNoDescend -NoContent
+                })
+        }
+        else {
+            $Failures.Add('S13, S14, S15: not produced because tree-meta failed')
+        }
+    }
+    finally {
+        # Also after a partial New-SampleVhd (file made, letter not yet
+        # returned).
+        if (Test-Path -LiteralPath $vhdMeta) { Dismount-SampleVhd 'VHD-META' $vhdMeta }
+    }
+    foreach ($r in $metaRows) {
+        Add-ManifestRow $r.Id (Join-Path $OutDir "$($r.Id).wim") $r.Comp 1 'accept' $(if ($ok[$r.Id]) { 'produced' } else { 'not-produced' })
+    }
+
+    # S17 (OPEN-WIM-5 chunk level, M-21): mixed compressibility.
+    $treeMixed = New-Tree 'tree-mixed' 701 'Mixed'
+    Save-TreeListing 'tree-mixed' $treeMixed
+    $s17 = Join-Path $OutDir 'S17.wim'
+    $s17Expect = Get-Expect 'S17' 1 'mixed'
+    $ok['S17'] = Invoke-Sample 'S17' {
+        Invoke-Capture 'S17' $s17 $treeMixed $s17Expect 'fast'
+        Save-WimInfo 'S17' $s17 @($s17Expect)
+        Save-Dump $s17
+    }
+    Add-ManifestRow 'S17' $s17 'xpress' 1 'accept' $(if ($ok['S17']) { 'produced' } else { 'not-produced' })
+
+    # Upload cap and checksums over every sample file actually written.
+    $samples = @(Get-ChildItem -LiteralPath $OutDir -File | Where-Object { $_.Extension -eq '.wim' } | Sort-Object Name)
+    foreach ($f in $samples) {
+        if ($f.Length -gt $MaxUploadBytes) { $Failures.Add("$($f.Name): $($f.Length) bytes exceeds the $MaxUploadBytes-byte cap") }
+    }
+    $sums = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in $samples) { $sums.Add(('{0}  {1}' -f (Get-Sha256 $f.FullName), $f.Name)) }
+    Write-LfLines (Join-Path $OutDir 'SHA256SUMS') $sums.ToArray()
+}
+else {
+    # Reference (S16, M-20): DISM's own apply of S13 index 1 to a fresh
+    # NTFS VHD volume, recorded as text only. S13 comes from -SampleDir
+    # (the generate-metadata artifact of the same run) and must match the
+    # SHA-256 recorded there in both manifest.tsv and SHA256SUMS.
+    $src = (Resolve-Path -LiteralPath $SampleDir).ProviderPath
+    $s16 = Join-Path $OutDir 'S16.manifest.tsv'
+    $state = @{}
+    $ok16 = Invoke-Sample 'S16' {
+        $rows = @([System.IO.File]::ReadAllLines((Join-Path $src 'manifest.tsv'), $Utf8NoBom) |
+                Select-Object -Skip 1 | ForEach-Object { , ($_ -split "`t") } |
+                Where-Object { $_[0] -eq 'S13' })
+        if ($rows.Count -ne 1) { throw "S16: expected one S13 row in the sample manifest, found $($rows.Count)" }
+        $row = $rows[0]
+        if ($row.Count -ne 8 -or $row[7] -ne 'produced') { throw "S16: S13 row is not 'produced': $($row -join ' | ')" }
+        if ($row[1] -notmatch '^S13\.wim$') { throw "S16: unexpected S13 file name '$($row[1])'" }
+        $s13 = Join-Path $src $row[1]
+        $sha = Get-Sha256 $s13
+        if ($sha -ne $row[3]) { throw "S16: S13.wim SHA-256 $sha differs from the manifest's $($row[3])" }
+        $sumLine = '{0}  {1}' -f $sha, $row[1]
+        if (@([System.IO.File]::ReadAllLines((Join-Path $src 'SHA256SUMS'), $Utf8NoBom) | Where-Object { $_ -ceq $sumLine }).Count -ne 1) {
+            throw 'S16: S13.wim is not listed with this SHA-256 in SHA256SUMS'
+        }
+        Add-Text $CommandsLog ('{0} S16 source {1} sha256 {2}' -f [datetime]::UtcNow.ToString('o'), $row[1], $sha)
+        Save-WimInfo 'S16-source' $s13 $null
+        $vhd = Join-Path $WorkDir 'apply-s16.vhdx'
+        try {
+            $state['vol'] = New-SampleVhd 'S16' $vhd 'USGPAPPLY'
+            [void](Invoke-Dism 'S16-apply' @('/Apply-Image', "/ImageFile:$s13", '/Index:1', "/ApplyDir:$($state['vol'])\") (Join-Path $OutDir 'S16.dism.txt'))
+            Save-TreeManifest 'S16' "$($state['vol'])\" $s16 $VolumeNoDescend
+            Save-ShortNames 'S16' "$($state['vol'])\" (Join-Path $OutDir 'S16.dirx.txt') $VolumeNoDescend
+        }
+        finally {
+            if (Test-Path -LiteralPath $vhd) { Dismount-SampleVhd 'S16' $vhd }
+        }
+    }
+    Add-ManifestRow 'S16' $s16 'none' 1 'reference' $(if ($ok16) { 'produced' } else { 'not-produced' })
+    $sums = @()
+    if ($ok16) { $sums = @('{0}  {1}' -f (Get-Sha256 $s16), 'S16.manifest.tsv') }
+    Write-LfLines (Join-Path $OutDir 'SHA256SUMS') $sums
+}
 
 Write-LfLines (Join-Path $OutDir 'manifest.tsv') $Manifest.ToArray()
 Write-LfLines (Join-Path $OutDir 'editions.tsv') $Editions.ToArray()
@@ -587,6 +976,14 @@ foreach ($n in @($order + $rest)) {
     if (-not (Test-Path -LiteralPath $p)) { continue }
     Add-Text $obs "######## $n ########"
     Add-Text $obs ([System.IO.File]::ReadAllText($p, $Utf8NoBom))
+}
+
+# The Reference set uploads text only: never a sample, a disk image or
+# anything DISM applied.
+if ($Set -eq 'Reference') {
+    $notText = @(Get-ChildItem -LiteralPath $OutDir -Recurse -Force |
+            Where-Object { $_.PSIsContainer -or ($_.Extension -notin '.txt', '.tsv', '.log' -and $_.Name -ne 'SHA256SUMS') })
+    foreach ($n in $notText) { $Failures.Add("reference upload holds a non-text item: $($n.Name)") }
 }
 
 if ($Failures.Count -gt 0) {

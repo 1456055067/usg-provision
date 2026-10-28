@@ -14,7 +14,14 @@
 # only when targeting Windows. windows-sys 0.61.2 uses windows-link
 # (build = false, no import libraries).
 
-windows-sys # pure-Rust Windows API bindings pulled by tokio/socket2/mio on Windows targets; compiles no C
+# Amended (M3 WU-0, 2026-10-28; decision 0019): windows-sys =0.61.2 is also
+# a direct dependency of usgp-winapi (Windows targets only), the only crate
+# allowed to use it (deny.toml wrappers). It has `build = false` and links
+# through windows-link's raw-dylib, so it compiles no C and needs no import
+# libraries. This entry does not cover the OS-neutral crates (usgp-disk,
+# usgp-deploy, usgp-image) or the agent outside usgp-winapi:
+# check-pure-rust.sh rules 5 and 6 refuse any -sys crate there.
+windows-sys # Windows API declarations: usgp-winapi (decision 0019), and tokio/socket2/mio/errno on Windows targets; compiles no C
 
 # Review (M2 WU-0, 2026-10-27): js-sys 0.3.106 and web-sys 0.3.106 are
 # wasm-bindgen generated JavaScript/Web API bindings, reached only on

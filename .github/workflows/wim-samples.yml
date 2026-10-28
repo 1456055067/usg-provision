@@ -11,6 +11,20 @@
 #                 the WIM is deleted on the runner.
 # verify          Linux: our parser against the artifact of the same run
 #                 (crates/usgp-image/tests/dism_samples.rs, owned by WU-5).
+# generate-metadata
+#                 Windows: S13, S14, S15 (directory and security metadata,
+#                 OPEN-WIM-7; tree-meta on a fresh NTFS VHD volume) and S17
+#                 (mixed compressibility, OPEN-WIM-5 chunk level); plan M3
+#                 section 1.4. Own artifact "wim-samples-metadata" (14 days,
+#                 never committed), so the M2 consumer contract of
+#                 "wim-samples" is unchanged.
+# reference       Windows: S16, DISM's own /Apply-Image of this run's S13
+#                 index 1 to a fresh NTFS VHD, recorded as a text tree
+#                 manifest. Uploads text only, never a sample, a disk image
+#                 or any applied file ("wim-samples-reference").
+#
+# Run R3 (plan M3 WU-W3): a manual run with -f large=true, so S08 (large)
+# and S10 (long runs) are produced with S13 to S17 in one run.
 #
 # Samples are generated here and never downloaded from anywhere else
 # (decision 0006 item 3). The licence question for DISM-made test files is
@@ -24,8 +38,9 @@
 # - NIST 800-53: SA-11 (Developer Testing and Evaluation), SR-4 (Provenance),
 #   SI-7 (image integrity checks tested against tool-made files)
 # - SPEC: specs/standards/wim.md section 13; specs/standards/wim-compression.md
-#   section 7; specs/os-images.md REQ-IMG-042
-# - Decisions 0006, 0014
+#   section 7; specs/os-images.md REQ-IMG-042; specs/standards/wim.md
+#   section 6 (OPEN-WIM-7); specs/preinstall-env.md REQ-PE-017 (S16)
+# - Decisions 0006, 0014; plan M3 section 1.4
 name: wim-samples
 
 on:
@@ -187,6 +202,153 @@ jobs:
         with:
           name: wim-samples-large-observations
           path: ${{ runner.temp }}/wim-samples-large/
+          if-no-files-found: error
+          retention-days: 14
+
+  generate-metadata:
+    # Plan M3 WU-W3: S13, S14, S15, S17. Contract: scripts/wim-samples/
+    # README.md, "Metadata artifact".
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build samples S13-S15 and S17 (VHD volume, DISM, every command logged)
+        id: build
+        run: |
+          ./scripts/wim-samples/Build-Samples.ps1 `
+            -OutDir (Join-Path $env:RUNNER_TEMP 'wim-samples-metadata') `
+            -WorkDir (Join-Path $env:RUNNER_TEMP 'wim-work-metadata') `
+            -Set Metadata
+      - name: Check that no disk image is in the upload directory
+        if: ${{ !cancelled() }}
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'wim-samples-metadata'
+          if (-not (Test-Path -LiteralPath $d)) { Write-Output "::error::$d does not exist"; exit 2 }
+          $bad = @(Get-ChildItem -LiteralPath $d -Recurse -Force | Where-Object { $_.PSIsContainer -or ($_.Extension -notin '.wim', '.txt', '.tsv', '.log' -and $_.Name -ne 'SHA256SUMS') })
+          if ($bad.Count -ne 0) {
+            Write-Output "::error::unexpected items in the metadata upload: $($bad.Name -join ', ')"
+            exit 1
+          }
+      - name: Name scan of the artifact (clean-room rule 5; as CR-303)
+        # Paths and contents; contents as Latin-1 and as UTF-16LE at both
+        # byte alignments (the WIM XML is UTF-16). The bracketed pattern
+        # keeps this file from matching itself. Exit 1 on a hit, 2 if the
+        # directory is missing.
+        id: names
+        if: ${{ !cancelled() }}
+        env:
+          SCAN_DIR: ${{ runner.temp }}/wim-samples-metadata
+        run: |
+          if (-not (Test-Path -LiteralPath $env:SCAN_DIR)) {
+            Write-Output "::error::$env:SCAN_DIR does not exist"
+            exit 2
+          }
+          $rx = [regex]::new('tan[i]um', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+          $hits = @()
+          foreach ($f in @(Get-ChildItem -LiteralPath $env:SCAN_DIR -Recurse -File)) {
+            $b = [System.IO.File]::ReadAllBytes($f.FullName)
+            $texts = @($f.Name, [System.Text.Encoding]::Latin1.GetString($b), [System.Text.Encoding]::Unicode.GetString($b))
+            if ($b.Length -gt 1) { $texts += [System.Text.Encoding]::Unicode.GetString($b, 1, $b.Length - 1) }
+            if (@($texts | Where-Object { $rx.IsMatch($_) }).Count -ne 0) { $hits += $f.Name }
+          }
+          if ($hits.Count -ne 0) {
+            Write-Output "::error::clean-room name found in: $($hits -join ', ')"
+            exit 1
+          }
+          Write-Output "name scan: OK"
+      - name: Record the manifest in the job summary
+        if: ${{ !cancelled() }}
+        run: |
+          $m = Join-Path $env:RUNNER_TEMP 'wim-samples-metadata\manifest.tsv'
+          $lines = @('### wim-samples-metadata manifest', '```text')
+          if (Test-Path -LiteralPath $m) { $lines += Get-Content -LiteralPath $m } else { $lines += 'manifest.tsv missing' }
+          $lines += '```'
+          $lines | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+      - name: Upload the metadata samples and observations (14 days; never committed)
+        if: ${{ !cancelled() && steps.names.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wim-samples-metadata
+          path: ${{ runner.temp }}/wim-samples-metadata/
+          if-no-files-found: error
+          retention-days: 14
+
+  reference:
+    # S16 (M-20): DISM's apply of this run's S13 as the fidelity reference.
+    # Text only: the VHD is detached and left on the runner.
+    needs: generate-metadata
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the metadata samples of this run (never from elsewhere; decision 0006)
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: wim-samples-metadata
+          path: ${{ runner.temp }}/wim-samples-metadata
+      - name: Build S16 (DISM /Apply-Image of S13 index 1 to a fresh VHD; tree manifest)
+        id: build
+        run: |
+          ./scripts/wim-samples/Build-Samples.ps1 `
+            -OutDir (Join-Path $env:RUNNER_TEMP 'wim-samples-reference') `
+            -WorkDir (Join-Path $env:RUNNER_TEMP 'wim-work-reference') `
+            -SampleDir (Join-Path $env:RUNNER_TEMP 'wim-samples-metadata') `
+            -Set Reference
+      - name: Check that the upload is text only
+        # Build-Samples.ps1 checks this too; this step guards the upload
+        # itself. Allowed: .txt, .tsv, .log and SHA256SUMS, no directories.
+        if: ${{ !cancelled() }}
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'wim-samples-reference'
+          if (-not (Test-Path -LiteralPath $d)) { Write-Output "::error::$d does not exist"; exit 2 }
+          $bad = @(Get-ChildItem -LiteralPath $d -Recurse -Force | Where-Object { $_.PSIsContainer -or ($_.Extension -notin '.txt', '.tsv', '.log' -and $_.Name -ne 'SHA256SUMS') })
+          if ($bad.Count -ne 0) {
+            Write-Output "::error::non-text items in the reference upload: $($bad.Name -join ', ')"
+            exit 1
+          }
+      - name: Name scan of the reference text (clean-room rule 5; as CR-303)
+        # Paths and contents; contents as Latin-1 and as UTF-16LE at both
+        # byte alignments (the WIM XML is UTF-16). The bracketed pattern
+        # keeps this file from matching itself. Exit 1 on a hit, 2 if the
+        # directory is missing.
+        id: names
+        if: ${{ !cancelled() }}
+        env:
+          SCAN_DIR: ${{ runner.temp }}/wim-samples-reference
+        run: |
+          if (-not (Test-Path -LiteralPath $env:SCAN_DIR)) {
+            Write-Output "::error::$env:SCAN_DIR does not exist"
+            exit 2
+          }
+          $rx = [regex]::new('tan[i]um', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+          $hits = @()
+          foreach ($f in @(Get-ChildItem -LiteralPath $env:SCAN_DIR -Recurse -File)) {
+            $b = [System.IO.File]::ReadAllBytes($f.FullName)
+            $texts = @($f.Name, [System.Text.Encoding]::Latin1.GetString($b), [System.Text.Encoding]::Unicode.GetString($b))
+            if ($b.Length -gt 1) { $texts += [System.Text.Encoding]::Unicode.GetString($b, 1, $b.Length - 1) }
+            if (@($texts | Where-Object { $rx.IsMatch($_) }).Count -ne 0) { $hits += $f.Name }
+          }
+          if ($hits.Count -ne 0) {
+            Write-Output "::error::clean-room name found in: $($hits -join ', ')"
+            exit 1
+          }
+          Write-Output "name scan: OK"
+      - name: Upload the S16 reference (text only; 14 days)
+        if: ${{ !cancelled() && steps.names.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wim-samples-reference
+          path: ${{ runner.temp }}/wim-samples-reference/
           if-no-files-found: error
           retention-days: 14
 

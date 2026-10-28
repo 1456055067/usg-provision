@@ -294,6 +294,33 @@ M2 CI and local gates (plan WU-3b, WU-9, WU-10, WU-W):
 - **docs**: `docs/BUILDING.md` section 8, PostgreSQL for tests, with the
   three database roles and the private-key mode rules.
 
+M3 toolchain, Windows target and gates (M3 plan WU-0, decision 0019):
+
+- **usgp-winapi**: new skeleton crate for the pre-boot agent's Windows API
+  calls. It is the only crate that may use `windows-sys`, and its
+  `src/ffi.rs` is the only file in the workspace that may allow `unsafe`
+  (the crate sets `unsafe_code = "deny"`; every other crate keeps
+  `forbid`). On other targets the crate is empty. A test in `ffi.rs`
+  checks that `windows-sys` links (raw-dylib) in a static-CRT build.
+- **deps**: workspace dependencies `windows-sys` `=0.61.2` (declarations
+  only, through `windows-link`; compiles no C) with the plan's Win32
+  feature list, and `httparse` 1.x. Both are MIT OR Apache-2.0.
+- **build**: `.cargo/config.toml` builds `x86_64-pc-windows-msvc` with
+  `+crt-static`, so the agent needs no VC runtime in Windows PE. On that
+  target the FIPS module is pinned to its DLL build
+  (`AWS_LC_FIPS_SYS_STATIC_x86_64_pc_windows_msvc=0`); AWS-LC builds a
+  static FIPS module only on Linux.
+- **ci**: `windows-agent` job on `windows-2025` (skeleton; WU-15 fills
+  it). It records the FIPS build toolchain, builds the release agent and
+  checks the FIPS module's CRT setting, the imported DLLs of the agent and
+  the module (no dynamic C runtime), and the FIPS start-up check from a
+  staging directory. It records the agent's dependency tree and whether
+  `usgp-crypto`'s tokio pulls in `windows-sys`, then runs clippy, build
+  and tests for the crates that compile on Windows.
+- **scripts**: `scripts/gates.sh` lints the C-free crates for the Windows
+  target when that target is installed, and reports the `windows-agent`
+  job as NOT RUN.
+
 ### Changed
 
 - **ci**: the `gates` job runs `usgp-server --self-check` and requires
@@ -329,6 +356,20 @@ M2 CI and local gates (plan WU-3b, WU-9, WU-10, WU-W):
   run. `scripts/check-fips-linkage.sh` runs `usgp-relay --self-check`.
   `scripts/test-check-names.sh` asserts that the name gate's exclusions
   match decision 0005.
+
+- **scripts**: `scripts/check-pure-rust.sh` adds the decision 0019 rules.
+  `usgp-disk`, `usgp-deploy` and `usgp-image` may have no `-sys` crate or
+  native build helper on any target, allowlisted or not (only the FIPS
+  chain under `usgp-crypto` is pruned). The agent's tree for
+  `x86_64-pc-windows-msvc` may hold only the AWS-LC chain under
+  `usgp-crypto` and `windows-sys` under `usgp-winapi`. Every member except
+  `usgp-winapi` must use the workspace lints, and only
+  `crates/usgp-winapi/src/ffi.rs` may allow `unsafe_code`. The
+  `windows-sys` allowlist entry is amended to match.
+- **supply chain**: `deny.toml` confines `windows-sys` to `usgp-winapi`
+  and its existing tokio, socket2, mio and errno paths, `windows-link` to
+  `windows-sys`, `libloading` and `parking_lot_core`, and `httparse` to
+  hyper and `usgp-preboot-agent`.
 
 ### Removed
 

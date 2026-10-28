@@ -21,3 +21,20 @@ AWS_LC_FIPS_SYS_STATIC_x86_64_unknown_linux_gnu = { value = "1", force = true }
 AWS_LC_FIPS_SYS_STATIC_aarch64_unknown_linux_gnu = { value = "1", force = true }
 AWS_LC_FIPS_SYS_STATIC_x86_64_unknown_linux_musl = { value = "1", force = true }
 AWS_LC_FIPS_SYS_STATIC_aarch64_unknown_linux_musl = { value = "1", force = true }
+# On Windows the FIPS module can only be built as a DLL (AWS-LC's CMake
+# refuses a static FIPS build off Linux). Pin that per target so the CI-wide
+# AWS_LC_FIPS_SYS_STATIC=1 (meant for Linux) cannot select a failing static
+# build. The DLL still uses the static CRT (below) through cmake-rs.
+AWS_LC_FIPS_SYS_STATIC_x86_64_pc_windows_msvc = { value = "0", force = true }
+
+# Pre-boot agent target (M3 plan section 1.2(d), WU-0). Windows PE ships no
+# VC runtime, so every Windows MSVC artifact links the C runtime statically.
+# aws-lc-fips-sys reads `crt-static` from CARGO_CFG_TARGET_FEATURE and builds
+# the module with /MT to match. Build with an explicit
+# `--target x86_64-pc-windows-msvc` so host build scripts and proc macros are
+# not affected. RUSTFLAGS in the environment overrides this table.
+#
+# COMPLIANCE MAPPING:
+# - NIST 800-53: CM-6 (Configuration Settings), CM-2 (Baseline Configuration)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

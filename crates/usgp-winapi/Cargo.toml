@@ -1,0 +1,31 @@
+[package]
+name = "usgp-winapi"
+description = "Windows API wrappers for the pre-boot agent (the only crate with unsafe FFI; decision 0019)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Decision 0019: windows-sys (declarations only, raw-dylib through
+# windows-link, no C) is used by this crate only; deny.toml enforces it.
+# On other targets the crate is empty.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+# A copy of the workspace lints with one change: `unsafe_code` is "deny", not
+# "forbid", so that src/ffi.rs alone can allow it (decision 0019 item 2).
+# scripts/check-pure-rust.sh fails if any other file allows `unsafe_code`.
+# Keep the rest in step with [workspace.lints] in the root Cargo.toml.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+undocumented_unsafe_blocks = "deny"

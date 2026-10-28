@@ -207,6 +207,199 @@ jobs:
           fi
           echo "shipped binaries: name scan and REQ-PE-001 OK (${#bins[@]} files)"
 
+  windows-agent:
+    # M3 WU-0 skeleton (plan sections 1.2(d) and 10.2; decision 0019); WU-15
+    # adds the linkage map check, VHD tests and the DISM apply oracle.
+    # Native x86_64-pc-windows-msvc build with the static CRT
+    # (.cargo/config.toml). Records the WU-0 probes in the job summary:
+    #   1. aws-lc-fips-sys builds and passes its power-on self-test with a
+    #      static CRT (if not: stop and report, risk R-1);
+    #   2. the agent's cargo tree on the Windows target;
+    #   3. whether tokio, as usgp-crypto uses it, pulls in windows-sys.
+    # Then lints, builds and tests the crates that compile on Windows. Only
+    # this job compiles the cfg(windows) code (usgp-winapi's ffi.rs).
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      # The FIPS module is a DLL on Windows: AWS-LC builds a static FIPS
+      # module only on Linux. .cargo/config.toml pins this per target too.
+      AWS_LC_FIPS_SYS_STATIC: "0"
+      GOTOOLCHAIN: local
+      GOPROXY: "off"
+      WIN_CRATES: >-
+        usgp-common usgp-proto usgp-crypto usgp-image usgp-disk usgp-wincfg
+        usgp-deploy usgp-winapi usgp-preboot-agent
+    steps:
+      - name: Check out without CRLF conversion (fixtures and hashes as on Linux)
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          rustup show
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-agent-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+      - name: FIPS module build toolchain (Windows; recorded, not yet pinned)
+        # AWS-LC FIPS on Windows needs Go, Perl, CMake, Ninja, NASM, MSVC and
+        # libclang (bindgen; no pre-generated Windows bindings ship).
+        # Strawberry Perl, never Git's MSYS perl.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          foreach ($p in 'nasm', 'ninja') {
+            if (-not (Get-Command $p -ErrorAction SilentlyContinue)) {
+              choco install $p -y --no-progress
+            }
+          }
+          $nasmDir = 'C:\Program Files\NASM'
+          if (Test-Path -LiteralPath $nasmDir) {
+            Add-Content -LiteralPath $env:GITHUB_PATH -Value $nasmDir -Encoding utf8
+            $env:PATH = "$nasmDir;$env:PATH"
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path -LiteralPath (Join-Path $llvm 'libclang.dll'))) {
+            Write-Output "::error::libclang.dll not found in $llvm (bindgen needs it)"
+            exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm" -Encoding utf8
+          foreach ($t in 'go', 'cmake', 'ninja', 'nasm', 'perl') {
+            if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
+              Write-Output "::error::$t not found"
+              exit 1
+            }
+          }
+          $perl = (Get-Command perl).Source
+          if ($perl -match '\\Git\\') {
+            Write-Output "::error::perl resolves to Git's MSYS perl ($perl); Strawberry Perl is required"
+            exit 1
+          }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productDisplayVersion
+          $lines = @('### windows-agent: FIPS module build toolchain (recorded)', '```text')
+          $lines += "go:     $(go version)"
+          $lines += "cmake:  $((cmake --version)[0])"
+          $lines += "ninja:  $(ninja --version)"
+          $lines += "nasm:   $(nasm -v)"
+          $lines += "perl:   $perl $(perl -e 'print $^V')"
+          $lines += "clang:  $((& (Join-Path $llvm 'clang.exe') --version)[0])"
+          $lines += "msvc:   Visual Studio $vs"
+          $lines += "rustc:  $(rustc -V)"
+          $lines += "runner: $env:ImageOS $env:ImageVersion"
+          $lines += '```'
+          $lines | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+      - name: "Probe 1: FIPS module build, static CRT and self-test (release agent)"
+        # Records the answer either way; fails the job if any part fails.
+        # The agent stub's main is the FIPS start-up check (exit 0 only in
+        # FIPS mode); WU-12 adds --self-test with the module version.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Note([string]$s) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $s -Encoding utf8 }
+          function Fail([string]$s) {
+            Note "RESULT: FAIL - $s"
+            Note '```'
+            Write-Output "::error::probe 1 failed: $s"
+            exit 1
+          }
+          Note '### Probe 1: aws-lc-fips-sys on x86_64-pc-windows-msvc with +crt-static'
+          Note '```text'
+          cargo build --locked --release --target $env:TARGET -p usgp-preboot-agent
+          if ($LASTEXITCODE -ne 0) { Fail "cargo build exited $LASTEXITCODE (FIPS module or agent did not build)" }
+          Note 'build: OK'
+          $out = "target\$env:TARGET\release"
+          # The CRT model the module was configured with.
+          $caches = @(Get-ChildItem -Path "$out\build" -Filter CMakeCache.txt -Recurse |
+            Where-Object { $_.FullName -match '\\aws-lc-fips-sys-' })
+          if ($caches.Count -eq 0) { Fail 'no CMakeCache.txt for aws-lc-fips-sys' }
+          foreach ($c in $caches) {
+            $rt = @(Select-String -LiteralPath $c.FullName -Pattern '^CMAKE_MSVC_RUNTIME_LIBRARY:[A-Z]*=(.*)$')
+            $shared = @(Select-String -LiteralPath $c.FullName -Pattern '^BUILD_SHARED_LIBS:[A-Z]*=(.*)$')
+            $rtv = if ($rt.Count) { $rt[0].Matches[0].Groups[1].Value } else { '(unset)' }
+            $shv = if ($shared.Count) { $shared[0].Matches[0].Groups[1].Value } else { '(unset)' }
+            Note "module CMake: CMAKE_MSVC_RUNTIME_LIBRARY=$rtv BUILD_SHARED_LIBS=$shv"
+            if ($rtv -ne 'MultiThreaded') { Fail "FIPS module CRT is '$rtv', expected MultiThreaded (/MT)" }
+          }
+          # Imported DLLs of the agent and the module: no VC runtime or UCRT.
+          $readobj = 'C:\Program Files\LLVM\bin\llvm-readobj.exe'
+          function Imports([string]$f) {
+            & $readobj --coff-imports $f | Select-String -Pattern '^\s*Name:\s*(\S+\.dll)\s*$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value.ToLowerInvariant() } | Sort-Object -Unique
+          }
+          $crt = '^(vcruntime|msvcp|msvcr|ucrtbase|concrt|vccorlib|api-ms-win-crt-)'
+          $exe = Join-Path $out 'usgp-preboot-agent.exe'
+          $dlls = @(Get-ChildItem -Path "$out\build" -Filter '*.dll' -Recurse |
+            Where-Object { $_.FullName -match '\\aws-lc-fips-sys-' -and $_.Name -match '^aws_lc_fips_.*\.dll$' })
+          Note "module DLLs: $(if ($dlls.Count) { ($dlls | ForEach-Object Name) -join ', ' } else { 'none (static module)' })"
+          foreach ($f in @($exe) + @($dlls | ForEach-Object FullName)) {
+            $imp = @(Imports $f)
+            Note "imports of $(Split-Path -Leaf $f): $($imp -join ' ')"
+            $bad = @($imp | Where-Object { $_ -match $crt })
+            if ($bad.Count) { Fail "$(Split-Path -Leaf $f) imports a dynamic C runtime: $($bad -join ' ')" }
+          }
+          # Run from a staging directory holding only the agent and the
+          # module DLL, as it would sit in Windows PE.
+          $stage = Join-Path $env:RUNNER_TEMP 'agent-stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -LiteralPath $exe -Destination $stage
+          foreach ($d in $dlls) { Copy-Item -LiteralPath $d.FullName -Destination $stage }
+          $msg = & (Join-Path $stage 'usgp-preboot-agent.exe') 2>&1
+          $code = $LASTEXITCODE
+          Note "agent FIPS start-up check: exit $code $msg"
+          if ($code -ne 0) { Fail "agent FIPS start-up check exited $code" }
+          Note 'RESULT: PASS - module builds with /MT, no dynamic CRT import, FIPS mode active'
+          Note '```'
+      - name: "Probes 2 and 3: the agent's tree on Windows; tokio and windows-sys in usgp-crypto"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $agent = cargo tree --locked -p usgp-preboot-agent -e normal,build --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $crypto = cargo tree --locked -p usgp-crypto -e normal,build --target $env:TARGET --prefix none
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $ws = @($crypto | Where-Object { $_ -match '^windows-sys v' })
+          $lines = @('### Probe 2: cargo tree -p usgp-preboot-agent -e normal,build (x86_64-pc-windows-msvc)', '```text')
+          $lines += $agent
+          $lines += '```'
+          $lines += '### Probe 3: windows-sys in the usgp-crypto tree (tokio as usgp-crypto uses it)'
+          $lines += '```text'
+          $lines += $(if ($ws.Count) { "yes: $($ws -join ', ')" } else { 'no' })
+          $lines += '```'
+          $lines | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+      - name: Clippy for the Windows target (the only lint of cfg(windows) code)
+        run: |
+          $pkgs = $env:WIN_CRATES -split ' ' | ForEach-Object { '-p', $_ }
+          cargo clippy --locked --target $env:TARGET --all-targets @pkgs -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Build and test the Windows crates (static CRT)
+        # Must include usgp-winapi's raw-dylib link probe (ffi.rs).
+        run: |
+          $pkgs = $env:WIN_CRATES -split ' ' | ForEach-Object { '-p', $_ }
+          cargo build --locked --target $env:TARGET @pkgs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $log = Join-Path $env:RUNNER_TEMP 'windows-tests.log'
+          cargo test --locked --target $env:TARGET @pkgs 2>&1 | Tee-Object -FilePath $log
+          $status = $LASTEXITCODE
+          if ($status -ne 0) {
+            Write-Output "::error::cargo test exited $status"
+            exit 1
+          }
+          $plain = (Get-Content -LiteralPath $log) -replace '\x1b\[[0-9;]*m', ''
+          if (-not ($plain -match '^test tests::windows_sys_links_and_agrees_with_std \.\.\. ok$')) {
+            Write-Output '::error::usgp-winapi link probe did not run and pass'
+            exit 1
+          }
+          Write-Output 'usgp-winapi link probe: ok'
+
   testing-workspaces:
     # Test-only workspaces (plan WU-9, WU-10): excluded from the product
     # workspace, never shipped, held to the same lint, test and pure-Rust

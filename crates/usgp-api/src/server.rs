@@ -133,10 +133,15 @@ pub const MAINTENANCE_EVERY: Duration = Duration::from_secs(60);
 
 impl<S: Store + 'static> Api<S> {
     /// One maintenance pass: summary of capped unauthenticated refusals,
-    /// expired upload sessions, and a checkpoint if one is due.
+    /// expired upload sessions, expired device sessions, lost jobs, and a
+    /// checkpoint if one is due.
     pub async fn maintenance(&self) {
         self.flush_unauthenticated_summary().await;
         let _ = self.expire_uploads().await;
+        // M3: pending device sessions past their expiry, and running jobs
+        // not heard from for `jobs.lost_after_s`.
+        let _ = self.expire_device_sessions().await;
+        let _ = self.mark_lost_jobs().await;
         self.checkpoint(false).await;
     }
 
@@ -153,6 +158,28 @@ impl<S: Store + 'static> Api<S> {
     /// parse); it is a claim, not an identity (AU-3; finding NIST-005).
     pub async fn audit_tls_failure(
         &self,
+        remote: SocketAddr,
+        class: &'static str,
+        detail: &str,
+        presented: Option<&str>,
+        chained_to_trust_anchor: bool,
+    ) {
+        self.audit_tls_failure_on(
+            Interface::Api,
+            remote,
+            class,
+            detail,
+            presented,
+            chained_to_trust_anchor,
+        )
+        .await;
+    }
+
+    /// [`Self::audit_tls_failure`] for the listener `interface` (the
+    /// device listener records `device_api`, AU-3 "where").
+    pub(crate) async fn audit_tls_failure_on(
+        &self,
+        interface: Interface,
         remote: SocketAddr,
         class: &'static str,
         detail: &str,
@@ -176,7 +203,7 @@ impl<S: Store + 'static> Api<S> {
             "auth.tls.failed",
             Outcome::Refused,
             Actor::unauthenticated(presented),
-            Interface::Api,
+            interface,
         )
         .source(&remote.to_string())
         .reason(class)
@@ -200,14 +227,14 @@ struct SourceCount {
 /// Entries exist only while a source has a connection, so the map holds
 /// at most `max_connections` entries.
 #[derive(Debug)]
-struct SourceTable {
+pub(crate) struct SourceTable {
     max_open: usize,
     max_handshaking: usize,
     counts: Mutex<HashMap<IpAddr, SourceCount>>,
 }
 
 impl SourceTable {
-    fn new(max_open: usize, max_handshaking: usize) -> Arc<Self> {
+    pub(crate) fn new(max_open: usize, max_handshaking: usize) -> Arc<Self> {
         Arc::new(Self {
             max_open,
             max_handshaking,
@@ -217,7 +244,7 @@ impl SourceTable {
 
     /// A slot for a new connection from `ip` (in handshake), or `None` if
     /// its source is at a cap.
-    fn admit(self: &Arc<Self>, ip: IpAddr) -> Option<SourceSlot> {
+    pub(crate) fn admit(self: &Arc<Self>, ip: IpAddr) -> Option<SourceSlot> {
         let key = source_key(ip);
         let mut m = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
         let c = m.entry(key).or_default();
@@ -246,7 +273,7 @@ impl SourceTable {
 
 /// One connection's place in its source's counts; released on drop.
 #[derive(Debug)]
-struct SourceSlot {
+pub(crate) struct SourceSlot {
     table: Arc<SourceTable>,
     key: IpAddr,
     handshaking: bool,
@@ -254,7 +281,7 @@ struct SourceSlot {
 
 impl SourceSlot {
     /// The handshake ended (either way).
-    fn handshake_done(&mut self) {
+    pub(crate) fn handshake_done(&mut self) {
         if std::mem::take(&mut self.handshaking) {
             let mut m = self
                 .table
@@ -377,13 +404,13 @@ struct Held {
     _uncertified: Option<OwnedSemaphorePermit>,
 }
 
-enum Either<A, B> {
+pub(crate) enum Either<A, B> {
     Left(A),
     Right(B),
 }
 
 /// The output of whichever future finishes first (`a` is polled first).
-async fn race<A: Future, B: Future>(
+pub(crate) async fn race<A: Future, B: Future>(
     mut a: Pin<&mut A>,
     mut b: Pin<&mut B>,
 ) -> Either<A::Output, B::Output> {

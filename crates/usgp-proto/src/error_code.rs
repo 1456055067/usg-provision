@@ -1,5 +1,5 @@
 //! Machine-readable reason codes for API errors, failed content and
-//! not-usable packages.
+//! not-usable packages, and (M3) device session refusals and job failures.
 //!
 //! A code is short ASCII: it starts with `a`-`z` and continues with
 //! `a`-`z`, `0`-`9`, `_`, `.`, `-` or `:`, up to
@@ -7,9 +7,10 @@
 //! colon, for example `pe_architecture_not_supported:arm64` or
 //! `too_long:display_name` ([`ErrorCode::with_param`]).
 //!
-//! The constants in [`codes`] are the codes named by the plan (sections
-//! 3.2, 5.7 and 7). Codes produced by other crates (for example
-//! `usgp-image` WIM check reasons) are wrapped with [`ErrorCode::new`].
+//! The constants in [`codes`] are the codes named by the M2 plan (sections
+//! 3.2, 5.7 and 7) and the M3 plan (sections 3.1 to 3.6). Codes produced
+//! by other crates (for example `usgp-image` WIM check reasons) are
+//! wrapped with [`ErrorCode::new`].
 //! A code never contains operator text or secrets; the message that goes
 //! with it is separate.
 
@@ -20,6 +21,8 @@
 // - SPEC: specs/os-images.md#REQ-IMG-022 (clear failure reasons)
 // - SPEC: specs/operator-access.md#REQ-AUD-006 (the operator is told an
 //   action failed because it could not be recorded: `audit_unavailable`)
+// - SPEC: specs/targeting.md#REQ-TGT-013 (one refusal code for every bad
+//   code), specs/progress.md#REQ-JOB-005 (failure reasons named)
 
 use std::borrow::Cow;
 use std::fmt;
@@ -282,6 +285,68 @@ pub mod codes {
         UNAVAILABLE = "unavailable";
         /// 500: an internal error; details are in the server log only.
         INTERNAL = "internal";
+
+        // M3 device session (plan section 3.1).
+        /// 401: no bearer token, or one that names no live session.
+        INVALID_TOKEN = "invalid_token";
+        /// 429: a session-open, code-attempt or capacity limit was hit.
+        RATE_LIMITED = "rate_limited";
+        /// 403: the session is not authorised yet; nothing is listed.
+        NOT_AUTHORISED = "not_authorised";
+        /// 422: the code was not accepted. The same code for a wrong,
+        /// expired, used or revoked code (no oracle, REQ-TGT-013); the
+        /// error carries `attempts_left`.
+        CODE_NOT_ACCEPTED = "code_not_accepted";
+        /// 403: the session was refused (attempts exhausted or an
+        /// operator refused it).
+        SESSION_REFUSED = "session_refused";
+        /// 403: the session has expired or ended.
+        SESSION_ENDED = "session_ended";
+        /// 409: the request does not fit the session's state (for example a
+        /// disk before a package, or a confirm that does not match the
+        /// choices).
+        WRONG_STATE = "wrong_state";
+        /// 409: cancel after the wipe confirmation (REQ-TGT-011).
+        JOB_STARTED = "job_started";
+        /// 409: chunk fetch or report for a job that is not running.
+        JOB_NOT_RUNNING = "job_not_running";
+        /// 422: the chosen package was not offered to this session.
+        PACKAGE_NOT_OFFERED = "package_not_offered";
+        /// 422: the chosen disk is smaller than the package needs
+        /// (REQ-DISK-004).
+        DISK_TOO_SMALL = "disk_too_small";
+        /// 422: the approval's display code is not the session's
+        /// (plan section 3.5).
+        DISPLAY_CODE_MISMATCH = "display_code_mismatch";
+
+        // M3 agent-side failures (plan sections 3.2 to 3.4; REQ-JOB-005).
+        /// The job plan's signature, type, schema or key did not verify.
+        PLAN_SIGNATURE_INVALID = "plan_signature_invalid";
+        /// The job plan does not carry the nonce the agent sent.
+        PLAN_NONCE_MISMATCH = "plan_nonce_mismatch";
+        /// The job plan names another session, job or disk.
+        PLAN_BINDING_MISMATCH = "plan_binding_mismatch";
+        /// The content manifest's signature or digest does not match the
+        /// plan.
+        CONTENT_MANIFEST_MISMATCH = "content_manifest_mismatch";
+        /// A chunk's SHA-256 does not match the signed content manifest
+        /// (REQ-PE-016, REQ-JOB-008).
+        CHUNK_DIGEST_MISMATCH = "chunk_digest_mismatch";
+        /// The opened disk is not the one the plan names (REQ-DISK-015).
+        DISK_IDENTITY_MISMATCH = "disk_identity_mismatch";
+        /// A step ran past its timeout (REQ-JOB-011).
+        STEP_TIMEOUT = "step_timeout";
+        /// No progress for longer than the stall timeout (REQ-JOB-011).
+        STALLED = "stalled";
+        /// Transient failures went past the retry bound (REQ-JOB-007).
+        RETRIES_EXHAUSTED = "retries_exhausted";
+
+        // M3 progress and boot policy (plan sections 3.4 and 3.6).
+        /// 409: the report breaks the step order (REQ-JOB-013).
+        PROGRESS_OUT_OF_ORDER = "progress_out_of_order";
+        /// The boot-policy list failed its signature, boot-service or
+        /// generation check; the last good list is kept.
+        BOOT_POLICY_REJECTED = "boot_policy_rejected";
     }
 }
 

@@ -11,9 +11,10 @@
 use std::time::Instant;
 
 use usgp_tftp::{
-    Admission, ErrorCode, FailReason, Opcode, Outcome, Packet, ParseError, ReadTransfer,
-    RefuseReason, ServerConfig, Step, admit_read, encode_ack, encode_data, encode_error,
-    encode_request, foreign_tid_error, parse,
+    Admission, BlockWrap, ErrorCode, FailReason, NameRefusal, Opcode, Outcome, Packet, ParseError,
+    ReadTransfer, RefuseReason, ServerConfig, Step, WindowConfig, admit_read, admit_read_with,
+    encode_ack, encode_data, encode_error, encode_request, foreign_tid_error,
+    normalize_request_name, parse,
 };
 
 const NAME: &[u8] = b"usgp-test-payload.efi";
@@ -596,6 +597,157 @@ fn embedded_nul_ends_filename() {
         Ok(Packet::Rrq(r)) => assert_eq!(r.filename, b"a"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn normalised_traversal_names_refused() {
+    // M3: request names are normalised (backslash to slash, one leading
+    // separator dropped) and still refused when they could reach outside
+    // the published set (REQ-BOOT-041). Every form refuses; none echoes the
+    // name.
+    let long = vec![b'a'; 200];
+    let names: [&[u8]; 14] = [
+        b"..\\x",
+        b"\\..\\x",
+        b"/../x",
+        b"Boot\\..\\..\\etc\\passwd",
+        b"\\\\server\\share",
+        b"//etc/passwd",
+        b"C:\\Windows",
+        b"%2e%2e/x",
+        "caf\u{e9}.efi".as_bytes(),
+        b"./usgp-test-payload.efi",
+        b"a\\.\\b",
+        b"a\\\\b",
+        b"",
+        &long,
+    ];
+    for name in names {
+        let r = normalize_request_name(name);
+        assert!(r.is_err(), "{name:?} accepted as {r:?}");
+        let msg = r.unwrap_err().to_string();
+        assert!(!msg.contains("passwd") && !msg.contains("server"));
+    }
+    assert_eq!(
+        normalize_request_name(b"\\..\\x"),
+        Err(NameRefusal::DotComponent)
+    );
+    // Normal forms are accepted and match case-insensitively.
+    let n = normalize_request_name(b"\\BOOT\\Boot.SDI").unwrap();
+    assert_eq!(n.as_str(), "BOOT/Boot.SDI");
+    assert!(n.matches(b"Boot/boot.sdi"));
+}
+
+// ---- Windowsize and wraparound (M3 WU-6) --------------------------------
+
+fn admit_win(
+    opts: &[(&[u8], &[u8])],
+    data: &[u8],
+    cfg: &ServerConfig,
+    w: &WindowConfig,
+) -> Option<Admission> {
+    match parse(&rrq(opts)) {
+        Ok(Packet::Rrq(r)) => Some(admit_read_with(&r, data, cfg, w, Instant::now())),
+        _ => None,
+    }
+}
+
+#[test]
+fn windowsize_bounds() {
+    let data = file(10);
+    for (v, want) in [
+        (&b"0"[..], None),
+        (b"1", Some(&b"1"[..])),
+        (b"8", Some(b"8")),
+        (b"64", Some(b"8")),
+        (b"65535", Some(b"8")),
+        (b"65536", None),
+        (b"00004", Some(b"4")),
+        (b"18446744073709551616", None),
+        (b"four", None),
+    ] {
+        let Admission::Accept { first, .. } = admit_win(
+            &[(b"windowsize", v)],
+            &data,
+            &ServerConfig::default(),
+            &WindowConfig::default(),
+        )
+        .unwrap() else {
+            panic!("refused {v:?}");
+        };
+        let got = oack_of(&first).unwrap();
+        match want {
+            None => assert_eq!(got, None, "{v:?}"),
+            Some(w) => assert_eq!(
+                got,
+                Some(vec![(b"windowsize".to_vec(), w.to_vec())]),
+                "{v:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn windowsize_duplicate_is_malformed() {
+    assert_eq!(
+        parse(&rrq(&[(b"windowsize", b"4"), (b"WINDOWSIZE", b"8")])),
+        Err(ParseError::DuplicateOption)
+    );
+}
+
+#[test]
+fn wrap_modes_accept_65536_blocks_off_refuses() {
+    let data = file(65535 * 8);
+    for (wrap, accepted) in [
+        (BlockWrap::Zero, true),
+        (BlockWrap::One, true),
+        (BlockWrap::Off, false),
+    ] {
+        let w = WindowConfig {
+            max_window_size: 8,
+            block_wrap: wrap,
+        };
+        let a = admit_win(&[(b"blksize", b"8")], &data, &big_cfg(), &w).unwrap();
+        match (a, accepted) {
+            (Admission::Accept { transfer, .. }, true) => {
+                assert_eq!(transfer.last_index(), 65536);
+                assert_eq!(transfer.last_block(), wrap.wire(65536));
+            }
+            (Admission::Refuse { reason, .. }, false) => {
+                assert_eq!(reason, RefuseReason::TooManyBlocks);
+            }
+            (a, _) => panic!("{wrap:?}: {a:?}"),
+        }
+    }
+}
+
+#[test]
+fn malformed_and_foreign_packets_during_window_ignored() {
+    let data = file(512 * 20);
+    let now = Instant::now();
+    let Admission::Accept { mut transfer, .. } = admit_win(
+        &[(b"windowsize", b"4")],
+        &data,
+        &ServerConfig::default(),
+        &WindowConfig::default(),
+    )
+    .unwrap() else {
+        panic!("refused");
+    };
+    assert!(matches!(
+        transfer.on_packet(&encode_ack(0), &data, now),
+        Step::Send(_)
+    ));
+    for pkt in [
+        &[0u8, 4, 0][..],
+        &[0, 4, 0, 1, 9],
+        &[],
+        &[0, 9, 0, 1],
+        &[0, 4],
+    ] {
+        assert_eq!(transfer.on_packet(pkt, &data, now), Step::Wait, "{pkt:?}");
+    }
+    assert!(transfer.pending_sends(), "window still queued");
 }
 
 // ---- Deterministic random sweep (fuzz invariants, plan §10.4) ---------

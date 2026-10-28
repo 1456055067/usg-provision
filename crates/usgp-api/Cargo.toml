@@ -20,6 +20,8 @@ hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
 serde_json.workspace = true
+# M3 (plan WU-9): session tokens and code bytes are wiped after use.
+zeroize.workspace = true
 
 [lints]
 workspace = true

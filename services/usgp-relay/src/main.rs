@@ -111,6 +111,11 @@ fn check_config(args: &ConfigArgs) -> ExitCode {
             if let Some(n) = report.suppression_entries {
                 println!("suppression entries: {n}");
             }
+            match report.boot_policy {
+                ("disabled", _) => {}
+                (state, Some(g)) => println!("boot policy: {state} (generation {g})"),
+                (state, None) => println!("boot policy: {state}"),
+            }
             ExitCode::from(report.exit_code())
         }
         Err(e) => {

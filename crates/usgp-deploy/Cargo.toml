@@ -1,6 +1,6 @@
 [package]
 name = "usgp-deploy"
-description = "Job plan model and step engine (OS-neutral)"
+description = "Job plan verification and the OS-neutral step engine (verify, partition, apply, boot entry, report)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,21 @@ usgp-proto.workspace = true
 usgp-disk.workspace = true
 usgp-image.workspace = true
 usgp-wincfg.workspace = true
+# M3 WU-8: SHA-256, the DRBG and plan/content signature checks, only through
+# usgp-crypto (decision 0001). Already in this crate's tree via usgp-image.
+usgp-crypto.workspace = true
+thiserror.workspace = true
+# Feature `sim` only: the simulated firmware-variable file is JSON.
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Simulated platform (plan WU-8 `src/sim.rs`): regular files as disks, a
+# directory as the Windows volume and a JSON file as firmware variables.
+# For the agent's simulation tests only; never enabled by release builds.
+sim = ["dep:serde_json"]
+
+[dev-dependencies]
+usgp-image = { workspace = true, features = ["testkit"] }
 
 [lints]
 workspace = true

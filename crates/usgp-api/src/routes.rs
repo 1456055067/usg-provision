@@ -1,5 +1,6 @@
-//! The route table (plan M2 section 3.2): every route with its method,
-//! path pattern, permission and audit events.
+//! The route table (plan M2 section 3.2, plus the M3 operator and relay
+//! routes of plan M3 section 3.5): every route with its method, path
+//! pattern, permission and audit events.
 //!
 //! The router refuses a request unless its route is in this table, and
 //! checks the route's permission before the handler runs. A test proves
@@ -61,6 +62,36 @@ pub enum RouteId {
     PackageDelete,
     /// `GET /v1/packages/{id}/manifest`
     PackageManifest,
+    /// `POST /v1/auth-codes`
+    AuthCodeIssue,
+    /// `GET /v1/auth-codes`
+    AuthCodeList,
+    /// `DELETE /v1/auth-codes/{id}`
+    AuthCodeRevoke,
+    /// `GET /v1/device-sessions`
+    DeviceSessionList,
+    /// `POST /v1/device-sessions/{id}/approve`
+    DeviceSessionApprove,
+    /// `POST /v1/device-sessions/{id}/refuse`
+    DeviceSessionRefuse,
+    /// `GET /v1/jobs`
+    JobList,
+    /// `GET /v1/jobs/{id}`
+    JobGet,
+    /// `POST /v1/jobs/{id}/acknowledge`
+    JobAcknowledge,
+    /// `GET /v1/boot-services`
+    BootServiceList,
+    /// `GET /v1/boot-services/{id}`
+    BootServiceGet,
+    /// `PUT /v1/boot-services/{id}/packages`
+    BootServicePackages,
+    /// `GET /v1/boot-stops`
+    BootStopList,
+    /// `POST /v1/boot-stops/{id}/clear`
+    BootStopClear,
+    /// `GET /v1/relay/boot-policy?have=<generation>`
+    RelayBootPolicy,
 }
 
 /// The permission a route needs.
@@ -76,15 +107,20 @@ pub enum Access {
         /// For preinstall environments.
         pe: Permission,
     },
+    /// Only an authenticated boot service (relay) whose certificate is
+    /// bound to its record; no operator permission grants it, and a boot
+    /// service may call nothing else (plan M3 section 3.5).
+    BootService,
 }
 
 impl Access {
-    /// The permissions named.
+    /// The operator permissions named (none for [`Access::BootService`]).
     #[must_use]
-    pub const fn permissions(self) -> [Permission; 2] {
+    pub fn permissions(self) -> Vec<Permission> {
         match self {
-            Self::One(p) => [p, p],
-            Self::ByKind { image, pe } => [image, pe],
+            Self::One(p) => vec![p],
+            Self::ByKind { image, pe } => vec![image, pe],
+            Self::BootService => Vec::new(),
         }
     }
 
@@ -98,6 +134,7 @@ impl Access {
                 Permission::ImageView => "image.view|pe.view",
                 _ => "by-kind",
             },
+            Self::BootService => "boot_service",
         }
     }
 }
@@ -358,6 +395,156 @@ pub const ROUTES: &[RouteSpec] = &[
         target_kind: "package",
         json_body: false,
     },
+    RouteSpec {
+        id: RouteId::AuthCodeIssue,
+        method: "POST",
+        pattern: "/v1/auth-codes",
+        access: Access::One(Permission::AuthCodeIssue),
+        events: &["auth_code.issued"],
+        refused_event: "auth_code.refused",
+        target_kind: "auth_code",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::AuthCodeList,
+        method: "GET",
+        pattern: "/v1/auth-codes",
+        access: Access::One(Permission::AuthCodeView),
+        events: &["auth_code.list.read"],
+        refused_event: "auth_code.list.read",
+        target_kind: "auth_code",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::AuthCodeRevoke,
+        method: "DELETE",
+        pattern: "/v1/auth-codes/{id}",
+        access: Access::One(Permission::AuthCodeRevoke),
+        events: &["auth_code.revoked"],
+        refused_event: "auth_code.revoke_refused",
+        target_kind: "auth_code",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::DeviceSessionList,
+        method: "GET",
+        pattern: "/v1/device-sessions",
+        access: Access::One(Permission::DeviceSessionView),
+        events: &["device_session.list.read"],
+        refused_event: "device_session.list.read",
+        target_kind: "device_session",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::DeviceSessionApprove,
+        method: "POST",
+        pattern: "/v1/device-sessions/{id}/approve",
+        access: Access::One(Permission::DeviceSessionApprove),
+        events: &["device.session.approved"],
+        refused_event: "device.session.approve_refused",
+        target_kind: "device_session",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::DeviceSessionRefuse,
+        method: "POST",
+        pattern: "/v1/device-sessions/{id}/refuse",
+        access: Access::One(Permission::DeviceSessionApprove),
+        events: &["device.session.refused"],
+        refused_event: "device.session.refuse_refused",
+        target_kind: "device_session",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::JobList,
+        method: "GET",
+        pattern: "/v1/jobs",
+        access: Access::One(Permission::JobView),
+        events: &["job.list.read"],
+        refused_event: "job.list.read",
+        target_kind: "job",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::JobGet,
+        method: "GET",
+        pattern: "/v1/jobs/{id}",
+        access: Access::One(Permission::JobView),
+        events: &["job.read"],
+        refused_event: "job.read",
+        target_kind: "job",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::JobAcknowledge,
+        method: "POST",
+        pattern: "/v1/jobs/{id}/acknowledge",
+        access: Access::One(Permission::JobAcknowledge),
+        events: &["job.failure.acknowledged"],
+        refused_event: "job.acknowledge_refused",
+        target_kind: "job",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::BootServiceList,
+        method: "GET",
+        pattern: "/v1/boot-services",
+        access: Access::One(Permission::BootServiceView),
+        events: &["boot_service.read"],
+        refused_event: "boot_service.read",
+        target_kind: "boot_service",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::BootServiceGet,
+        method: "GET",
+        pattern: "/v1/boot-services/{id}",
+        access: Access::One(Permission::BootServiceView),
+        events: &["boot_service.read"],
+        refused_event: "boot_service.read",
+        target_kind: "boot_service",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::BootServicePackages,
+        method: "PUT",
+        pattern: "/v1/boot-services/{id}/packages",
+        access: Access::One(Permission::BootServiceAssign),
+        events: &["boot_service.packages.set"],
+        refused_event: "boot_service.packages.refused",
+        target_kind: "boot_service",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::BootStopList,
+        method: "GET",
+        pattern: "/v1/boot-stops",
+        access: Access::One(Permission::BootStopView),
+        events: &["boot_stop.list.read"],
+        refused_event: "boot_stop.list.read",
+        target_kind: "boot_stop",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::BootStopClear,
+        method: "POST",
+        pattern: "/v1/boot-stops/{id}/clear",
+        access: Access::One(Permission::DeviceBootReenable),
+        events: &["boot_stop.cleared"],
+        refused_event: "boot_stop.clear_refused",
+        target_kind: "boot_stop",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::RelayBootPolicy,
+        method: "GET",
+        pattern: "/v1/relay/boot-policy",
+        access: Access::BootService,
+        events: &["boot_policy.read"],
+        refused_event: "boot_policy.refused",
+        target_kind: "boot_service",
+        json_body: false,
+    },
 ];
 
 /// Longest request path accepted, in bytes.
@@ -389,7 +576,7 @@ pub enum Match {
     NotFound,
 }
 
-fn match_pattern(pattern: &str, path: &str) -> Option<Params> {
+pub(crate) fn match_pattern(pattern: &str, path: &str) -> Option<Params> {
     let mut params = Vec::new();
     let mut p = pattern.split('/');
     let mut s = path.split('/');

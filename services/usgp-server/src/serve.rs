@@ -18,7 +18,13 @@
 //   issuer's cRLNumber is refused and audited (RFC 5280 §5.2.3; finding
 //   SEC-007).
 // - NIST 800-53: SC-12 - one key per purpose: content and audit keys must
-//   differ.
+//   differ; the M3 plan and boot-policy keys differ from both and from
+//   each other; the code HMAC key is exactly 32 bytes.
+// - NIST 800-53: SC-8, SC-13, CM-7 - the device listener (M3) runs only
+//   when `device_api.enabled`, on its own server-authenticated FIPS TLS
+//   configuration, and stops with the operator listener.
+// - NIST 800-53: AC-12, AU-12 - device-session expiry and the lost-job
+//   sweep run in the API's maintenance pass (both audited by usgp-api).
 // - NIST 800-53: AC-6 / CM-5 - the server does not run as the uid that
 //   owns its trusted files unless explicitly allowed; content root owned
 //   by the service uid, mode 0700.
@@ -26,25 +32,26 @@
 //   read the administrative database key (decision 0016; SEC-011).
 // - SPEC: specs/os-images.md#REQ-IMG-021 (restart recovery);
 //   specs/operator-access.md#REQ-RBAC-005, #REQ-AUD-005; decisions 0007,
-//   0010, 0011, 0015
+//   0010, 0011, 0015; M3: specs/targeting.md#REQ-TGT-012, #REQ-TGT-014;
+//   specs/progress.md#REQ-JOB-006; decisions 0016, 0018, 0020, 0021
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use usgp_api::{Api, ApiInitError, ContentKeys, TlsAcceptorHandle};
+use tokio::sync::{oneshot, watch};
+use usgp_api::{Api, ApiInitError, ContentKeys, ProvisioningKeys, TlsAcceptorHandle};
 use usgp_audit::{AuditChain, Checkpointer, Detail, Outcome};
 use usgp_common::config::TrustPolicy;
-use usgp_crypto::tls::{ServerTls, TlsMinVersion};
+use usgp_crypto::tls::{DeviceServerTls, ServerTls, TlsMinVersion};
 use usgp_crypto::{KeyId, VerifyingKey};
 use usgp_db::Store;
 
-use crate::config::{LoadedConfig, ServerConfig, TlsConfig};
+use crate::config::{LoadedConfig, ProvisioningKeyFiles, ServerConfig, TlsConfig};
 use crate::events::{self, RecordError, system_draft};
-use crate::keys::{KeyLoadError, load_signing_key, load_verifying_key};
-use crate::material::{CrlSet, MaterialError, build_server_tls, read_crls};
+use crate::keys::{KeyLoadError, load_hmac_key, load_signing_key, load_verifying_key};
+use crate::material::{CrlSet, MaterialError, build_device_tls, build_server_tls, read_crls};
 use crate::{EXIT_CONFIG, EXIT_FAILURE};
 
 /// Why the server refused to start or stopped with an error.
@@ -112,7 +119,9 @@ impl ServeError {
                 source: usgp_db::DbError::Config(_),
                 ..
             } => EXIT_CONFIG,
-            Self::Api(ApiInitError::Config(_) | ApiInitError::KeyNotTrusted) => EXIT_CONFIG,
+            Self::Api(
+                ApiInitError::Config(_) | ApiInitError::KeyNotTrusted | ApiInitError::KeyReuse,
+            ) => EXIT_CONFIG,
             _ => EXIT_FAILURE,
         }
     }
@@ -162,6 +171,11 @@ pub struct Prepared {
     pub content_key_id: KeyId,
     /// Audit key id.
     pub audit_key_id: KeyId,
+    /// The plan, boot-policy and code keys (M3), if configured.
+    pub provisioning: Option<ProvisioningKeys>,
+    /// The device listener's TLS configuration, if the listener is
+    /// enabled.
+    pub device_tls: Option<DeviceServerTls>,
 }
 
 /// Reads and checks every file the configuration names: keys (content and
@@ -204,6 +218,21 @@ pub fn prepare(cfg: &ServerConfig, policy: &TrustPolicy) -> Result<Prepared, Ser
     if !server_tls.is_fips() {
         return Err(ServeError::Runtime("the TLS configuration is not FIPS"));
     }
+    let provisioning = cfg
+        .provisioning
+        .as_ref()
+        .map(|files| load_provisioning_keys(files, &[content_key_id, audit_key_id], policy))
+        .transpose()?;
+    let device_tls = cfg
+        .device_listener
+        .as_ref()
+        .map(|d| build_device_tls(d, policy))
+        .transpose()?;
+    if device_tls.as_ref().is_some_and(|t| !t.is_fips()) {
+        return Err(ServeError::Runtime(
+            "the device TLS configuration is not FIPS",
+        ));
+    }
     Ok(Prepared {
         server_tls,
         crls,
@@ -211,7 +240,40 @@ pub fn prepare(cfg: &ServerConfig, policy: &TrustPolicy) -> Result<Prepared, Ser
         checkpointer,
         content_key_id,
         audit_key_id,
+        provisioning,
+        device_tls,
     })
+}
+
+/// Loads the plan and boot-policy signing keys and the code HMAC key
+/// (M3 plan sections 3.9 and 5) under the trusted-file rules. One key,
+/// one purpose: neither signing key may be the content or audit key
+/// (`taken`), and they must differ from each other.
+///
+/// # Errors
+///
+/// [`ServeError`] (exit 78).
+pub fn load_provisioning_keys(
+    files: &ProvisioningKeyFiles,
+    taken: &[KeyId],
+    policy: &TrustPolicy,
+) -> Result<ProvisioningKeys, ServeError> {
+    let plan = load_signing_key("signing.plan_key", &files.plan_key, policy)?;
+    let boot_policy = load_signing_key("signing.boot_policy_key", &files.boot_policy_key, policy)?;
+    if taken.contains(&plan.key_id()) {
+        return Err(ServeError::Refused {
+            field: "signing.plan_key",
+            reason: "plan_key_reused",
+        });
+    }
+    if taken.contains(&boot_policy.key_id()) || boot_policy.key_id() == plan.key_id() {
+        return Err(ServeError::Refused {
+            field: "signing.boot_policy_key",
+            reason: "boot_policy_key_reused",
+        });
+    }
+    let hmac = load_hmac_key("codes.hmac_key", &files.code_hmac_key, policy)?;
+    Ok(ProvisioningKeys::new(plan, boot_policy, hmac)?)
 }
 
 /// Process options of [`run`] from the command line.
@@ -311,7 +373,9 @@ pub fn check_content_root(
 /// only, reachable, schema version `schema_version`) until `shutdown`
 /// completes with a reason (for example `"SIGTERM"`).
 ///
-/// `ready` (if given) receives the bound address once serving begins.
+/// `ready` (if given) receives the bound addresses once serving begins.
+/// With `device_api.enabled`, the device listener ([`usgp_api::serve_device`])
+/// runs beside the operator listener and stops with it.
 ///
 /// # Errors
 ///
@@ -324,7 +388,7 @@ pub async fn run<S, F>(
     opts: RunOptions,
     schema_version: u32,
     shutdown: F,
-    ready: Option<oneshot::Sender<SocketAddr>>,
+    ready: Option<oneshot::Sender<Listening>>,
 ) -> Result<(), ServeError>
 where
     S: Store + 'static,
@@ -356,11 +420,18 @@ where
         checkpointer,
         content_key_id,
         audit_key_id,
+        provisioning,
+        device_tls,
     } = prepared;
-    let api = match Api::builder(store, cfg.api.clone(), chain, content_keys)
-        .checkpointer(checkpointer)
-        .build()
-    {
+    let key_ids = provisioning
+        .as_ref()
+        .map(|k| (k.plan_key_id(), k.boot_policy_key_id()));
+    let mut builder =
+        Api::builder(store, cfg.api.clone(), chain, content_keys).checkpointer(checkpointer);
+    if let Some(k) = provisioning {
+        builder = builder.provisioning_keys(k);
+    }
+    let api = match builder.build() {
         Ok(api) => api,
         Err(e) => {
             let e = ServeError::from(e);
@@ -369,7 +440,7 @@ where
         }
     };
     let started = start(&api, cfg, opts).await;
-    let listener = match started {
+    let (listener, device_listener) = match started {
         Ok(l) => l,
         Err(e) => {
             refuse(&api, &e).await;
@@ -379,12 +450,24 @@ where
     let local = listener
         .local_addr()
         .map_err(|_| ServeError::Runtime("cannot read the bound address"))?;
+    let device_local = device_listener
+        .as_ref()
+        .map(TcpListener::local_addr)
+        .transpose()
+        .map_err(|_| ServeError::Runtime("cannot read the bound device address"))?;
+    let key_text = |k: Option<KeyId>| k.map_or_else(|| "none".to_owned(), |k| k.to_string());
     let detail = Detail::new()
         .with("version", env!("CARGO_PKG_VERSION"))
         .with("config_sha256", &loaded.sha256)
         .with("listen", &local.to_string())
+        .with(
+            "device_listen",
+            &device_local.map_or_else(|| "off".to_owned(), |a| a.to_string()),
+        )
         .with("content_key_id", &content_key_id)
         .with("audit_key_id", &audit_key_id)
+        .with("plan_key_id", &key_text(key_ids.map(|k| k.0)))
+        .with("boot_policy_key_id", &key_text(key_ids.map(|k| k.1)))
         .with("schema_version", &schema_version)
         .with("tls_min_version", tls_min_text(cfg.tls.min_version))
         .with("crl_set_sha256", &crls.digest)
@@ -400,7 +483,10 @@ where
     // (decision 0015 item 1).
     events::record(api.store(), api.chain(), &start_draft).await?;
     if let Some(tx) = ready {
-        let _ = tx.send(local);
+        let _ = tx.send(Listening {
+            api: local,
+            device: device_local,
+        });
     }
 
     let tls = Arc::new(TlsAcceptorHandle::new(server_tls));
@@ -411,13 +497,42 @@ where
         Arc::clone(&tls),
         crls,
     ));
+    // One stop signal for both listeners: the shutdown reason, or the
+    // operator listener ending on its own.
+    let (halt_tx, halt_rx) = watch::channel(false);
+    let device_task = match (device_listener, device_tls) {
+        (Some(l), Some(t)) => {
+            let mut rx = halt_rx.clone();
+            let halted = async move {
+                let _ = rx.wait_for(|h| *h).await;
+            };
+            Some(tokio::spawn(usgp_api::serve_device(
+                api.clone(),
+                l,
+                Arc::new(t),
+                halted,
+            )))
+        }
+        _ => None,
+    };
     let why: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
     let why_set = Arc::clone(&why);
     let stop = async move {
         let reason = shutdown.await;
         let _ = why_set.set(reason);
     };
+    // Maintenance (device-session expiry, lost jobs, upload expiry,
+    // checkpoints) runs inside `usgp_api::serve` every MAINTENANCE_EVERY
+    // (`Api::maintenance`), for both listeners' state.
     let served = usgp_api::serve(api.clone(), listener, Arc::clone(&tls), stop).await;
+    let _ = halt_tx.send(true);
+    let device_served = match device_task {
+        Some(t) => match tokio::time::timeout(DEVICE_STOP_GRACE, t).await {
+            Ok(Ok(r)) => r.map_err(|e| e.kind()),
+            Ok(Err(_)) | Err(_) => Err(std::io::ErrorKind::Other),
+        },
+        None => Ok(()),
+    };
     reloader.abort();
     let reason = why.get().copied().unwrap_or("listener_failed");
     let (outcome, detail) = match &served {
@@ -436,15 +551,40 @@ where
     };
     // NIST-001: counts of refusals over the caps are not lost at shutdown.
     api.flush_unauthenticated_summary().await;
+    let detail = match &device_served {
+        Ok(()) => detail,
+        Err(kind) => detail.with("device_error_kind", &format!("{kind:?}")),
+    };
+    let outcome = if device_served.is_err() {
+        Outcome::Failure
+    } else {
+        outcome
+    };
     let mut stop_draft = system_draft(events::SERVER_STOP, outcome).detail(detail);
     if served.is_err() {
         stop_draft = stop_draft.reason("listener_failed");
+    } else if device_served.is_err() {
+        stop_draft = stop_draft.reason("device_listener_failed");
     }
     let _ = events::record(api.store(), api.chain(), &stop_draft).await;
     // Final checkpoint, covering server.stop (plan section 5.6).
     api.checkpoint(true).await;
-    served.map_err(|_| ServeError::Runtime("the listener failed"))
+    served.map_err(|_| ServeError::Runtime("the listener failed"))?;
+    device_served.map_err(|_| ServeError::Runtime("the device listener failed"))
 }
+
+/// The bound addresses, sent to `run`'s `ready` channel once serving
+/// begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Listening {
+    /// The operator listener.
+    pub api: SocketAddr,
+    /// The device listener, if enabled.
+    pub device: Option<SocketAddr>,
+}
+
+/// How long shutdown waits for the device accept loop to end.
+const DEVICE_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn tls_min_text(v: TlsMinVersion) -> &'static str {
     match v {
@@ -453,22 +593,29 @@ fn tls_min_text(v: TlsMinVersion) -> &'static str {
     }
 }
 
-/// Content root check, restart recovery, bind.
+/// Content root check, restart recovery, bind (the operator listener,
+/// and the device listener if enabled).
 async fn start<S: Store + 'static>(
     api: &Api<S>,
     cfg: &ServerConfig,
     opts: RunOptions,
-) -> Result<TcpListener, ServeError> {
+) -> Result<(TcpListener, Option<TcpListener>), ServeError> {
     check_content_root(&cfg.api.content.root, opts.service_uid)?;
     api.recover()
         .await
         .map_err(|e| ServeError::Recovery(e.code().as_str().to_owned()))?;
-    TcpListener::bind(cfg.listen)
-        .await
-        .map_err(|e| ServeError::Bind {
-            addr: cfg.listen,
+    let bind = |addr: SocketAddr| async move {
+        TcpListener::bind(addr).await.map_err(|e| ServeError::Bind {
+            addr,
             kind: e.kind(),
         })
+    };
+    let operator = bind(cfg.listen).await?;
+    let device = match &cfg.device_listener {
+        Some(d) => Some(bind(d.listen).await?),
+        None => None,
+    };
+    Ok((operator, device))
 }
 
 /// Records `server.start.refused` in the chain (best effort; mirrored as

@@ -31,6 +31,8 @@
 // - NIST 800-53: SI-10 (Information Input Validation) - bounded envelope,
 //   payload, signature count and signature size; strict base64.
 // - SPEC: specs/os-images.md#REQ-IMG-050, specs/preinstall-env.md#REQ-PE-008
+// - SPEC: specs/preinstall-env.md#REQ-PE-016 (signed job plan),
+//   specs/boot-network.md#REQ-BOOT-067 (signed boot-policy list)
 // - FIPS 186-5 (ECDSA); RFC 4648 §4 (base64, padded)
 
 use std::fmt;
@@ -56,6 +58,12 @@ closed_enum!(
         /// `seq(u64 BE) || record_hash || signed_at_us(i64 BE) || key_id`),
         /// built by `usgp-audit`. Never carried in a manifest envelope.
         AuditCheckpointV1 => "application/vnd.usgp.audit-checkpoint.v1",
+        /// [`crate::job_plan::JobPlanV1`] JSON, signed with the plan key
+        /// (M3 plan section 3.2).
+        JobPlanV1 => "application/vnd.usgp.job-plan.v1+json",
+        /// [`crate::boot_policy::BootPolicyV1`] JSON, signed with the
+        /// boot-policy key (M3 plan section 3.6).
+        BootPolicyV1 => "application/vnd.usgp.boot-policy.v1+json",
     }
 );
 
@@ -415,6 +423,13 @@ pub(crate) mod tests {
         assert_eq!(got, want);
         let pkg = signing_input(PayloadType::PackageManifestV1, b"{\"a\":1}");
         assert_ne!(got, pkg, "type is bound");
+        let plan = signing_input(PayloadType::JobPlanV1, b"{\"a\":1}");
+        assert_eq!(
+            plan,
+            b"USGP-SIG-V1\napplication/vnd.usgp.job-plan.v1+json\n7\n{\"a\":1}"
+        );
+        let policy = signing_input(PayloadType::BootPolicyV1, b"{\"a\":1}");
+        assert!(policy.starts_with(b"USGP-SIG-V1\napplication/vnd.usgp.boot-policy.v1+json\n"));
         let longer = signing_input(PayloadType::ContentManifestV1, b"{\"a\":12}");
         assert!(
             longer.starts_with(b"USGP-SIG-V1\napplication/vnd.usgp.content-manifest.v1+json\n8\n")

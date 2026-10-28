@@ -1,35 +1,66 @@
-//! Read-transfer admission and the lock-step sender state machine.
+//! Read-transfer admission and the windowed sender state machine.
 //!
 //! Sans-IO: the caller passes every received packet, every timer expiry,
 //! the current time, and the verified file bytes; the state machine returns
 //! what to send. It owns no file buffer and no socket. Foreign-TID packets
 //! are the caller's job (it answers them with [`foreign_tid_error`] and
 //! does not pass them here; RFC 1350 §4).
+//!
+//! Blocks are counted internally by an absolute `u64` index (1 = the first
+//! DATA block). The 16-bit number on the wire is derived from it by
+//! [`BlockWrap`]. With a window of 1 (the default unless `windowsize` is
+//! negotiated) the sender is RFC 1350 lock-step, exactly as in M1.
+//!
+//! A window is handed out one packet per [`Step::Send`]: while packets of
+//! the current window are still to be sent, [`ReadTransfer::deadline`] is
+//! already due, so the caller's timer at once asks for the next one
+//! through [`ReadTransfer::on_timeout`] (and [`ReadTransfer::pending_sends`]
+//! is true). Only the window's last packet arms the retransmit timer.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-5 (Denial-of-Service Protection) - retry caps (shorter
-//   before the first ACK), maximum transfer duration, no resend on
-//   duplicate ACK.
+//   before the first ACK), maximum transfer duration with a hard ceiling,
+//   no resend on duplicate ACK, bounded window.
 // - NIST 800-53: CM-7 (Least Functionality) - read-only, octet mode only.
 // - NIST 800-53: SI-11 (Error Handling) - fixed, generic error text.
 // - SPEC: specs/boot-network.md#REQ-BOOT-030, #REQ-BOOT-031,
-//   #REQ-BOOT-032, #REQ-BOOT-035 (AUDITED part: never a truncated file)
+//   #REQ-BOOT-032, #REQ-BOOT-035 (never a truncated file), #REQ-BOOT-064
+//   (windowsize, block-number wraparound; DEC-0018 item 2)
 // - RFC 1350 §2, §4, §6, §7 - lock-step, TIDs, normal and premature end
 // - RFC 1123 §4.2.3.1 - Sorcerer's Apprentice fix; §4.2.3.2 adaptive RTO
 // - RFC 2347 - OACK then ACK 0; RFC 2348 - final short block; RFC 2349
+// - RFC 7440 §4 - window of blocks, one ACK per window, restart after the
+//   last block acknowledged on a partial ACK or a timeout
 
 use core::time::Duration;
 use std::time::Instant;
 
-use crate::options::{Negotiated, negotiate};
+use crate::options::{MAX_WINDOW_SIZE, Negotiated, negotiate_window};
 use crate::packet::{
     ErrorCode, Mode, Opcode, Packet, ReadRequest, encode_data, encode_error, encode_oack, parse,
 };
 use crate::rto::Rto;
 
-/// Largest number of DATA packets in one transfer: block numbers are 16
-/// bits and never wrap (REQ-BOOT-035; plan §1.1).
+/// Largest number of DATA packets in one transfer when the block number
+/// does not wrap ([`BlockWrap::Off`]; REQ-BOOT-035, M1 plan §1.1).
 pub const MAX_BLOCKS: u64 = 65535;
+
+/// Hard ceiling on the file size served, whatever
+/// [`ServerConfig::max_file_size`] says (4 GiB - 1; M3 plan §1 relay
+/// defaults). Project design, not product behaviour.
+pub const MAX_FILE_SIZE_CEILING: u64 = 4_294_967_295;
+
+/// Hard ceiling on a transfer's duration, whatever
+/// [`ServerConfig::max_duration`] says (M3 plan §1 relay defaults).
+pub const MAX_DURATION_CEILING: Duration = Duration::from_secs(7200);
+
+/// Suggested `max_file_size` for serving a Windows PE image (1 GiB; M3
+/// plan §1 relay defaults). [`ServerConfig::default`] keeps the M1 value.
+pub const LARGE_FILE_MAX_SIZE: u64 = 1_073_741_824;
+
+/// Suggested `max_duration` for serving a Windows PE image (M3 plan §1
+/// relay defaults). [`ServerConfig::default`] keeps the M1 value.
+pub const LARGE_FILE_MAX_DURATION: Duration = Duration::from_secs(1800);
 
 /// Server limits. Values are project design (OPEN-BOOT-L1), not product
 /// behaviour; the relay config validates and supplies them.
@@ -43,18 +74,19 @@ pub struct ServerConfig {
     pub min_rto: Duration,
     /// RTO ceiling.
     pub max_rto: Duration,
-    /// Resends of one packet after the first ACK before giving up.
+    /// Resends of one window after the first ACK before giving up.
     pub max_retries: u8,
     /// Resends of the first packet (OACK or DATA 1) before giving up.
     pub handshake_retries: u8,
-    /// Hard limit on a transfer's total duration.
+    /// Hard limit on a transfer's total duration (at most
+    /// [`MAX_DURATION_CEILING`]).
     pub max_duration: Duration,
-    /// Largest file served.
+    /// Largest file served (at most [`MAX_FILE_SIZE_CEILING`]).
     pub max_file_size: u64,
 }
 
 impl Default for ServerConfig {
-    /// Plan §3.4 defaults.
+    /// M1 plan §3.4 defaults.
     fn default() -> Self {
         Self {
             max_block_size: 1468,
@@ -69,15 +101,116 @@ impl Default for ServerConfig {
     }
 }
 
+/// What the 16-bit block number becomes after 65535.
+///
+/// Wraparound is not standardised (`specs/standards/tftp.md` §8); the
+/// value Microsoft's boot program expects is a lab observation (M3 plan,
+/// MT-2 / LAB-OBS). DEC-0018 item 2 requires wraparound to be available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlockWrap {
+    /// 65535 is followed by 0 (default).
+    #[default]
+    Zero,
+    /// 65535 is followed by 1.
+    One,
+    /// No wraparound: a file needing more than 65535 DATA packets is
+    /// refused with ERROR 3 before any OACK or DATA (M1 behaviour).
+    Off,
+}
+
+impl BlockWrap {
+    /// Stable label for configuration and audit events.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Zero => "zero",
+            Self::One => "one",
+            Self::Off => "off",
+        }
+    }
+
+    /// Parses a configuration label (`zero`, `one` or `off`, exact).
+    #[must_use]
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "zero" => Some(Self::Zero),
+            "one" => Some(Self::One),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The wire block number of absolute index `index` (0 = the OACK,
+    /// answered by ACK 0). With [`BlockWrap::Off`] the caller guarantees
+    /// `index <= 65535` (admission refuses anything larger).
+    #[must_use]
+    pub fn wire(&self, index: u64) -> u16 {
+        let low = |i: u64| u16::try_from(i & 0xffff).unwrap_or(0);
+        match self {
+            Self::Zero | Self::Off => low(index),
+            Self::One => match index.checked_sub(1) {
+                None => 0,
+                // 1..=65535, then 1 again.
+                Some(i) => low(i % 65535 + 1),
+            },
+        }
+    }
+
+    /// How many times the wire number has gone past 65535 by the time
+    /// absolute index `index` is sent.
+    #[must_use]
+    pub fn wraps_by(&self, index: u64) -> u64 {
+        match self {
+            Self::Zero => index / 65536,
+            Self::One => index.saturating_sub(1) / 65535,
+            Self::Off => 0,
+        }
+    }
+}
+
+/// Window and wraparound settings for [`admit_read_with`] (M3 plan WU-6).
+///
+/// Kept apart from [`ServerConfig`] so that M1 callers that build a
+/// `ServerConfig` field by field keep compiling and keep M1 behaviour
+/// through [`admit_read`] ([`WindowConfig::LOCKSTEP`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowConfig {
+    /// Largest `windowsize` granted (RFC 7440), clamped to
+    /// 1..=[`MAX_WINDOW_SIZE`]. 0 or 1: `windowsize` is never
+    /// acknowledged.
+    pub max_window_size: u16,
+    /// What the block number becomes after 65535.
+    pub block_wrap: BlockWrap,
+}
+
+impl WindowConfig {
+    /// M1 behaviour: no `windowsize`, no wraparound.
+    pub const LOCKSTEP: Self = Self {
+        max_window_size: 1,
+        block_wrap: BlockWrap::Off,
+    };
+}
+
+impl Default for WindowConfig {
+    /// M3 plan §3 defaults: window up to 8, wrap to 0.
+    fn default() -> Self {
+        Self {
+            max_window_size: 8,
+            block_wrap: BlockWrap::Zero,
+        }
+    }
+}
+
 /// Why a read request was refused before any OACK or DATA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefuseReason {
     /// Mode other than `octet`.
     UnsupportedMode,
-    /// The file is larger than `max_file_size`.
+    /// The file is larger than `max_file_size` (or
+    /// [`MAX_FILE_SIZE_CEILING`]).
     FileTooLarge,
     /// The file needs more than 65535 DATA packets at the negotiated block
-    /// size (REQ-BOOT-035).
+    /// size and wraparound is off (REQ-BOOT-035).
     TooManyBlocks,
 }
 
@@ -159,7 +292,8 @@ impl Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// Send this packet to the client TID, then wait until
-    /// [`ReadTransfer::deadline`].
+    /// [`ReadTransfer::deadline`] (already due while
+    /// [`ReadTransfer::pending_sends`] is true).
     Send(Vec<u8>),
     /// Send nothing; keep waiting until [`ReadTransfer::deadline`].
     Wait,
@@ -221,22 +355,45 @@ fn after(now: Instant, d: Duration) -> Instant {
     now.checked_add(d).unwrap_or(now)
 }
 
-/// Decides whether to start a read transfer of `data`, the verified file
-/// bytes (the same slice must be passed to every later call).
-///
-/// Checks, in order: mode is `octet` (else ERROR 4); `file_len` is at most
-/// `max_file_size` (else ERROR 3); option negotiation; the DATA packet
-/// count `file_len / block_size + 1` is at most 65535 (else ERROR 3, before
-/// any OACK or DATA; REQ-BOOT-035). The `+ 1` is the final short block,
-/// which is empty when the size is an exact multiple (RFC 2348).
-///
-/// The caller has already matched the filename to a published, verified
-/// file; WRQ is refused by the caller with ERROR 2 before any file access.
+/// Decides whether to start a lock-step read transfer of `data`, the
+/// verified file bytes (the same slice must be passed to every later
+/// call). M1 behaviour: [`admit_read_with`] with
+/// [`WindowConfig::LOCKSTEP`].
 #[must_use]
 pub fn admit_read(
     req: &ReadRequest<'_>,
     data: &[u8],
     cfg: &ServerConfig,
+    now: Instant,
+) -> Admission {
+    admit_read_with(req, data, cfg, &WindowConfig::LOCKSTEP, now)
+}
+
+/// Decides whether to start a read transfer of `data`, the verified file
+/// bytes (the same slice must be passed to every later call).
+///
+/// Checks, in order: mode is `octet` (else ERROR 4); `file_len` is at most
+/// `max_file_size` and [`MAX_FILE_SIZE_CEILING`] (else ERROR 3); option
+/// negotiation (`blksize`, `tsize`, `windowsize`); with
+/// [`BlockWrap::Off`], the DATA packet count `file_len / block_size + 1`
+/// is at most 65535 (else ERROR 3, before any OACK or DATA;
+/// REQ-BOOT-035). The `+ 1` is the final short block, which is empty when
+/// the size is an exact multiple (RFC 2348). With wraparound the count is
+/// bounded only by the file size.
+///
+/// The caller has already matched the filename to a published, verified
+/// file; WRQ is refused by the caller with ERROR 2 before any file access.
+///
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SC-5 - file size and duration ceilings
+// - SPEC: specs/boot-network.md#REQ-BOOT-035, #REQ-BOOT-064
+// - RFC 7440 §3 - windowsize only with an OACK; RFC 2348 - final block
+#[must_use]
+pub fn admit_read_with(
+    req: &ReadRequest<'_>,
+    data: &[u8],
+    cfg: &ServerConfig,
+    win: &WindowConfig,
     now: Instant,
 ) -> Admission {
     let file_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
@@ -250,22 +407,34 @@ pub fn admit_read(
         error: encode_error(ErrorCode::DiskFull, MSG_TOO_LARGE),
         reason,
     };
-    if file_len > cfg.max_file_size {
+    if file_len > cfg.max_file_size.min(MAX_FILE_SIZE_CEILING) {
         return too_large(RefuseReason::FileTooLarge);
     }
-    let neg = negotiate(&req.options, file_len, cfg.max_block_size);
-    let blocks = file_len / u64::from(neg.block_size) + 1;
-    let Ok(last_block) = u16::try_from(blocks) else {
+    let neg = negotiate_window(
+        &req.options,
+        file_len,
+        cfg.max_block_size,
+        win.max_window_size,
+    );
+    // block_size >= 8 and file_len < 2^32, so this cannot overflow.
+    let Some(last_index) = (file_len / u64::from(neg.block_size)).checked_add(1) else {
         return too_large(RefuseReason::TooManyBlocks);
     };
-    if u64::from(last_block) > MAX_BLOCKS {
+    if win.block_wrap == BlockWrap::Off && last_index > MAX_BLOCKS {
         return too_large(RefuseReason::TooManyBlocks);
     }
+    let oack = neg.needs_oack();
     let mut t = ReadTransfer {
         neg,
         file_len,
-        last_block,
-        current: if neg.needs_oack() { 0 } else { 1 },
+        last_index,
+        wrap: win.block_wrap,
+        window: neg.window_size.clamp(1, MAX_WINDOW_SIZE),
+        oack_outstanding: oack,
+        acked: 0,
+        window_end: if oack { 0 } else { 1 },
+        next_send: 1,
+        sent_hi: 0,
         established: false,
         retries: 0,
         total_retransmits: 0,
@@ -273,15 +442,19 @@ pub fn admit_read(
         sent_at: now,
         resent: false,
         next_timeout: now,
-        hard_deadline: after(now, cfg.max_duration),
+        hard_deadline: after(now, cfg.max_duration.min(MAX_DURATION_CEILING)),
         max_retries: cfg.max_retries,
         handshake_retries: cfg.handshake_retries,
         outcome: None,
     };
-    let first = match t.send_current(data, now) {
-        Step::Send(p) => p,
-        // Unreachable for a consistent slice; fail closed with a refusal.
-        _ => return too_large(RefuseReason::FileTooLarge),
+    let first = if oack {
+        t.send_oack(now)
+    } else {
+        match t.emit_next(data, now) {
+            Step::Send(p) => p,
+            // Unreachable for a consistent slice; fail closed with a refusal.
+            _ => return too_large(RefuseReason::FileTooLarge),
+        }
     };
     Admission::Accept {
         transfer: Box::new(t),
@@ -290,21 +463,36 @@ pub fn admit_read(
 }
 
 /// One read transfer in progress.
+///
+/// Window bookkeeping, by absolute block index: `acked` is the highest
+/// block acknowledged; the current window is `acked + 1 ..= window_end`;
+/// `next_send` is the next block of it still to send; `sent_hi` is the
+/// highest block ever sent. `sent_hi - acked <= window <= 64`, so an ACK's
+/// wire number maps to at most one index in `acked + 1 ..= sent_hi`.
 #[derive(Debug, Clone)]
 pub struct ReadTransfer {
     neg: Negotiated,
     file_len: u64,
-    /// Number of the final DATA block (1..=65535).
-    last_block: u16,
-    /// Packet outstanding: 0 = OACK, n = DATA n.
-    current: u16,
+    /// Absolute index of the final DATA block (>= 1).
+    last_index: u64,
+    wrap: BlockWrap,
+    /// Blocks per window (1..=64).
+    window: u16,
+    /// The OACK is sent and ACK 0 not yet received.
+    oack_outstanding: bool,
+    acked: u64,
+    window_end: u64,
+    next_send: u64,
+    sent_hi: u64,
     established: bool,
-    /// Resends of the current packet.
+    /// Resends of the current window.
     retries: u8,
     total_retransmits: u32,
     rto: Rto,
+    /// When the OACK or the current window's last block was sent.
     sent_at: Instant,
-    /// Karn's rule: no RTT sample from a resent packet.
+    /// Karn's rule: no RTT sample when the awaited packet was sent more
+    /// than once.
     resent: bool,
     next_timeout: Instant,
     hard_deadline: Instant,
@@ -324,17 +512,17 @@ impl ReadTransfer {
         u64::try_from(data.len()).is_ok_and(|l| l == self.file_len)
     }
 
-    /// The packet for `block` (0 = OACK).
-    fn packet(&self, block: u16, data: &[u8]) -> Option<Vec<u8>> {
-        if block == 0 {
-            return Some(self.oack());
+    /// The DATA packet for absolute block `index` (>= 1).
+    fn data_packet(&self, index: u64, data: &[u8]) -> Option<Vec<u8>> {
+        if index == 0 || index > self.last_index {
+            return None;
         }
         let bs = u64::from(self.neg.block_size);
-        let start = u64::from(block - 1).checked_mul(bs)?;
+        let start = index.checked_sub(1)?.checked_mul(bs)?;
         let end = start.checked_add(bs)?.min(self.file_len);
         let start = usize::try_from(start).ok()?;
         let end = usize::try_from(end).ok()?;
-        Some(encode_data(block, data.get(start..end)?))
+        Some(encode_data(self.wrap.wire(index), data.get(start..end)?))
     }
 
     fn finish(&mut self, o: Outcome) -> Step {
@@ -342,15 +530,47 @@ impl ReadTransfer {
         Step::Done(o)
     }
 
-    fn send_current(&mut self, data: &[u8], now: Instant) -> Step {
-        match self.packet(self.current, data) {
-            Some(p) => {
-                self.sent_at = now;
-                self.next_timeout = after(now, self.rto.current());
-                Step::Send(p)
-            }
-            None => self.finish(Outcome::Failed(FailReason::DataMismatch)),
+    fn send_oack(&mut self, now: Instant) -> Vec<u8> {
+        self.sent_at = now;
+        self.next_timeout = after(now, self.rto.current());
+        self.oack()
+    }
+
+    /// Sends block `next_send` of the current window. The window's last
+    /// block arms the retransmit timer; any earlier one leaves the
+    /// deadline due so the caller asks for the next block at once.
+    fn emit_next(&mut self, data: &[u8], now: Instant) -> Step {
+        let index = self.next_send;
+        let Some(p) = self.data_packet(index, data) else {
+            return self.finish(Outcome::Failed(FailReason::DataMismatch));
+        };
+        self.next_send = index.saturating_add(1);
+        self.sent_hi = self.sent_hi.max(index);
+        if self.next_send > self.window_end {
+            self.sent_at = now;
+            self.next_timeout = after(now, self.rto.current());
+        } else {
+            self.next_timeout = now;
         }
+        Step::Send(p)
+    }
+
+    /// Opens the window after `acked` and sends its first block.
+    fn start_window(&mut self, data: &[u8], now: Instant) -> Step {
+        let end = self.acked.saturating_add(u64::from(self.window));
+        self.window_end = end.min(self.last_index);
+        self.next_send = self.acked.saturating_add(1);
+        // Karn: the window's last block may already have gone out in an
+        // earlier window that was cut short by a partial ACK.
+        self.resent = self.window_end <= self.sent_hi;
+        self.emit_next(data, now)
+    }
+
+    /// The absolute index of a sent, unacknowledged block whose wire
+    /// number is `wire`, if any.
+    fn ack_index(&self, wire: u16) -> Option<u64> {
+        let lo = self.acked.checked_add(1)?;
+        (lo..=self.sent_hi).find(|&i| self.wrap.wire(i) == wire)
     }
 
     /// Handles a datagram from the client's TID.
@@ -360,10 +580,13 @@ impl ReadTransfer {
     ///   not checked here because the datagram already comes from the
     ///   client's TID (BOOT-005);
     /// - otherwise malformed: ignored ([`Step::Wait`]);
-    /// - ACK of the outstanding packet: next block, or [`Outcome::Completed`]
-    ///   after the final block;
-    /// - any other ACK (duplicate or future): ignored. A duplicate ACK
-    ///   never causes a resend (RFC 1123 §4.2.3.1);
+    /// - ACK 0 while the OACK is outstanding: the first window starts;
+    /// - ACK of a sent block above the last one acknowledged: the window
+    ///   restarts after it (the next window if it was the window's last
+    ///   block, RFC 7440 §4), or [`Outcome::Completed`] after the final
+    ///   block;
+    /// - any other ACK (duplicate, stale or future): ignored. A duplicate
+    ///   ACK never causes a resend (RFC 1123 §4.2.3.1);
     /// - DATA, RRQ, WRQ or OACK: ERROR 4 and abort.
     pub fn on_packet(&mut self, pkt: &[u8], data: &[u8], now: Instant) -> Step {
         if let Some(o) = self.outcome {
@@ -393,28 +616,38 @@ impl ReadTransfer {
     }
 
     fn on_ack(&mut self, block: u16, data: &[u8], now: Instant) -> Step {
-        if block != self.current {
-            return Step::Wait;
+        if self.oack_outstanding {
+            if block != 0 {
+                return Step::Wait;
+            }
+            if !self.resent {
+                self.rto.sample(now.saturating_duration_since(self.sent_at));
+            }
+            self.oack_outstanding = false;
+            self.established = true;
+            self.retries = 0;
+            return self.start_window(data, now);
         }
-        if !self.resent {
+        let Some(index) = self.ack_index(block) else {
+            return Step::Wait;
+        };
+        if !self.resent && index == self.window_end && self.next_send > self.window_end {
             self.rto.sample(now.saturating_duration_since(self.sent_at));
         }
         self.established = true;
-        if block == self.last_block {
+        self.acked = index;
+        if index >= self.last_index {
             return self.finish(Outcome::Completed);
         }
-        let Some(next) = block.checked_add(1) else {
-            return self.finish(Outcome::Failed(FailReason::DataMismatch));
-        };
-        self.current = next;
         self.retries = 0;
-        self.resent = false;
-        self.send_current(data, now)
+        self.start_window(data, now)
     }
 
     /// Handles the timer. Before [`Self::deadline`] this is a no-op
-    /// ([`Step::Wait`]). After it: give up at the hard deadline or the
-    /// retry cap, otherwise back off and resend the outstanding packet.
+    /// ([`Step::Wait`]). After it: give up at the hard deadline; send the
+    /// next block of a window still being sent; otherwise give up at the
+    /// retry cap, or back off and resend the OACK or the window from the
+    /// block after the last ACK (RFC 7440 §4).
     pub fn on_timeout(&mut self, data: &[u8], now: Instant) -> Step {
         if let Some(o) = self.outcome {
             return Step::Done(o);
@@ -424,6 +657,9 @@ impl ReadTransfer {
         }
         if now >= self.hard_deadline {
             return self.finish(Outcome::Failed(FailReason::MaxDurationExceeded));
+        }
+        if self.pending_sends() {
+            return self.emit_next(data, now);
         }
         if now < self.next_timeout {
             return Step::Wait;
@@ -440,14 +676,26 @@ impl ReadTransfer {
         self.total_retransmits = self.total_retransmits.saturating_add(1);
         self.resent = true;
         self.rto.backoff();
-        self.send_current(data, now)
+        if self.oack_outstanding {
+            return Step::Send(self.send_oack(now));
+        }
+        self.next_send = self.acked.saturating_add(1);
+        self.emit_next(data, now)
     }
 
     /// When the caller must next call [`Self::on_timeout`]: the earlier of
-    /// the retransmit timer and the hard deadline.
+    /// the retransmit timer and the hard deadline. Already due while
+    /// [`Self::pending_sends`] is true.
     #[must_use]
     pub fn deadline(&self) -> Instant {
         self.next_timeout.min(self.hard_deadline)
+    }
+
+    /// Whether blocks of the current window are still to be sent. The
+    /// caller may call [`Self::on_timeout`] at once to get the next one.
+    #[must_use]
+    pub fn pending_sends(&self) -> bool {
+        self.outcome.is_none() && !self.oack_outstanding && self.next_send <= self.window_end
     }
 
     /// Final outcome, once ended.
@@ -474,6 +722,30 @@ impl ReadTransfer {
         self.neg.block_size
     }
 
+    /// Window size in use (1 = lock-step).
+    #[must_use]
+    pub fn window_size(&self) -> u16 {
+        self.window
+    }
+
+    /// Whether `windowsize` was acknowledged in the OACK.
+    #[must_use]
+    pub fn windowsize_acked(&self) -> bool {
+        self.neg.windowsize_acked
+    }
+
+    /// The wraparound mode in use.
+    #[must_use]
+    pub fn block_wrap(&self) -> BlockWrap {
+        self.wrap
+    }
+
+    /// How many times the block number has wrapped so far.
+    #[must_use]
+    pub fn wraps(&self) -> u64 {
+        self.wrap.wraps_by(self.sent_hi)
+    }
+
     /// The `tsize` value acknowledged in the OACK, if any.
     #[must_use]
     pub fn tsize(&self) -> Option<u64> {
@@ -486,25 +758,56 @@ impl ReadTransfer {
         self.neg.needs_oack()
     }
 
-    /// Number of the final DATA block.
+    /// Wire number of the final DATA block (1..=65535 without
+    /// wraparound). See [`Self::last_index`] for the absolute count.
     #[must_use]
     pub fn last_block(&self) -> u16 {
-        self.last_block
+        self.wrap.wire(self.last_index)
     }
 
-    /// Number of the packet currently outstanding (0 = OACK).
+    /// Absolute index of the final DATA block: the number of DATA packets
+    /// in the transfer.
+    #[must_use]
+    pub fn last_index(&self) -> u64 {
+        self.last_index
+    }
+
+    /// Wire number of the lowest unacknowledged packet (0 = OACK); after
+    /// completion, the final block. See [`Self::current_index`].
     #[must_use]
     pub fn current_block(&self) -> u16 {
-        self.current
+        if self.oack_outstanding {
+            0
+        } else {
+            self.wrap.wire(self.current_index())
+        }
     }
 
-    /// Total resends over the whole transfer.
+    /// Absolute index of the lowest unacknowledged packet (0 = OACK);
+    /// after completion, the final block.
+    #[must_use]
+    pub fn current_index(&self) -> u64 {
+        if self.oack_outstanding {
+            0
+        } else {
+            self.acked.saturating_add(1).min(self.last_index)
+        }
+    }
+
+    /// Absolute index of the highest block acknowledged (0 = none).
+    #[must_use]
+    pub fn acked_index(&self) -> u64 {
+        self.acked
+    }
+
+    /// Total timer-driven resends (of the OACK or of a window) over the
+    /// whole transfer.
     #[must_use]
     pub fn retransmits(&self) -> u32 {
         self.total_retransmits
     }
 
-    /// Resends of the packet currently outstanding.
+    /// Resends of the packet or window currently outstanding.
     #[must_use]
     pub fn current_retries(&self) -> u8 {
         self.retries
@@ -861,5 +1164,91 @@ mod tests {
         // Port 69 and the fuzz round trip keep the strict parser.
         assert!(parse(&[0, 5, 0, 0]).is_err());
         assert!(parse(&[0, 5, 0, 1, b'a', 0, b'b']).is_err());
+    }
+
+    #[test]
+    fn wire_numbers_for_each_wrap_mode() {
+        let z = BlockWrap::Zero;
+        let o = BlockWrap::One;
+        let off = BlockWrap::Off;
+        for w in [z, o, off] {
+            assert_eq!(w.wire(0), 0);
+            assert_eq!(w.wire(1), 1);
+            assert_eq!(w.wire(65535), 65535);
+            assert_eq!(w.wraps_by(65535), 0);
+        }
+        assert_eq!(
+            (z.wire(65536), z.wire(65537), z.wire(131_071)),
+            (0, 1, 65535)
+        );
+        assert_eq!((z.wire(131_072), z.wraps_by(131_072)), (0, 2));
+        assert_eq!(
+            (o.wire(65536), o.wire(65537), o.wire(131_070)),
+            (1, 2, 65535)
+        );
+        assert_eq!((o.wire(131_071), o.wraps_by(131_071)), (1, 2));
+        assert_eq!(z.wraps_by(65536), 1);
+        assert_eq!(o.wraps_by(65536), 1);
+        // Never panics, whatever the index.
+        assert_eq!(z.wire(u64::MAX), 65535);
+        let _ = o.wire(u64::MAX);
+        let _ = o.wraps_by(u64::MAX);
+    }
+
+    #[test]
+    fn wrap_labels_round_trip() {
+        for w in [BlockWrap::Zero, BlockWrap::One, BlockWrap::Off] {
+            assert_eq!(BlockWrap::from_label(w.label()), Some(w));
+        }
+        assert_eq!(BlockWrap::from_label("Zero"), None);
+        assert_eq!(BlockWrap::from_label(""), None);
+        assert_eq!(BlockWrap::default(), BlockWrap::Zero);
+        assert_eq!(WindowConfig::default().max_window_size, 8);
+    }
+
+    #[test]
+    fn window_bookkeeping_stays_within_64() {
+        let data = file(512 * 300);
+        let now = Instant::now();
+        let pkt = rrq(&[(b"windowsize", b"65535")]);
+        let Ok(Packet::Rrq(r)) = parse(&pkt) else {
+            panic!("not an RRQ")
+        };
+        let win = WindowConfig {
+            max_window_size: u16::MAX,
+            block_wrap: BlockWrap::Zero,
+        };
+        let Admission::Accept { mut transfer, .. } =
+            admit_read_with(&r, &data, &ServerConfig::default(), &win, now)
+        else {
+            panic!("refused")
+        };
+        assert_eq!(transfer.window_size(), MAX_WINDOW_SIZE);
+        assert!(matches!(
+            transfer.on_packet(&encode_ack(0), &data, now),
+            Step::Send(_)
+        ));
+        while transfer.pending_sends() {
+            assert!(matches!(transfer.on_timeout(&data, now), Step::Send(_)));
+            assert!(transfer.sent_hi - transfer.acked <= u64::from(MAX_WINDOW_SIZE));
+        }
+        assert_eq!(transfer.sent_hi, 64);
+    }
+
+    #[test]
+    fn duration_and_size_ceilings_apply() {
+        let cfg = ServerConfig {
+            max_duration: Duration::from_secs(1_000_000),
+            ..ServerConfig::default()
+        };
+        let data = file(10);
+        let t0 = Instant::now();
+        let Admission::Accept { mut transfer, .. } = admit(&rrq(&[]), &data, &cfg, t0) else {
+            panic!("refused")
+        };
+        assert_eq!(
+            transfer.on_timeout(&data, t0 + MAX_DURATION_CEILING),
+            Step::Done(Outcome::Failed(FailReason::MaxDurationExceeded))
+        );
     }
 }

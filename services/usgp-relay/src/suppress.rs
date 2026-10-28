@@ -11,6 +11,14 @@
 //! previous list and emits `suppression.rejected` once per distinct file
 //! content or error. At start-up there is no previous list, so a bad file
 //! refuses start-up (fail closed; exit 78).
+//!
+//! M3 (plan WU-11; decision 0021): when `[server_feed]` is enabled, the
+//! devices on the server's signed boot-policy stop list are refused in the
+//! same way (REQ-BOOT-067), as a union with this file ([`Verdict`]). The
+//! stop list is applied by `crate::feed`; until a first list has been
+//! applied (from the server or the verified cache file) no device is
+//! offered a boot program, so a stopped device is never served because
+//! the relay does not yet know it is stopped (fail closed).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: CM-6 (Configuration Settings) - strict validation, the
@@ -26,9 +34,10 @@
 //   rules on every load.
 // - NIST 800-53: AU-2 / AU-12 - every load and rejection is an event.
 // - SPEC: specs/boot-network.md#REQ-BOOT-007 (MAC or GUID), #REQ-BOOT-045,
-//   #REQ-BOOT-050 (no restart), #REQ-BOOT-051 (no reply)
+//   #REQ-BOOT-050 (no restart), #REQ-BOOT-051 (no reply), #REQ-BOOT-067
+//   (stop booting a device whose install is done)
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock};
@@ -37,6 +46,8 @@ use std::time::Duration;
 use usgp_common::Sha256Digest;
 use usgp_common::config::{ConfigError, TrustPolicy, read_trusted};
 use usgp_dhcp::{Guid, MacAddr};
+use usgp_proto::BootPolicyV1;
+use usgp_proto::ids::{BootServiceId, JobId};
 
 use crate::events::{self, Outcome};
 use crate::{lock, read_lock, write_lock};
@@ -240,6 +251,132 @@ pub fn read_file(
     Ok((SuppressionList::from_document(&doc)?, digest))
 }
 
+/// The stop list of an applied boot-policy generation (REQ-BOOT-067).
+/// MACs are claimed identity, as for suppression (REQ-BOOT-045).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootStops {
+    boot_service_id: BootServiceId,
+    generation: u64,
+    payload_sha256: Sha256Digest,
+    stops: HashMap<[u8; 6], JobId>,
+}
+
+impl BootStops {
+    /// The stop list of a verified, checked policy. `payload_sha256` is
+    /// the SHA-256 of the signed payload bytes.
+    #[must_use]
+    pub fn from_policy(p: &BootPolicyV1, payload_sha256: Sha256Digest) -> Self {
+        Self {
+            boot_service_id: p.boot_service_id,
+            generation: p.generation,
+            payload_sha256,
+            stops: p
+                .stops
+                .iter()
+                .map(|s| (*s.mac.octets(), s.job_id))
+                .collect(),
+        }
+    }
+
+    /// The generation.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The boot service the list is for.
+    #[must_use]
+    pub fn boot_service_id(&self) -> BootServiceId {
+        self.boot_service_id
+    }
+
+    /// SHA-256 of the signed payload.
+    #[must_use]
+    pub fn payload_sha256(&self) -> Sha256Digest {
+        self.payload_sha256
+    }
+
+    /// Number of stopped devices.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.stops.len()
+    }
+
+    /// Whether no device is stopped.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.stops.is_empty()
+    }
+
+    /// The succeeded job that stopped `mac`, if it is stopped.
+    #[must_use]
+    pub fn job_for(&self, mac: MacAddr) -> Option<JobId> {
+        self.stops.get(&mac.octets()).copied()
+    }
+}
+
+/// The boot-policy state the DHCP responder consults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedGate {
+    /// `[server_feed]` is disabled: only the suppression file applies (M1).
+    Off,
+    /// The feed is enabled but no list has been applied yet: no device is
+    /// offered a boot program (fail closed).
+    Awaiting,
+    /// A verified list is in effect.
+    Applied(Arc<BootStops>),
+}
+
+impl FeedGate {
+    /// The applied generation, if any.
+    #[must_use]
+    pub fn generation(&self) -> Option<u64> {
+        match self {
+            Self::Applied(s) => Some(s.generation()),
+            Self::Off | Self::Awaiting => None,
+        }
+    }
+
+    /// Stable label for `relay.start` and `--check-config`.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Off => "disabled",
+            Self::Awaiting => "awaiting",
+            Self::Applied(_) => "applied",
+        }
+    }
+}
+
+/// Whether a device may be offered a boot program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Not suppressed and not stopped.
+    Serve,
+    /// On the local suppression list (REQ-BOOT-050/051).
+    Suppressed,
+    /// On the boot-policy stop list: its job succeeded (REQ-BOOT-067).
+    Stopped(JobId),
+    /// The feed is enabled and no list has been applied yet.
+    PolicyUnavailable,
+}
+
+impl Verdict {
+    /// The verdict for a device: the union of the suppression file and
+    /// the boot-policy stop list. The local list is checked first.
+    #[must_use]
+    pub fn of(list: &SuppressionList, feed: &FeedGate, mac: MacAddr, guid: Option<Guid>) -> Self {
+        if list.contains(mac, guid) {
+            return Self::Suppressed;
+        }
+        match feed {
+            FeedGate::Off => Self::Serve,
+            FeedGate::Awaiting => Self::PolicyUnavailable,
+            FeedGate::Applied(stops) => stops.job_for(mac).map_or(Self::Serve, Self::Stopped),
+        }
+    }
+}
+
 /// What the last reload attempt saw, so an unchanged file (good or bad)
 /// does not repeat its event every poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +403,7 @@ pub struct Suppression {
     trust: TrustPolicy,
     current: RwLock<Arc<SuppressionList>>,
     seen: Mutex<Option<Seen>>,
+    feed: RwLock<FeedGate>,
 }
 
 impl Suppression {
@@ -285,6 +423,7 @@ impl Suppression {
             trust: TrustPolicy::root_only(),
             current: RwLock::new(Arc::new(list)),
             seen: Mutex::new(None),
+            feed: RwLock::new(FeedGate::Off),
         }
     }
 
@@ -319,6 +458,33 @@ impl Suppression {
     /// Replaces the list in effect.
     pub fn set(&self, list: SuppressionList) {
         *write_lock(&self.current) = Arc::new(list);
+    }
+
+    /// The boot-policy state in effect now.
+    #[must_use]
+    pub fn feed(&self) -> FeedGate {
+        read_lock(&self.feed).clone()
+    }
+
+    /// Marks the feed as enabled: until [`Self::apply_stops`] runs, no
+    /// device is offered a boot program. No effect once a list is applied.
+    pub fn require_feed(&self) {
+        let mut g = write_lock(&self.feed);
+        if *g == FeedGate::Off {
+            *g = FeedGate::Awaiting;
+        }
+    }
+
+    /// Replaces the stop list atomically. The caller (`crate::feed`) has
+    /// verified the signature, the boot service and the generation.
+    pub fn apply_stops(&self, stops: BootStops) {
+        *write_lock(&self.feed) = FeedGate::Applied(Arc::new(stops));
+    }
+
+    /// The verdict for a device under the lists in effect now.
+    #[must_use]
+    pub fn verdict(&self, mac: MacAddr, guid: Option<Guid>) -> Verdict {
+        Verdict::of(&self.current(), &self.feed(), mac, guid)
     }
 
     /// Re-reads the configured file. A valid, changed file replaces the

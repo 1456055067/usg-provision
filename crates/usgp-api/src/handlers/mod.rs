@@ -13,12 +13,18 @@
 //   specs/os-support.md#REQ-OS-009
 // - RFC 9110 §8.8.3 (ETag), §13.1.1 (If-Match)
 
+pub(crate) mod auth_codes;
+pub(crate) mod boot_policy;
+pub(crate) mod boot_services;
+pub(crate) mod boot_stops;
 pub(crate) mod content;
 pub(crate) mod declarations;
 pub(crate) mod images;
+pub(crate) mod jobs;
 pub(crate) mod limits;
 pub(crate) mod packages;
 pub(crate) mod pe;
+pub(crate) mod sessions;
 pub(crate) mod uploads;
 
 use http_body_util::{BodyExt, Limited};
@@ -83,6 +89,23 @@ pub(crate) async fn dispatch<S: Store + 'static>(
         RouteId::PackageClone => packages::clone(api, ctx, req).await,
         RouteId::PackageDelete => packages::delete(api, ctx, &req).await,
         RouteId::PackageManifest => packages::manifest(api, ctx).await,
+        RouteId::AuthCodeIssue => auth_codes::issue(api, ctx, req).await,
+        RouteId::AuthCodeList => auth_codes::list(api, ctx).await,
+        RouteId::AuthCodeRevoke => auth_codes::revoke(api, ctx).await,
+        RouteId::DeviceSessionList => sessions::list(api, ctx, &req).await,
+        RouteId::DeviceSessionApprove => sessions::approve(api, ctx, req).await,
+        RouteId::DeviceSessionRefuse => sessions::refuse(api, ctx, req).await,
+        RouteId::JobList => jobs::list(api, ctx, &req).await,
+        RouteId::JobGet => jobs::get(api, ctx).await,
+        RouteId::JobAcknowledge => jobs::acknowledge(api, ctx).await,
+        RouteId::BootServiceList => boot_services::list(api, ctx).await,
+        RouteId::BootServiceGet => boot_services::get(api, ctx).await,
+        RouteId::BootServicePackages => boot_services::set_packages(api, ctx, req).await,
+        RouteId::BootStopList => boot_stops::list(api, ctx).await,
+        RouteId::BootStopClear => boot_stops::clear(api, ctx).await,
+        // Reached only through the boot-service branch of the router; an
+        // operator never gets here (403 before dispatch).
+        RouteId::RelayBootPolicy => Err(ApiError::forbidden()),
     }
 }
 

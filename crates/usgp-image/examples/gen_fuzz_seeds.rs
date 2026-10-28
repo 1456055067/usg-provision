@@ -3,8 +3,10 @@
 //!
 //! Usage: `cargo run -p usgp-image --features testkit --example
 //! gen_fuzz_seeds -- <corpus-dir>`. Writes `<corpus-dir>/<target>/*.bin`
-//! for the targets `wim_header`, `wim_xml`, `wim_lookup`, `wim_check` and
-//! `xpress_chunk`.
+//! for the targets `wim_header`, `wim_xml`, `wim_lookup`, `wim_check`,
+//! `xpress_chunk`, and (M3, WU-4 for WU-14) `wim_metadata` (a decoded
+//! metadata resource) and `wim_apply_plan` (a whole WIM file with a
+//! directory tree, for metadata → plan → `MemorySink`).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SA-11 (Developer Testing and Evaluation)
@@ -34,7 +36,8 @@ mod seeds {
 
     use usgp_image::Compression;
     use usgp_image::testkit::builder::pseudorandom;
-    use usgp_image::testkit::{BuildInfo, WimBuilder, xpress_enc};
+    use usgp_image::testkit::tree::rel_link_data;
+    use usgp_image::testkit::{BuildInfo, NodeSpec, TreeSpec, WimBuilder, xpress_enc};
     use usgp_image::wim::xml::encode_utf16;
 
     fn slice(b: &[u8], offset: u64, len: u64) -> io::Result<Vec<u8>> {
@@ -135,6 +138,33 @@ mod seeds {
             "literals",
             &xpress_enc::compress_literals(b"literal only data"),
         )?;
+
+        // M3: metadata and apply seeds (synthetic trees only).
+        let small = TreeSpec::new(vec![
+            NodeSpec::file("a.txt", b"a\n").short("A.TXT"),
+            NodeSpec::file("s.txt", b"main").stream("usgp-s", b"named"),
+            NodeSpec::dir(
+                "d",
+                vec![
+                    NodeSpec::file("h1", b"linked").link(7),
+                    NodeSpec::file("h2", b"linked").link(7),
+                    NodeSpec::symlink("l", false, &rel_link_data("h1")),
+                ],
+            ),
+        ]);
+        write(&out, "wim_metadata", "small", &small.encode().bytes)?;
+        write(
+            &out,
+            "wim_metadata",
+            "sample",
+            &TreeSpec::sample().encode().bytes,
+        )?;
+        for (name, c) in [("none", Compression::None), ("xpress", Compression::Xpress)] {
+            let (bytes, _) = WimBuilder::new(c)
+                .tree_image("seed", "d", small.clone())
+                .build()?;
+            write(&out, "wim_apply_plan", name, &bytes)?;
+        }
         Ok(())
     }
 }

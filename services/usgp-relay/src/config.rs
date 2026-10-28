@@ -13,6 +13,11 @@
 //!
 //! The file is read-only to the relay: it is opened for reading once at
 //! start-up and never written (REQ-BOOT-053).
+//!
+//! M3 (plan WU-11, section 3.9) adds `[tftp] max_window_size` and
+//! `block_wrap`, raises the `[tftp]` file-size and duration defaults for
+//! Windows PE images, and adds the `[server_feed]` section (the signed
+//! boot-policy pull of decision 0021).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: CM-6 (Configuration Settings) - documented defaults,
@@ -42,6 +47,8 @@ use usgp_common::config::{
 };
 use usgp_common::telemetry::{self, Level};
 use usgp_proto::BootFileName;
+use usgp_proto::ids::BootServiceId;
+use usgp_tftp::{BlockWrap, MAX_WINDOW_SIZE, WindowConfig};
 
 /// Largest accepted configuration file.
 pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
@@ -85,6 +92,8 @@ pub struct ConfigDocument {
     pub content: Option<ContentDocument>,
     /// `[suppression]`.
     pub suppression: Option<SuppressionDocument>,
+    /// `[server_feed]` (M3).
+    pub server_feed: Option<ServerFeedDocument>,
     /// `[log]`.
     pub log: Option<LogDocument>,
 }
@@ -176,10 +185,16 @@ pub struct TftpDocument {
     pub handshake_retries: Option<i64>,
     /// Longest wait for the first ACK, in ms (default 2000, 100 to 60000).
     pub handshake_timeout_ms: Option<i64>,
-    /// Hard limit on a transfer in seconds (default 600, 10 to 3600).
+    /// Hard limit on a transfer in seconds (default 1800, 10 to 7200).
     pub max_transfer_secs: Option<i64>,
-    /// Largest file served (default 67108864, 1 to 4294967295).
+    /// Largest file served (default 1073741824, 1 to 4294967295).
     pub max_file_size_bytes: Option<i64>,
+    /// Largest RFC 7440 `windowsize` granted (default 8, 1 to 64; 1 never
+    /// acknowledges the option).
+    pub max_window_size: Option<i64>,
+    /// What the block number becomes after 65535: `zero` (default), `one`
+    /// or `off` (refuse files that need more than 65535 blocks).
+    pub block_wrap: Option<String>,
 }
 
 /// `[content]`.
@@ -198,6 +213,34 @@ pub struct SuppressionDocument {
     pub file: Option<String>,
     /// Seconds between polls of the suppression file.
     pub reload_interval_secs: Option<i64>,
+}
+
+/// `[server_feed]`: the signed boot-policy pull (plan section 3.6;
+/// decision 0021). Every key other than `enabled` is read only when
+/// `enabled = true`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFeedDocument {
+    /// Pull the boot policy from the server (default false).
+    pub enabled: Option<bool>,
+    /// `https://host[:port]` of the server's operator listener.
+    pub url: Option<String>,
+    /// Name to verify in the server certificate (default: the URL host).
+    pub server_name: Option<String>,
+    /// Absolute path of the PEM trust anchors for the server certificate.
+    pub trust_anchors: Option<String>,
+    /// Absolute path of the relay's client certificate chain (PEM).
+    pub client_cert: Option<String>,
+    /// Absolute path of the relay's client private key (PKCS#8 PEM).
+    pub client_key: Option<String>,
+    /// Absolute path of the pinned boot-policy public key (SPKI PEM).
+    pub boot_policy_key_pub: Option<String>,
+    /// The boot service this relay is enrolled as (UUID).
+    pub boot_service_id: Option<String>,
+    /// Seconds between pulls (default 30, 5 to 3600), with jitter.
+    pub poll_interval_s: Option<i64>,
+    /// Absolute path of the optional cache of the last applied list.
+    pub cache_file: Option<String>,
 }
 
 /// `[log]`.
@@ -327,6 +370,133 @@ pub struct TftpConfig {
     pub max_transfer: Duration,
     /// Largest file read and served (memory bound).
     pub max_file_size: u64,
+    /// Largest RFC 7440 `windowsize` granted (1 to 64).
+    pub max_window_size: u16,
+    /// Block-number wraparound after 65535 (DEC-0018 item 2).
+    pub block_wrap: BlockWrap,
+}
+
+/// `[server_feed]`, validated (only present when `enabled = true`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerFeedConfig {
+    /// The server.
+    pub url: FeedUrl,
+    /// Name verified in the server certificate.
+    pub server_name: String,
+    /// Server trust anchors (PEM).
+    pub trust_anchors: PathBuf,
+    /// Relay client certificate chain (PEM).
+    pub client_cert: PathBuf,
+    /// Relay client private key (PKCS#8 PEM; read into a wiped buffer).
+    pub client_key: PathBuf,
+    /// Pinned boot-policy verifying key (SPKI PEM).
+    pub boot_policy_key_pub: PathBuf,
+    /// This relay's boot service.
+    pub boot_service_id: BootServiceId,
+    /// Pull interval (jitter is added).
+    pub poll_interval: Duration,
+    /// Cache of the last applied signed list, if configured.
+    pub cache_file: Option<PathBuf>,
+}
+
+/// An `https://host[:port]` URL with no path, query, fragment or user
+/// information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedUrl {
+    /// Host: a DNS name or an IPv4 or IPv6 literal (without brackets).
+    pub host: String,
+    /// TCP port (default 443).
+    pub port: u16,
+}
+
+impl FeedUrl {
+    /// Longest accepted URL text.
+    pub const MAX_LEN: usize = 512;
+
+    /// Parses `https://host[:port][/]`.
+    ///
+    /// # Errors
+    ///
+    /// A short reason; the value itself is never echoed.
+    pub fn parse(text: &str) -> Result<Self, &'static str> {
+        if text.is_empty() || text.len() > Self::MAX_LEN {
+            return Err("must be 1 to 512 characters");
+        }
+        let rest = text
+            .strip_prefix("https://")
+            .ok_or("must start with https://")?;
+        let authority = rest.strip_suffix('/').unwrap_or(rest);
+        if authority.is_empty()
+            || !authority
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+        {
+            return Err("must be https://host[:port] with no path, query or user information");
+        }
+        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+            let (h, after) = v6.split_once(']').ok_or("unterminated IPv6 literal")?;
+            if h.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err("bad IPv6 literal");
+            }
+            let port = match after {
+                "" => None,
+                p => Some(p.strip_prefix(':').ok_or("bad port")?),
+            };
+            (h, port)
+        } else {
+            match authority.split_once(':') {
+                Some((h, p)) => (h, Some(p)),
+                None => (authority, None),
+            }
+        };
+        if host.is_empty() || host.contains('[') || host.contains(']') {
+            return Err("bad host");
+        }
+        if !host.contains(':') && !valid_dns_or_ipv4(host) {
+            return Err("bad host");
+        }
+        let port = match port {
+            None => 443,
+            Some(p) if !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) => {
+                match p.parse::<u16>() {
+                    Ok(0) | Err(_) => return Err("port must be 1 to 65535"),
+                    Ok(n) => n,
+                }
+            }
+            Some(_) => return Err("port must be 1 to 65535"),
+        };
+        Ok(Self {
+            host: host.to_owned(),
+            port,
+        })
+    }
+
+    /// The `Host` header value (RFC 9110 §7.2; IPv6 in brackets).
+    #[must_use]
+    pub fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// A DNS host name (labels of 1 to 63 `[A-Za-z0-9-]`, not starting or
+/// ending with `-`, at most 253 characters) or a dotted-quad IPv4 address.
+fn valid_dns_or_ipv4(host: &str) -> bool {
+    if host.parse::<Ipv4Addr>().is_ok() {
+        return true;
+    }
+    host.len() <= 253
+        && host.split('.').all(|l| {
+            (1..=63).contains(&l.len())
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        })
+        // A name made only of digits and dots would read as an address.
+        && !host.bytes().all(|b| b.is_ascii_digit() || b == b'.')
 }
 
 /// `[suppression]`, validated.
@@ -362,6 +532,8 @@ pub struct RelayConfig {
     pub recheck_interval: Duration,
     /// Device suppression.
     pub suppression: SuppressionConfig,
+    /// Boot-policy pull from the server (`None`: disabled, M1 behaviour).
+    pub server_feed: Option<ServerFeedConfig>,
     /// Logging.
     pub log: LogConfig,
     /// Who may own the trusted files (manifest, suppression list). Not
@@ -700,16 +872,40 @@ impl RelayConfig {
                 100,
                 60_000,
             )?,
-            max_transfer: secs_in("tftp.max_transfer_secs", t.max_transfer_secs, 600, 10, 3600)?,
+            // M3 defaults (plan section 3.9): a Windows PE image is held
+            // as one verified in-memory copy, as in M1; the ceilings are
+            // usgp-tftp's hard limits.
+            max_transfer: secs_in(
+                "tftp.max_transfer_secs",
+                t.max_transfer_secs,
+                i64::try_from(usgp_tftp::LARGE_FILE_MAX_DURATION.as_secs()).unwrap_or(1800),
+                10,
+                i64::try_from(usgp_tftp::MAX_DURATION_CEILING.as_secs()).unwrap_or(7200),
+            )?,
             max_file_size: {
                 let v = int_in(
                     "tftp.max_file_size_bytes",
                     t.max_file_size_bytes,
-                    67_108_864,
+                    i64::try_from(usgp_tftp::LARGE_FILE_MAX_SIZE).unwrap_or(1_073_741_824),
                     1,
-                    4_294_967_295,
+                    i64::try_from(usgp_tftp::MAX_FILE_SIZE_CEILING).unwrap_or(4_294_967_295),
                 )?;
                 u64::try_from(v).map_err(|_| invalid("tftp.max_file_size_bytes", "out of range"))?
+            },
+            max_window_size: {
+                let v = int_in(
+                    "tftp.max_window_size",
+                    t.max_window_size,
+                    8,
+                    1,
+                    i64::from(MAX_WINDOW_SIZE),
+                )?;
+                u16::try_from(v).map_err(|_| invalid("tftp.max_window_size", "out of range"))?
+            },
+            block_wrap: match t.block_wrap.as_deref() {
+                None => BlockWrap::Zero,
+                Some(label) => BlockWrap::from_label(label)
+                    .ok_or_else(|| invalid("tftp.block_wrap", "must be zero, one or off"))?,
             },
         };
         if tftp.min_timeout > tftp.initial_timeout {
@@ -755,6 +951,8 @@ impl RelayConfig {
             )?,
         };
 
+        let server_feed = server_feed(doc.server_feed.as_ref())?;
+
         let lg = doc.log.clone().unwrap_or_default();
         let level = telemetry::parse_level(lg.level.as_deref().unwrap_or("info"))
             .map_err(|_| invalid("log.level", "must be error, warn, info or debug"))?;
@@ -778,6 +976,7 @@ impl RelayConfig {
             tftp,
             recheck_interval,
             suppression,
+            server_feed,
             log,
             trust: TrustPolicy::root_only(),
         })
@@ -798,12 +997,23 @@ impl RelayConfig {
         }
     }
 
-    /// The TFTP listener parameters (transfer settings plus the relay's
-    /// handshake timeout).
+    /// The window and wraparound parameters (`usgp_tftp::admit_read_with`;
+    /// RFC 7440, DEC-0018 item 2).
+    #[must_use]
+    pub fn tftp_window_config(&self) -> WindowConfig {
+        WindowConfig {
+            max_window_size: self.tftp.max_window_size,
+            block_wrap: self.tftp.block_wrap,
+        }
+    }
+
+    /// The TFTP listener parameters (transfer settings, window settings,
+    /// and the relay's handshake timeout).
     #[must_use]
     pub fn tftp_listener_config(&self) -> crate::tftp::ListenerConfig {
         crate::tftp::ListenerConfig {
             server: self.tftp_server_config(),
+            window: self.tftp_window_config(),
             handshake_timeout: self.tftp.handshake_timeout,
         }
     }
@@ -813,6 +1023,77 @@ impl RelayConfig {
     pub fn local_addresses(&self) -> Vec<Ipv4Addr> {
         self.interfaces.iter().map(|i| i.address).collect()
     }
+}
+
+/// Validates `[server_feed]` (plan section 3.9). `None` unless
+/// `enabled = true`.
+///
+// COMPLIANCE MAPPING:
+// - NIST 800-53: CM-6 - the feed is off unless configured; every key is
+//   checked; there is no setting that skips TLS or signature checks.
+// - NIST 800-53: SC-8 / IA-3 - only `https` URLs; the server name is
+//   checked by usgp-crypto's rules.
+// - SPEC: specs/boot-network.md#REQ-BOOT-067 (status note: DEC-0021)
+fn server_feed(
+    doc: Option<&ServerFeedDocument>,
+) -> Result<Option<ServerFeedConfig>, ConfigInvalid> {
+    let Some(d) = doc else {
+        return Ok(None);
+    };
+    if d.enabled != Some(true) {
+        return Ok(None);
+    }
+    let raw_url = d
+        .url
+        .as_deref()
+        .ok_or_else(|| invalid("server_feed.url", "is required"))?;
+    let url = FeedUrl::parse(raw_url).map_err(|r| invalid("server_feed.url", r))?;
+    let server_name = d.server_name.clone().unwrap_or_else(|| url.host.clone());
+    if server_name.is_empty()
+        || server_name.len() > 253
+        || usgp_crypto::tls::ClientTls::check_server_name(&server_name).is_err()
+    {
+        return Err(invalid(
+            "server_feed.server_name",
+            "must be a DNS name or IP address",
+        ));
+    }
+    let raw_id = d
+        .boot_service_id
+        .as_deref()
+        .ok_or_else(|| invalid("server_feed.boot_service_id", "is required"))?;
+    let boot_service_id = BootServiceId::parse(raw_id)
+        .map_err(|_| invalid("server_feed.boot_service_id", "must be a non-nil UUID"))?;
+    let cfg = ServerFeedConfig {
+        url,
+        server_name,
+        trust_anchors: absolute_path("server_feed.trust_anchors", d.trust_anchors.as_ref())?,
+        client_cert: absolute_path("server_feed.client_cert", d.client_cert.as_ref())?,
+        client_key: absolute_path("server_feed.client_key", d.client_key.as_ref())?,
+        boot_policy_key_pub: absolute_path(
+            "server_feed.boot_policy_key_pub",
+            d.boot_policy_key_pub.as_ref(),
+        )?,
+        boot_service_id,
+        poll_interval: secs_in(
+            "server_feed.poll_interval_s",
+            d.poll_interval_s,
+            30,
+            5,
+            3600,
+        )?,
+        cache_file: match d.cache_file.as_ref() {
+            Some(f) => Some(absolute_path("server_feed.cache_file", Some(f))?),
+            None => None,
+        },
+    };
+    if cfg.client_cert == cfg.client_key {
+        return Err(invalid(
+            "server_feed.client_key",
+            "must not be the client certificate file",
+        ));
+    }
+    Ok(Some(cfg))
 }
 
 fn interfaces(docs: &[InterfaceDocument]) -> Result<Vec<InterfaceConfig>, ConfigInvalid> {
@@ -951,6 +1232,19 @@ fn canonical_root(root: &Path) -> Result<PathBuf, ConfigLoadError> {
 /// directory.
 pub fn check_trust_paths(config: &RelayConfig) -> Result<(), ConfigLoadError> {
     ensure_trusted_file(&config.boot.manifest, &config.trust)?;
+    if let Some(f) = &config.server_feed {
+        // The feed's anchors, certificate, key and pinned public key are
+        // trust anchors too (CM-5, SC-12); the key's mode rule is applied
+        // when it is read (crate::files).
+        for p in [
+            &f.trust_anchors,
+            &f.client_cert,
+            &f.client_key,
+            &f.boot_policy_key_pub,
+        ] {
+            ensure_trusted_file(p, &config.trust)?;
+        }
+    }
     let root = &config.boot.root;
     let meta = std::fs::metadata(root).map_err(|e| ConfigError::Io {
         path: root.clone(),
@@ -1032,6 +1326,7 @@ mod tests {
             "[boot]\nmanifests = \"/x\"\n",
             "[limits]\ndhcp_client_burstt = 1\n",
             "[tftp]\nwindowsize = 4\n",
+            "[server_feed]\npoll_interval = 30\n",
             "[content]\nx = 1\n",
             "[suppression]\npath = \"/x\"\n",
             "[log]\nformat = \"json\"\n",

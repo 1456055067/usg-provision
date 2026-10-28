@@ -46,17 +46,23 @@ use rustls::{SignatureScheme, SupportedProtocolVersion};
 
 use crate::CryptoError;
 
+mod blocking;
 mod chain;
 mod client;
+mod device_server;
 #[cfg(feature = "test-pki")]
 pub(crate) mod memory;
 mod server;
 pub mod settings;
 mod stream;
 
+pub use blocking::{BlockingClientStream, BlockingClientTls};
 pub use client::ClientTls;
+pub use device_server::DeviceServerTls;
 pub use server::{RefusedHandshake, ServerTls};
-pub use settings::{ClientAlpn, ClientTlsSettings, ServerTlsSettings, TlsMinVersion};
+pub use settings::{
+    ClientAlpn, ClientTlsSettings, DeviceServerTlsSettings, ServerTlsSettings, TlsMinVersion,
+};
 pub use stream::{ClientTlsStream, ServerTlsStream};
 
 pub use crate::x509::PeerCertificate;
@@ -133,6 +139,15 @@ impl TlsFailureClass {
             Self::BadCertificate => "bad_certificate",
             Self::Protocol => "protocol",
         }
+    }
+
+    /// True for certificate validity-period failures ([`Self::Expired`],
+    /// [`Self::NotYetValid`]). The pre-boot agent shows these as "the
+    /// device clock may be wrong", because the device's real-time clock is
+    /// not trusted (plan M3 section 5, R-5).
+    #[must_use]
+    pub const fn is_time_related(self) -> bool {
+        matches!(self, Self::Expired | Self::NotYetValid)
     }
 }
 
@@ -326,6 +341,12 @@ fn config_err(e: impl fmt::Display) -> CryptoError {
     }
 }
 
+/// An empty presented-certificate slot (test PKI's blocking acceptor).
+#[cfg(feature = "test-pki")]
+pub(crate) fn server_slot() -> server::PresentedSlot {
+    server::PresentedSlot::default()
+}
+
 /// Builds a root store from a PEM bundle (at least one anchor).
 fn root_store(pem_text: &[u8], what: &'static str) -> Result<rustls::RootCertStore, CryptoError> {
     let mut roots = rustls::RootCertStore::empty();
@@ -372,5 +393,24 @@ mod provider_tests {
             TlsFailureClass::UnknownCriticalExt.as_str(),
             "unknown_critical_ext"
         );
+    }
+
+    #[test]
+    fn only_validity_period_classes_are_time_related() {
+        assert!(TlsFailureClass::Expired.is_time_related());
+        assert!(TlsFailureClass::NotYetValid.is_time_related());
+        for c in [
+            TlsFailureClass::Untrusted,
+            TlsFailureClass::Revoked,
+            TlsFailureClass::CrlStale,
+            TlsFailureClass::RevocationUnknown,
+            TlsFailureClass::BadEku,
+            TlsFailureClass::UnknownCriticalExt,
+            TlsFailureClass::Policy,
+            TlsFailureClass::BadCertificate,
+            TlsFailureClass::Protocol,
+        ] {
+            assert!(!c.is_time_related(), "{c}");
+        }
     }
 }

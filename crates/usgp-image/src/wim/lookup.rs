@@ -501,6 +501,50 @@ pub(crate) fn scan<R: Read + Seek>(
     c.finish(header_resources)
 }
 
+/// Streams the lookup table at `table` (already checked by [`scan`]) and
+/// returns the location of every file (non-metadata) resource whose hash
+/// is in `needed`. Hashes not found are simply absent from the result; the
+/// caller refuses them (M-08). File hashes are unique ([`scan`] refused
+/// repeats, OBS-008), so each needed hash has at most one location.
+pub(crate) fn resolve<R: Read + Seek>(
+    src: &mut Source<'_, R>,
+    table: &ResourceHeader,
+    needed: &std::collections::HashSet<[u8; 20]>,
+) -> Result<std::collections::HashMap<[u8; 20], ResourceHeader>, WimError> {
+    let mut found = std::collections::HashMap::new();
+    found.try_reserve(needed.len()).map_err(|_| no_memory())?;
+    let mut buf = vec![0u8; ENTRY_LEN.saturating_mul(ENTRIES_PER_READ)];
+    let mut done: u64 = 0;
+    while done < table.stored_size {
+        let left = table.stored_size.saturating_sub(done);
+        let n = usize::try_from(left).map_or(buf.len(), |l| l.min(buf.len()));
+        let piece = buf.get_mut(..n).ok_or(WimError::Malformed {
+            what: "lookup table size",
+        })?;
+        let at = table
+            .offset
+            .checked_add(done)
+            .ok_or(WimError::OutOfBounds {
+                what: "lookup table",
+            })?;
+        src.read_at(at, piece)?;
+        let (entries, rest) = piece.as_chunks::<ENTRY_LEN>();
+        if !rest.is_empty() {
+            return Err(WimError::Malformed {
+                what: "lookup table size",
+            });
+        }
+        for raw in entries {
+            let e = LookupEntry::parse(raw).ok_or(WimError::TooShort)?;
+            if !e.reshdr.is_metadata() && needed.contains(&e.sha1) {
+                found.insert(e.sha1, e.reshdr);
+            }
+        }
+        done = done.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

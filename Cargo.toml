@@ -74,6 +74,8 @@ base64ct = { version = "1", features = ["alloc"] }
 # ONLY (deny.toml enforces). Exact pin: an update is a reviewed dependency
 # change (decision 0019). Features are the plan section 4 list; WU-5 trims it.
 windows-sys = { version = "=0.61.2", features = [
+  "Wdk_Storage_FileSystem",
+  "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
@@ -81,6 +83,7 @@ windows-sys = { version = "=0.61.2", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
   "Win32_System_WindowsProgramming",
   "Win32_System_Threading",
   "Win32_NetworkManagement_IpHelper",

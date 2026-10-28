@@ -54,8 +54,43 @@ pub(crate) fn requests(
         ),
         ("DELETE", format!("/v1/packages/{pkg}"), None),
         ("GET", format!("/v1/packages/{pkg}/manifest"), None),
+        // M3 (plan section 3.5); ids name nothing.
+        (
+            "POST",
+            "/v1/auth-codes".into(),
+            Some(serde_json::json!({"ttl_s": 600})),
+        ),
+        ("GET", "/v1/auth-codes".into(), None),
+        ("DELETE", format!("/v1/auth-codes/{NOWHERE}"), None),
+        ("GET", "/v1/device-sessions".into(), None),
+        (
+            "POST",
+            format!("/v1/device-sessions/{NOWHERE}/approve"),
+            Some(serde_json::json!({"display_code": "ABC-DEF"})),
+        ),
+        (
+            "POST",
+            format!("/v1/device-sessions/{NOWHERE}/refuse"),
+            Some(serde_json::json!({})),
+        ),
+        ("GET", "/v1/jobs".into(), None),
+        ("GET", format!("/v1/jobs/{NOWHERE}"), None),
+        ("POST", format!("/v1/jobs/{NOWHERE}/acknowledge"), None),
+        ("GET", "/v1/boot-services".into(), None),
+        ("GET", format!("/v1/boot-services/{NOWHERE}"), None),
+        (
+            "PUT",
+            format!("/v1/boot-services/{NOWHERE}/packages"),
+            Some(serde_json::json!({"package_ids": []})),
+        ),
+        ("GET", "/v1/boot-stops".into(), None),
+        ("POST", format!("/v1/boot-stops/{NOWHERE}/clear"), None),
+        ("GET", "/v1/relay/boot-policy?have=0".into(), None),
     ]
 }
+
+/// The one route no operator may call (a boot service's own).
+pub(crate) const RELAY_ROUTE: &str = "/v1/relay/boot-policy";
 
 pub(crate) const NOWHERE: &str = "0b7c2f4e-9a1d-4c3b-8e6f-1a2b3c4d5e6f";
 
@@ -116,7 +151,8 @@ async fn no_role_403_nothing_changes_audited_no_existence_leak() {
     }
 }
 
-/// The administrator role reaches every route (no 401/403).
+/// The administrator role reaches every operator route (no 401/403); the
+/// relay's route refuses every operator (403, M3 plan section 3.5).
 #[tokio::test]
 async fn administrator_can_do_every_route() {
     let h = Harness::start().await;
@@ -135,6 +171,11 @@ async fn administrator_can_do_every_route() {
                 body.map(|b| serde_json::to_vec(&b).unwrap()),
             )
             .await;
+        if path.starts_with(RELAY_ROUTE) {
+            assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
+            assert_eq!(r.code(), "forbidden");
+            continue;
+        }
         assert!(
             r.status != 401 && r.status != 403,
             "{m} {path}: {} {}",

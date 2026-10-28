@@ -309,6 +309,10 @@ pub enum ApiInitError {
     /// The content signing key is not among the trusted keys.
     #[error("the content signing key is not trusted for verification")]
     KeyNotTrusted,
+    /// One key is configured for two purposes (content, plan or boot
+    /// policy); each purpose needs its own key.
+    #[error("a signing key is configured for more than one purpose")]
+    KeyReuse,
     /// A database or audit step failed during recovery.
     #[error("start-up recovery failed: {0}")]
     Recovery(String),

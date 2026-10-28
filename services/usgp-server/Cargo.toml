@@ -38,6 +38,9 @@ pg-integration = []
 workspace = true
 
 [dev-dependencies]
+# M3 device-flow tests build and read JSON bodies (no new package: already
+# a workspace dependency of usgp-api and usgp-proto).
+serde_json.workspace = true
 usgp-image = { workspace = true, features = ["testkit"] }
 usgp-crypto = { workspace = true, features = ["test-pki"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros", "test-util"] }

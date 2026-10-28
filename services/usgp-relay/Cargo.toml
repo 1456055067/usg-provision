@@ -24,9 +24,16 @@ libc.workspace = true
 tracing.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+# M3 (plan WU-11, section 3.6): HTTP/1.1 client for the boot-policy pull
+# over usgp-crypto's mTLS stream; key material in wiped buffers.
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util"] }
+usgp-crypto = { workspace = true, features = ["test-pki"] }
 
 [lints]
 workspace = true

@@ -1,4 +1,5 @@
-//! Identifiers and timestamps used on the M2 API and in signed manifests.
+//! Identifiers and timestamps used on the M2 and M3 APIs and in signed
+//! manifests and plans.
 //!
 //! Identifiers are UUIDs (RFC 9562) in their 36-character hyphenated text
 //! form. They are built from random bytes that the caller draws from the
@@ -161,6 +162,32 @@ uuid_id!(
     /// An enrolled operator.
     OperatorId,
     "OperatorId"
+);
+uuid_id!(
+    /// A device session (M3, plan section 3.1).
+    SessionId,
+    "SessionId"
+);
+uuid_id!(
+    /// A provisioning job (M3, plan section 3.2).
+    JobId,
+    "JobId"
+);
+uuid_id!(
+    /// An enrolled boot service (relay; decision 0021).
+    BootServiceId,
+    "BootServiceId"
+);
+uuid_id!(
+    /// An operator-issued authorisation code record (never the code
+    /// value; plan section 3.8).
+    AuthCodeId,
+    "AuthCodeId"
+);
+uuid_id!(
+    /// A boot stop (REQ-BOOT-067).
+    BootStopId,
+    "BootStopId"
 );
 
 /// A UTC timestamp in microseconds since the Unix epoch (JSON integer).

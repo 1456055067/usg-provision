@@ -23,17 +23,33 @@ use crate::error::WimError;
 /// [`CHUNK_SIZE`] as a usize.
 const CHUNK: usize = 32768;
 
-/// Reads the content of `rh` (already bounds-checked against the file)
-/// and hands it to `sink` in order. Compressed resources are decoded with
-/// `decoder`, which is present only when the header said XPRESS.
-///
-/// The choice is made per resource by its own compressed flag.
-// FORMAT: OBS-010 - inside an XPRESS file, resources that did not
-// compress are stored raw with flag 0x04 clear and no chunk table.
+/// How a chunk whose stored size is not below its expanded size is
+/// treated inside a compressed resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawChunks {
+    /// Refused with [`WimError::RawChunkNotSupported`] (the M2 upload
+    /// check keeps this for metadata; its behaviour is unchanged).
+    Refuse,
+    /// Apply (M3, M-21, M-22): a chunk whose stored size equals its
+    /// expanded size (32768, or the remainder for the last chunk) is its
+    /// plain bytes, at any position; a stored size of 0 or above the
+    /// expanded size is refused. With 8-byte table entries (original size
+    /// over 2^32), an entry value or stored size of 2^32 or more is
+    /// refused, and an original size of exactly 2^32 is refused.
+    // FORMAT: OBS-046 (S17; S14 entry 3030: chunks 0, 1, 4, 5 raw) and
+    // OBS-057 (S17B: short final chunks of 100, 5000 and 32767 bytes
+    // stored raw).
+    // FORMAT: OBS-058 (S08B) - 8-byte entries for an original size over
+    // 2^32, every value below 2^32; the exact threshold is open, so 2^32
+    // itself is refused.
+    Apply,
+}
+
 pub(crate) fn read_resource<R: Read + Seek>(
     src: &mut Source<'_, R>,
     rh: &ResourceHeader,
     decoder: Option<&mut XpressDecoder>,
+    raw: RawChunks,
     sink: &mut dyn FnMut(&[u8]) -> Result<(), WimError>,
 ) -> Result<(), WimError> {
     if !rh.is_compressed() {
@@ -47,7 +63,7 @@ pub(crate) fn read_resource<R: Read + Seek>(
     let decoder = decoder.ok_or(WimError::Malformed {
         what: "compressed resource in an uncompressed file",
     })?;
-    read_compressed(src, rh, decoder, sink)
+    read_compressed(src, rh, decoder, raw, sink)
 }
 
 /// The chunk table and chunks of a compressed resource.
@@ -62,6 +78,7 @@ fn read_compressed<R: Read + Seek>(
     src: &mut Source<'_, R>,
     rh: &ResourceHeader,
     decoder: &mut XpressDecoder,
+    raw: RawChunks,
     sink: &mut dyn FnMut(&[u8]) -> Result<(), WimError>,
 ) -> Result<(), WimError> {
     let oob = |what| WimError::OutOfBounds { what };
@@ -70,6 +87,16 @@ fn read_compressed<R: Read + Seek>(
         what: "compressed resource size",
     })?;
     let width = chunk_entry_width(rh.original_size);
+    if raw == RawChunks::Apply {
+        // M-22: exactly 2^32 is ambiguous (OPEN-WIM-10 threshold); with
+        // 8-byte entries the stored size stays below 2^32 (OBS-058).
+        let two32 = 1u64 << 32;
+        if rh.original_size == two32 || (width == 8 && rh.stored_size >= two32) {
+            return Err(WimError::Malformed {
+                what: "chunk table width",
+            });
+        }
+    }
     let data_len = rh
         .stored_size
         .checked_sub(table_len)
@@ -87,7 +114,14 @@ fn read_compressed<R: Read + Seek>(
                 .checked_mul(width)
                 .and_then(|o| o.checked_add(rh.offset))
                 .ok_or(oob("chunk table"))?;
-            read_entry(src, at, width)?
+            let e = read_entry(src, at, width)?;
+            // M-22: entry values at or above 2^32 were never seen.
+            if raw == RawChunks::Apply && e >= 1u64 << 32 {
+                return Err(WimError::Malformed {
+                    what: "chunk table entry",
+                });
+            }
+            e
         };
         if end < start || end > data_len {
             return Err(oob("chunk"));
@@ -100,23 +134,29 @@ fn read_compressed<R: Read + Seek>(
         if comp_len == 0 {
             return Err(WimError::Malformed { what: "chunk size" });
         }
-        if comp_len >= expanded {
-            // FORMAT: derived, unconfirmed - OPEN-WIM-5. OBS-010 saw no
-            // chunk inside a compressed resource stored at or above its
-            // expanded size, so how one would be stored is unknown.
-            // POAM: chunks stored raw inside compressed resources are
-            // refused until a DISM sample shows their layout.
+        let stored_raw = raw == RawChunks::Apply && comp_len == expanded;
+        if comp_len > expanded && raw == RawChunks::Apply {
+            // M-21: no chunk was stored above its expanded size.
+            return Err(WimError::Malformed { what: "chunk size" });
+        }
+        if comp_len >= expanded && !stored_raw {
+            // `Refuse` (the M2 upload check, unchanged): every such chunk
+            // is refused, as before.
             return Err(WimError::RawChunkNotSupported);
         }
-        // Both fit in 32768 bytes: comp_len < expanded <= 32768.
+        // Both fit in 32768 bytes: comp_len <= expanded <= 32768.
         let comp = usize::try_from(comp_len).map_err(|_| oob("chunk"))?;
         let exp = usize::try_from(expanded).map_err(|_| oob("chunk"))?;
         let comp_buf = stored.get_mut(..comp).ok_or(oob("chunk"))?;
         let at = data_start.checked_add(start).ok_or(oob("chunk"))?;
         src.read_at(at, comp_buf)?;
-        let out_buf = out.get_mut(..exp).ok_or(oob("chunk"))?;
-        decoder.decode_chunk(comp_buf, out_buf)?;
-        sink(out_buf)?;
+        if stored_raw {
+            sink(comp_buf)?;
+        } else {
+            let out_buf = out.get_mut(..exp).ok_or(oob("chunk"))?;
+            decoder.decode_chunk(comp_buf, out_buf)?;
+            sink(out_buf)?;
+        }
         start = end;
     }
     Ok(())

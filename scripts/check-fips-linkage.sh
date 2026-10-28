@@ -72,6 +72,7 @@ bins=(usgp-server usgp-relay usgp-preboot-agent usgp-cli)
 bin_args() {
   case "$1" in
     usgp-relay | usgp-server) args=(--self-check) ;;
+    usgp-preboot-agent) args=(--self-test) ;;
     *) args=() ;;
   esac
 }

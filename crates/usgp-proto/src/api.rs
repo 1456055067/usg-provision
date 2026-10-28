@@ -179,7 +179,7 @@ fn param(base: &ErrorCode, field: &'static str) -> ErrorCode {
 }
 
 impl FieldError {
-    fn new(field: &'static str, base: &ErrorCode, message: String) -> Self {
+    pub(crate) fn new(field: &'static str, base: &ErrorCode, message: String) -> Self {
         Self {
             field,
             code: param(base, field),
@@ -187,7 +187,7 @@ impl FieldError {
         }
     }
 
-    fn name(field: &'static str, e: NameError) -> Self {
+    pub(crate) fn name(field: &'static str, e: NameError) -> Self {
         let base = match e {
             NameError::Empty => &codes::EMPTY,
             NameError::TooLong { .. } => &codes::TOO_LONG,
@@ -197,7 +197,7 @@ impl FieldError {
         Self::new(field, base, format!("{field} {e}"))
     }
 
-    fn invalid(field: &'static str, why: impl fmt::Display) -> Self {
+    pub(crate) fn invalid(field: &'static str, why: impl fmt::Display) -> Self {
         Self::new(field, &codes::INVALID_VALUE, format!("{field}: {why}"))
     }
 
@@ -692,6 +692,10 @@ pub struct ErrorDetail {
     /// (decision 0015 item 2, REQ-IMG-015).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependants: Vec<PackageRef>,
+    /// Code attempts left in the device session, for `code_not_accepted`
+    /// (M3 plan section 3.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts_left: Option<u32>,
 }
 
 /// Every error response: `{"error": {"code": ..., "message": ...}}` plus
@@ -714,6 +718,7 @@ impl ErrorBody {
                 limit_bytes: None,
                 existing_id: None,
                 dependants: Vec::new(),
+                attempts_left: None,
             },
         }
     }

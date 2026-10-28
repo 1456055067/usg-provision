@@ -876,3 +876,102 @@ pub fn memory_handshake(
         resumed,
     })
 }
+
+/// The server side of a blocking test connection ([`accept_blocking`]).
+///
+/// Implements [`std::io::Read`] and [`std::io::Write`].
+pub struct BlockingTestServerStream(
+    rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>,
+);
+
+impl BlockingTestServerStream {
+    /// Sends `close_notify` and flushes it.
+    ///
+    /// # Errors
+    ///
+    /// The transport's write error.
+    pub fn close(mut self) -> std::io::Result<()> {
+        use std::io::Write as _;
+        self.0.conn.send_close_notify();
+        while self.0.conn.wants_write() {
+            if self.0.conn.write_tls(&mut self.0.sock)? == 0 {
+                break;
+            }
+        }
+        self.0.sock.flush()
+    }
+
+    /// The raw socket, for tests that cut the connection without
+    /// `close_notify` (truncation).
+    #[must_use]
+    pub fn into_socket(self) -> std::net::TcpStream {
+        self.0.sock
+    }
+}
+
+impl std::fmt::Debug for BlockingTestServerStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockingTestServerStream")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::io::Read for BlockingTestServerStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl std::io::Write for BlockingTestServerStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// Runs the server side of a TLS handshake on a blocking socket, through
+/// the same per-connection configuration and identity step as
+/// [`ServerTls::accept`]. Test double for the blocking client tests.
+///
+/// Returns the stream and the client certificate, if one was presented.
+///
+/// # Errors
+///
+/// [`TlsFailure`] if the handshake fails or is refused.
+pub fn accept_blocking(
+    server: &ServerTls,
+    mut tcp: std::net::TcpStream,
+) -> Result<(BlockingTestServerStream, Option<PeerCertificate>), TlsFailure> {
+    let protocol = |detail: String| TlsFailure {
+        class: crate::tls::TlsFailureClass::Protocol,
+        detail,
+    };
+    let slot = std::sync::Arc::new(crate::tls::server_slot());
+    let config = server
+        .connection_config(&slot)
+        .map_err(|e| protocol(e.to_string()))?;
+    let mut conn =
+        rustls::ServerConnection::new(config).map_err(|e| TlsFailure::from_rustls(&e))?;
+    for _ in 0..256 {
+        if !conn.is_handshaking() {
+            break;
+        }
+        let (r, w) = conn
+            .complete_io(&mut tcp)
+            .map_err(|e| TlsFailure::from_io(&e))?;
+        if r == 0 && w == 0 && conn.is_handshaking() {
+            return Err(protocol("connection closed during handshake".to_string()));
+        }
+    }
+    if conn.is_handshaking() {
+        return Err(protocol("handshake did not complete".to_string()));
+    }
+    let peer = server.peer_identity(conn.peer_certificates())?;
+    Ok((
+        BlockingTestServerStream(rustls::StreamOwned::new(conn, tcp)),
+        peer,
+    ))
+}

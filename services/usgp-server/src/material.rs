@@ -16,6 +16,8 @@
 // - NIST 800-53: IA-5(2), SC-13 - certificate-only database login:
 //   `assert_certificate_only` (decision 0012).
 // - NIST 800-53: CM-5 / SI-7 - trusted files only.
+// - NIST 800-53: SC-8, IA-3 - the device listener's TLS authenticates the
+//   server only (decision 0020), FIPS provider.
 // - SPEC: specs/operator-access.md#REQ-RBAC-005; plan sections 5.4, 5.5
 
 use std::collections::BTreeMap;
@@ -24,11 +26,13 @@ use std::path::Path;
 use usgp_common::Sha256Digest;
 use usgp_common::config::{ConfigError, TrustPolicy};
 use usgp_crypto::pem::{MAX_CERT_PEM_BYTES, MAX_CRL_BYTES, MAX_KEY_PEM_BYTES};
-use usgp_crypto::tls::{ServerTls, ServerTlsSettings, TlsMinVersion};
+use usgp_crypto::tls::{
+    DeviceServerTls, DeviceServerTlsSettings, ServerTls, ServerTlsSettings, TlsMinVersion,
+};
 use usgp_crypto::{CrlNumber, CryptoError, Sha256Hasher};
 use usgp_db::DbSettings;
 
-use crate::config::{DB_APPLICATION_NAME, DatabaseConfig, TlsConfig};
+use crate::config::{DB_APPLICATION_NAME, DatabaseConfig, DeviceListenerConfig, TlsConfig};
 use crate::files::{KeyAccess, read_private_key, read_private_key_with, read_trusted_public};
 
 /// Why TLS or database material could not be loaded (exit 78). Names the
@@ -223,6 +227,34 @@ pub fn build_server_tls(
     // `settings.private_key_pem` is wiped when `settings` drops.
     ServerTls::new(&settings).map_err(|source| MaterialError::Crypto {
         key: "tls".to_owned(),
+        source,
+    })
+}
+
+/// Builds the device listener's TLS configuration (server authentication
+/// only, decision 0020; FIPS asserted by usgp-crypto) from
+/// `[device_api] cert_chain` and `private_key`, read under the same rules
+/// as the operator listener's files.
+///
+/// # Errors
+///
+/// [`MaterialError`].
+pub fn build_device_tls(
+    d: &DeviceListenerConfig,
+    policy: &TrustPolicy,
+) -> Result<DeviceServerTls, MaterialError> {
+    let cert_chain_pem = read_trusted_public(&d.cert_chain, wide(MAX_CERT_PEM_BYTES), policy)
+        .map_err(file_err("device_api.cert_chain"))?;
+    let private_key_pem = read_private_key(&d.private_key, wide(MAX_KEY_PEM_BYTES), policy)
+        .map_err(key_err("device_api.private_key"))?;
+    let settings = DeviceServerTlsSettings {
+        cert_chain_pem,
+        private_key_pem,
+        min_version: d.min_version,
+    };
+    // `settings.private_key_pem` is wiped when `settings` drops.
+    DeviceServerTls::new(&settings).map_err(|source| MaterialError::Crypto {
+        key: "device_api".to_owned(),
         source,
     })
 }

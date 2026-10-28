@@ -37,7 +37,9 @@ use usgp_proto::UnixMicros;
 
 use crate::authn::{Principal, UnauthLimiter};
 use crate::checker::ContentChecker;
+use crate::device::DeviceState;
 use crate::error::{ApiError, ApiInitError};
+use crate::keys::ProvisioningKeys;
 use crate::limits::ApiConfig;
 use crate::manifest::ContentKeys;
 use crate::routes::{Params, RouteSpec};
@@ -80,6 +82,8 @@ pub(crate) struct Inner<S> {
     pub(crate) check_slots: Arc<Semaphore>,
     pub(crate) unauth: UnauthLimiter,
     pub(crate) checkpoint_alarm: Mutex<AlarmGate>,
+    pub(crate) provisioning: Option<ProvisioningKeys>,
+    pub(crate) device: DeviceState,
 }
 
 /// How often at most a failed checkpoint is reported on the mirror.
@@ -144,6 +148,7 @@ pub struct ApiBuilder<S: Store> {
     keys: ContentKeys,
     checkpointer: Option<Checkpointer>,
     checker: Option<Arc<dyn ContentChecker>>,
+    provisioning: Option<ProvisioningKeys>,
 }
 
 impl<S: Store> std::fmt::Debug for ApiBuilder<S> {
@@ -167,13 +172,29 @@ impl<S: Store + 'static> ApiBuilder<S> {
         self
     }
 
+    /// The M3 plan, boot-policy and code keys (plan M3 section 5). Without
+    /// them the device listener does not start, and the code, confirm and
+    /// boot-policy routes answer 503 `unavailable` (fail closed).
+    #[must_use]
+    pub fn provisioning_keys(mut self, keys: ProvisioningKeys) -> Self {
+        self.provisioning = Some(keys);
+        self
+    }
+
     /// Validates the configuration and opens the content store.
     ///
     /// # Errors
     ///
-    /// [`ApiInitError`].
+    /// [`ApiInitError`]; [`ApiInitError::KeyReuse`] if the plan or
+    /// boot-policy key is the content signing key.
     pub fn build(self) -> Result<Api<S>, ApiInitError> {
         self.config.validate()?;
+        if let Some(p) = &self.provisioning {
+            let content = self.keys.key_id();
+            if p.plan_key_id() == content || p.boot_policy_key_id() == content {
+                return Err(ApiInitError::KeyReuse);
+            }
+        }
         let files = ContentStore::open(&self.config.content.root).map_err(|source| {
             ApiInitError::Store {
                 what: "open content root",
@@ -187,6 +208,7 @@ impl<S: Store + 'static> ApiBuilder<S> {
         });
         let slots = self.config.content.check_concurrency;
         let unauth = UnauthLimiter::new(self.config.unauth_caps());
+        let device = DeviceState::new(&self.config.device);
         Ok(Api {
             inner: Arc::new(Inner {
                 store: self.store,
@@ -199,6 +221,8 @@ impl<S: Store + 'static> ApiBuilder<S> {
                 check_slots: Arc::new(Semaphore::new(slots)),
                 unauth,
                 checkpoint_alarm: Mutex::new(AlarmGate::new(CHECKPOINT_ALARM_EVERY)),
+                provisioning: self.provisioning,
+                device,
             }),
         })
     }
@@ -255,6 +279,7 @@ impl<S: Store + 'static> Api<S> {
             keys,
             checkpointer: None,
             checker: None,
+            provisioning: None,
         }
     }
 
@@ -280,6 +305,12 @@ impl<S: Store + 'static> Api<S> {
     #[must_use]
     pub fn keys(&self) -> &ContentKeys {
         &self.inner.keys
+    }
+
+    /// The M3 keys, if configured.
+    #[must_use]
+    pub fn provisioning_keys(&self) -> Option<&ProvisioningKeys> {
+        self.inner.provisioning.as_ref()
     }
 
     /// The audit chain.

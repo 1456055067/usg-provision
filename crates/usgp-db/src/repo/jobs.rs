@@ -1,0 +1,477 @@
+//! Jobs and job steps (PostgreSQL).
+//!
+//! A job is inserted in the confirming transaction together with its
+//! `job.created` and `disk.wipe.authorised` audit records; the job names
+//! the latter by sequence number and record hash, and migration 0004
+//! refuses the transaction at its end unless that record exists, is a
+//! successful `disk.wipe.authorised` and targets this job (the wipe
+//! guard, REQ-DISK-006).
+
+// COMPLIANCE MAPPING:
+// - NIST 800-53: AU-12, AU-5 - the wipe authorisation is a durable audit
+//   record before any plan exists; no record, no job.
+// - NIST 800-53: SI-10 - steps advance only in order; success only after
+//   step 4; a finished job never changes (guard in migration 0004).
+// - NIST 800-53: SI-7 - plan digest and signing key recorded.
+// - SPEC: specs/disk.md#REQ-DISK-006; specs/progress.md#REQ-JOB-001,
+//   #REQ-JOB-002, #REQ-JOB-005, #REQ-JOB-006, #REQ-JOB-009, #REQ-JOB-012,
+//   #REQ-JOB-013
+// - Decision 0018 items 7 and 10
+
+use tokio_postgres::Row;
+use usgp_crypto::KeyId;
+use usgp_proto::{
+    BootServiceId, ContentId, EditionIndex, FailureV1, JobId, JobState, LayoutReportV1, MacList,
+    OperatorId, PackageId, SessionId, Step, StepState, UnixMicros,
+};
+
+use super::content::cas_miss;
+use super::conv::{
+    bytes32, col, col_digest, col_enum, col_id, col_json, col_macs, col_micros, col_opt_id,
+    col_opt_json, col_opt_micros, col_opt_u64, col_step, col_u32, col_u64, mac_params, step_param,
+    texts, to_i32, to_i64, to_json, to_uuid,
+};
+use crate::error::DbError;
+use crate::model::{ChosenPackage, Job, JobStep, NewJob};
+use crate::pool::PgTx;
+
+const COLUMNS: &str = "id, session_id, boot_service_id, package_id, package_revision, \
+     image_content_id, edition_index, disk, layout, macs, state, current_step, failure_step, \
+     failure_category, failure_detail, attempts, bytes_done, bytes_total, last_seq, \
+     started_at_us, last_report_at_us, finished_at_us, previous_job_id, wipe_audit_seq, \
+     wipe_record_hash, plan_sha256, plan_key_id, acknowledged_by, acknowledged_at_us";
+
+const STEP_COLUMNS: &str = "job_id, step, state, started_at_us, finished_at_us";
+
+fn from_row(r: &Row) -> Result<Job, DbError> {
+    let failure: Option<FailureV1> = col_opt_json(r, "failure_detail")?;
+    let failure_step: Option<i16> = col(r, "failure_step")?;
+    let failure_category: Option<&str> = col(r, "failure_category")?;
+    // The indexed columns must agree with the stored failure.
+    match (&failure, failure_step, failure_category) {
+        (None, None, None) => {}
+        (Some(f), Some(s), Some(c)) if step_param(f.step) == s && f.category.as_str() == c => {}
+        _ => {
+            return Err(DbError::Corrupt {
+                what: "failure_detail",
+            });
+        }
+    }
+    let ack_by = col_opt_id(r, "acknowledged_by", OperatorId::from_bytes)?;
+    let ack_at = col_opt_micros(r, "acknowledged_at_us")?;
+    let acknowledged = match (ack_by, ack_at) {
+        (None, None) => None,
+        (Some(by), Some(at)) => Some((by, at)),
+        _ => {
+            return Err(DbError::Corrupt {
+                what: "acknowledged",
+            });
+        }
+    };
+    let key: &[u8] = col(r, "plan_key_id")?;
+    Ok(Job {
+        id: col_id(r, "id", JobId::from_bytes)?,
+        session_id: col_id(r, "session_id", SessionId::from_bytes)?,
+        boot_service_id: col_id(r, "boot_service_id", BootServiceId::from_bytes)?,
+        package: ChosenPackage {
+            id: col_id(r, "package_id", PackageId::from_bytes)?,
+            revision: col_u64(r, "package_revision")?,
+        },
+        image_content_id: col_id(r, "image_content_id", ContentId::from_bytes)?,
+        edition_index: EditionIndex::new(u64::from(col_u32(r, "edition_index")?)).map_err(
+            |_| DbError::Corrupt {
+                what: "edition_index",
+            },
+        )?,
+        disk: col_json(r, "disk")?,
+        layout: col_opt_json(r, "layout")?,
+        macs: col_macs(r, "macs")?,
+        state: col_enum(r, "state", JobState::parse)?,
+        current_step: col_step(r, "current_step")?,
+        failure,
+        attempts: col_u32(r, "attempts")?,
+        bytes_done: col_opt_u64(r, "bytes_done")?,
+        bytes_total: col_opt_u64(r, "bytes_total")?,
+        last_seq: col_u64(r, "last_seq")?,
+        started_at: col_micros(r, "started_at_us")?,
+        last_report_at: col_opt_micros(r, "last_report_at_us")?,
+        finished_at: col_opt_micros(r, "finished_at_us")?,
+        previous_job_id: col_opt_id(r, "previous_job_id", JobId::from_bytes)?,
+        wipe_audit_seq: col_u64(r, "wipe_audit_seq")?,
+        wipe_record_hash: col_digest(r, "wipe_record_hash")?,
+        plan_sha256: col_digest(r, "plan_sha256")?,
+        plan_key_id: KeyId(usgp_common::Sha256Digest(bytes32(key, "plan_key_id")?)),
+        acknowledged,
+    })
+}
+
+fn step_from_row(r: &Row) -> Result<JobStep, DbError> {
+    Ok(JobStep {
+        job_id: col_id(r, "job_id", JobId::from_bytes)?,
+        step: col_step(r, "step")?,
+        state: col_enum(r, "state", StepState::parse)?,
+        started_at: col_opt_micros(r, "started_at_us")?,
+        finished_at: col_opt_micros(r, "finished_at_us")?,
+    })
+}
+
+pub(crate) async fn insert(tx: &mut PgTx, j: &NewJob) -> Result<(), DbError> {
+    if j.previous_job_id == Some(j.id) {
+        return Err(DbError::InvalidArgument {
+            what: "previous job is the job itself",
+        });
+    }
+    let disk = to_json(&j.disk, "disk descriptor")?;
+    let id = to_uuid(j.id.as_bytes());
+    tx.execute(
+        "insert job",
+        "INSERT INTO job (id, session_id, boot_service_id, package_id, package_revision, \
+         image_content_id, edition_index, disk, macs, state, current_step, bytes_total, \
+         started_at_us, previous_job_id, wipe_audit_seq, wipe_record_hash, plan_sha256, \
+         plan_key_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'running', 1, $10, $11, $12, $13, $14, \
+         $15, $16)",
+        &[
+            &id,
+            &to_uuid(j.session_id.as_bytes()),
+            &to_uuid(j.boot_service_id.as_bytes()),
+            &to_uuid(j.package.id.as_bytes()),
+            &to_i64(j.package.revision, "package revision")?,
+            &to_uuid(j.image_content_id.as_bytes()),
+            &to_i32(j.edition_index.get(), "edition index")?,
+            &disk,
+            &mac_params(&j.macs),
+            &j.bytes_total
+                .map(|b| to_i64(b, "bytes_total"))
+                .transpose()?,
+            &j.started_at.as_micros(),
+            &j.previous_job_id.map(|p| to_uuid(p.as_bytes())),
+            &to_i64(j.wipe_audit_seq, "wipe audit seq")?,
+            &j.wipe_record_hash.0.as_slice(),
+            &j.plan_sha256.0.as_slice(),
+            &j.plan_key_id.0.0.as_slice(),
+        ],
+    )
+    .await?;
+    for step in Step::ALL {
+        let first = step == Step::VERIFY_CONTENT;
+        let state = if first {
+            StepState::Running
+        } else {
+            StepState::Pending
+        };
+        tx.execute(
+            "insert job_step",
+            "INSERT INTO job_step (job_id, step, state, started_at_us) VALUES ($1, $2, $3, $4)",
+            &[
+                &id,
+                &step_param(step),
+                &state.as_str(),
+                &first.then(|| j.started_at.as_micros()),
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn get(tx: &mut PgTx, id: JobId, lock: bool) -> Result<Option<Job>, DbError> {
+    let sql = format!(
+        "SELECT {COLUMNS} FROM job WHERE id = $1{}",
+        if lock { " FOR UPDATE" } else { "" }
+    );
+    let row = tx
+        .query_opt("read job", &sql, &[&to_uuid(id.as_bytes())])
+        .await?;
+    row.map(|r| from_row(&r)).transpose()
+}
+
+pub(crate) async fn by_session(tx: &mut PgTx, id: SessionId) -> Result<Option<Job>, DbError> {
+    let sql = format!("SELECT {COLUMNS} FROM job WHERE session_id = $1");
+    let row = tx
+        .query_opt("read job", &sql, &[&to_uuid(id.as_bytes())])
+        .await?;
+    row.map(|r| from_row(&r)).transpose()
+}
+
+pub(crate) async fn list(tx: &mut PgTx, states: &[JobState]) -> Result<Vec<Job>, DbError> {
+    let st = texts(states, JobState::as_str);
+    let sql = format!(
+        "SELECT {COLUMNS} FROM job WHERE (cardinality($1::text[]) = 0 OR state = ANY($1)) \
+         ORDER BY started_at_us, id"
+    );
+    let rows = tx.query("list job", &sql, &[&st]).await?;
+    rows.iter().map(from_row).collect()
+}
+
+pub(crate) async fn steps(tx: &mut PgTx, id: JobId) -> Result<Vec<JobStep>, DbError> {
+    let sql = format!("SELECT {STEP_COLUMNS} FROM job_step WHERE job_id = $1 ORDER BY step");
+    let rows = tx
+        .query("list job_step", &sql, &[&to_uuid(id.as_bytes())])
+        .await?;
+    rows.iter().map(step_from_row).collect()
+}
+
+pub(crate) async fn previous_failed(
+    tx: &mut PgTx,
+    macs: &MacList,
+) -> Result<Option<JobId>, DbError> {
+    let row = tx
+        .query_opt(
+            "read job by mac",
+            "SELECT id FROM job WHERE state IN ('failed', 'lost') AND macs && $1::bytea[] \
+             ORDER BY started_at_us DESC, id DESC LIMIT 1",
+            &[&mac_params(macs)],
+        )
+        .await?;
+    row.map(|r| col_id(&r, "id", JobId::from_bytes)).transpose()
+}
+
+/// The row-locked state of a job, or `NotFound`.
+async fn locked_state(tx: &mut PgTx, id: &uuid::Uuid) -> Result<JobState, DbError> {
+    let row = tx
+        .query_opt(
+            "lock job",
+            "SELECT state FROM job WHERE id = $1 FOR UPDATE",
+            &[id],
+        )
+        .await?;
+    match row {
+        Some(r) => col_enum(&r, "state", JobState::parse),
+        None => Err(DbError::NotFound { what: "job" }),
+    }
+}
+
+/// The source state a step must be in to move to `to`.
+pub(crate) fn step_from_state(to: StepState) -> Result<StepState, DbError> {
+    match to {
+        StepState::Running => Ok(StepState::Pending),
+        StepState::Done | StepState::Failed => Ok(StepState::Running),
+        StepState::Pending => Err(DbError::InvalidArgument {
+            what: "a step cannot return to pending",
+        }),
+    }
+}
+
+pub(crate) async fn set_step(
+    tx: &mut PgTx,
+    id: JobId,
+    step: Step,
+    to: StepState,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    let from = step_from_state(to)?;
+    let uid = to_uuid(id.as_bytes());
+    if locked_state(tx, &uid).await?.is_final() {
+        return Err(DbError::Conflict { what: "job" });
+    }
+    let n = step_param(step);
+    if to == StepState::Running {
+        // Steps advance only in order (plan section 3.4).
+        let row = tx
+            .query_opt(
+                "read job_step",
+                "SELECT count(*) AS n FROM job_step \
+                 WHERE job_id = $1 AND step < $2 AND state <> 'done'",
+                &[&uid, &n],
+            )
+            .await?;
+        let open = match row {
+            Some(r) => col_u64(&r, "n")?,
+            None => return Err(DbError::Corrupt { what: "count" }),
+        };
+        if open != 0 {
+            return Err(DbError::Conflict { what: "job step" });
+        }
+    }
+    let at = at.as_micros();
+    let started = (to == StepState::Running).then_some(at);
+    let finished = (to != StepState::Running).then_some(at);
+    let changed = tx
+        .execute(
+            "update job_step",
+            "UPDATE job_step SET state = $3, started_at_us = COALESCE($4, started_at_us), \
+             finished_at_us = COALESCE($5, finished_at_us) \
+             WHERE job_id = $1 AND step = $2 AND state = $6",
+            &[&uid, &n, &to.as_str(), &started, &finished, &from.as_str()],
+        )
+        .await?;
+    if changed == 0 {
+        return Err(DbError::Conflict { what: "job step" });
+    }
+    if to == StepState::Running {
+        tx.execute(
+            "update job step",
+            "UPDATE job SET current_step = GREATEST(current_step, $2) WHERE id = $1",
+            &[&uid, &n],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn set_state(
+    tx: &mut PgTx,
+    id: JobId,
+    from: &[JobState],
+    to: JobState,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    if to == JobState::Failed {
+        return Err(DbError::InvalidArgument {
+            what: "use fail_job",
+        });
+    }
+    let uid = to_uuid(id.as_bytes());
+    let st = texts(from, JobState::as_str);
+    let finished = (to == JobState::Succeeded).then(|| at.as_micros());
+    // Success only after step 4 completed (REQ-JOB-013).
+    let n = tx
+        .execute(
+            "update job state",
+            "UPDATE job SET state = $2, finished_at_us = $3 \
+             WHERE id = $1 AND state = ANY($4) AND ($2 <> 'succeeded' OR EXISTS ( \
+                 SELECT 1 FROM job_step s WHERE s.job_id = $1 AND s.step = 4 AND s.state = 'done'))",
+            &[&uid, &to.as_str(), &finished, &st],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "job", &uid).await);
+    }
+    Ok(())
+}
+
+pub(crate) async fn fail(
+    tx: &mut PgTx,
+    id: JobId,
+    from: &[JobState],
+    failure: &FailureV1,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    failure
+        .validate()
+        .map_err(|_| DbError::InvalidArgument { what: "failure" })?;
+    let uid = to_uuid(id.as_bytes());
+    let st = texts(from, JobState::as_str);
+    let detail = to_json(failure, "failure")?;
+    let n = tx
+        .execute(
+            "update job failed",
+            "UPDATE job SET state = 'failed', failure_step = $2, failure_category = $3, \
+             failure_detail = $4, attempts = $5, finished_at_us = $6 \
+             WHERE id = $1 AND state = ANY($7)",
+            &[
+                &uid,
+                &step_param(failure.step),
+                &failure.category.as_str(),
+                &detail,
+                &to_i32(failure.attempts, "attempts")?,
+                &at.as_micros(),
+                &st,
+            ],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "job", &uid).await);
+    }
+    Ok(())
+}
+
+pub(crate) async fn set_layout(
+    tx: &mut PgTx,
+    id: JobId,
+    layout: &LayoutReportV1,
+) -> Result<(), DbError> {
+    let uid = to_uuid(id.as_bytes());
+    let json = to_json(layout, "layout")?;
+    let n = tx
+        .execute(
+            "update job layout",
+            "UPDATE job SET layout = $2 WHERE id = $1 AND state IN ('running', 'lost')",
+            &[&uid, &json],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "job", &uid).await);
+    }
+    Ok(())
+}
+
+pub(crate) async fn record_progress(
+    tx: &mut PgTx,
+    id: JobId,
+    seq: u64,
+    bytes_done: Option<u64>,
+    bytes_total: Option<u64>,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    if let (Some(d), Some(t)) = (bytes_done, bytes_total)
+        && d > t
+    {
+        return Err(DbError::InvalidArgument {
+            what: "bytes_done above bytes_total",
+        });
+    }
+    let uid = to_uuid(id.as_bytes());
+    let n = tx
+        .execute_bookkeeping(
+            "update job progress",
+            "UPDATE job SET last_seq = $2, last_report_at_us = $3, \
+             bytes_done = COALESCE($4, bytes_done), bytes_total = COALESCE($5, bytes_total) \
+             WHERE id = $1 AND state IN ('running', 'lost') AND last_seq < $2 \
+             AND COALESCE($4, bytes_done, 0) <= COALESCE($5, bytes_total, $4, bytes_done, 0)",
+            &[
+                &uid,
+                &to_i64(seq, "seq")?,
+                &at.as_micros(),
+                &bytes_done.map(|b| to_i64(b, "bytes_done")).transpose()?,
+                &bytes_total.map(|b| to_i64(b, "bytes_total")).transpose()?,
+            ],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "job", &uid).await);
+    }
+    Ok(())
+}
+
+pub(crate) async fn acknowledge(
+    tx: &mut PgTx,
+    id: JobId,
+    by: OperatorId,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    let uid = to_uuid(id.as_bytes());
+    let n = tx
+        .execute(
+            "update job acknowledged",
+            "UPDATE job SET acknowledged_by = $2, acknowledged_at_us = $3 \
+             WHERE id = $1 AND state = 'failed' AND acknowledged_by IS NULL",
+            &[&uid, &to_uuid(by.as_bytes()), &at.as_micros()],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "job", &uid).await);
+    }
+    Ok(())
+}
+
+pub(crate) async fn mark_lost(
+    tx: &mut PgTx,
+    silent_before: UnixMicros,
+) -> Result<Vec<JobId>, DbError> {
+    let rows = tx
+        .query_write(
+            "update job lost",
+            "UPDATE job SET state = 'lost' WHERE state = 'running' \
+             AND COALESCE(last_report_at_us, started_at_us) < $1 RETURNING id",
+            &[&silent_before.as_micros()],
+        )
+        .await?;
+    let mut ids = rows
+        .iter()
+        .map(|r| col_id(r, "id", JobId::from_bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.sort();
+    Ok(ids)
+}

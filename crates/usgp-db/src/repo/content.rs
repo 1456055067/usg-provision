@@ -316,6 +316,11 @@ pub(crate) async fn cas_miss(tx: &mut PgTx, table: &'static str, id: &uuid::Uuid
     let sql = match table {
         "upload" => "SELECT 1 FROM upload WHERE id = $1",
         "package" => "SELECT 1 FROM package WHERE id = $1",
+        "auth code" => "SELECT 1 FROM auth_code WHERE id = $1",
+        "device session" => "SELECT 1 FROM device_session WHERE id = $1",
+        "job" => "SELECT 1 FROM job WHERE id = $1",
+        "boot stop" => "SELECT 1 FROM boot_stop WHERE id = $1",
+        "boot service" => "SELECT 1 FROM boot_service WHERE id = $1",
         _ => "SELECT 1 FROM content WHERE id = $1",
     };
     match tx.query_opt("compare-and-set check", sql, &[id]).await {

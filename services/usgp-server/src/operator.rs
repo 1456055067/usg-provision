@@ -2,7 +2,8 @@
 //! commands (plan M2 sections 1.1 and 7; decision 0007).
 //!
 //! One certificate binds to exactly one operator by the SHA-256 of its
-//! DER; enrolling a certificate that is already bound is refused. Each
+//! DER; enrolling a certificate that is already bound (to an operator, or
+//! in M3 to a boot service) is refused. Each
 //! change and its `operator.enrolled` / `operator.disabled` record commit
 //! in one transaction (decision 0015 item 1); a refusal is recorded in a
 //! transaction of its own. The actor is the local uid (plan section 7:
@@ -144,6 +145,20 @@ pub async fn enrol<S: Store>(
         return Err(OperatorCmdError::Refused("certificate_eku"));
     }
     let mut tx = store.begin().await?;
+    // M3 (decision 0021): a certificate bound to a boot service is a
+    // relay's; the API refuses a certificate bound to both.
+    if let Some(bs) = tx.boot_service_by_cert(&req.cert.sha256).await? {
+        tx.rollback().await;
+        let d = who
+            .draft(events::OPERATOR_ENROL_REFUSED, Outcome::Refused)
+            .target("boot_service", &bs.id.to_string())
+            .reason("certificate_bound_to_boot_service")
+            .detail(Detail::new().with("cert_sha256", &req.cert.sha256));
+        events::record(store, chain, &d).await?;
+        return Err(OperatorCmdError::Refused(
+            "certificate_bound_to_boot_service",
+        ));
+    }
     if let Some(existing) = tx.operator_by_cert(&req.cert.sha256).await? {
         tx.rollback().await;
         let d = who

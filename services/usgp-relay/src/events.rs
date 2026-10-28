@@ -9,7 +9,8 @@
 //   usgp_common::event.
 // - NIST 800-53: AU-12 (Audit Record Generation)
 // - SPEC: specs/boot-network.md#REQ-BOOT-052 (state and missing content
-//   reported through events in M1; owner answer Q-4)
+//   reported through events in M1; owner answer Q-4), #REQ-BOOT-067 (boot
+//   policy applied, refused, unreachable; stopped devices)
 
 use usgp_common::event::{AuditEvent, emit as emit_event};
 
@@ -61,6 +62,20 @@ pub const TFTP_FAILED: &str = "tftp.transfer.failed";
 pub const TFTP_ABORTED_BY_CLIENT: &str = "tftp.transfer.aborted_by_client";
 /// TFTP request refused with an ERROR packet.
 pub const TFTP_REQUEST_REFUSED: &str = "tftp.request.refused";
+/// The boot manifest's `[pe_kit]` is incomplete or does not match: no
+/// boot program is offered (M3 plan section 7; REQ-PE-012).
+pub const KIT_INCOMPLETE: &str = "boot.kit.incomplete";
+/// A signed boot-policy list was verified and applied (M3 plan section 7;
+/// REQ-BOOT-067, decision 0021).
+pub const BOOT_POLICY_APPLIED: &str = "boot_policy.applied";
+/// A boot-policy list was refused (signature, boot service, rollback,
+/// shape); the last good list is kept.
+pub const BOOT_POLICY_REJECTED: &str = "boot_policy.rejected";
+/// The boot-policy list could not be fetched; the last good list is kept.
+pub const BOOT_POLICY_FETCH_FAILED: &str = "boot_policy.fetch_failed";
+/// A device on the boot-policy stop list was seen and got no reply
+/// (throttled per device, like `dhcp.suppressed`).
+pub const BOOT_DEVICE_STOPPED: &str = "boot.device.stopped";
 
 /// Emits a relay event: `base` with the component filled in.
 ///

@@ -24,6 +24,8 @@ use usgp_image::WimLimits;
 use usgp_proto::KitVersion;
 use usgp_proto::limits::{DEFAULT_MAX_JSON_BYTES, MAX_CONTENT_BYTES};
 
+pub use crate::device::limits::DeviceConfig;
+
 /// Default `content.max_upload_bytes`: 32 GiB (plan section 3.5).
 pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
@@ -149,6 +151,8 @@ pub struct ApiConfig {
     pub known_bad_kit_versions: Vec<KitVersion>,
     /// WIM check limits (`[wim]` overrides).
     pub wim_limits: WimLimits,
+    /// The device listener, operator codes and jobs (plan M3 section 3.9).
+    pub device: DeviceConfig,
 }
 
 /// Audit writers besides connections and content checks: the maintenance
@@ -158,15 +162,22 @@ pub const BACKGROUND_AUDIT_WRITERS: usize = 2;
 
 impl ApiConfig {
     /// The most tasks that can append audit records at the same time:
-    /// `api.max_connections` + `content.check_concurrency` +
+    /// `api.max_connections` + `device_api.max_connections` (when the
+    /// device listener is enabled) + `content.check_concurrency` +
     /// [`BACKGROUND_AUDIT_WRITERS`]. `audit verify` derives its checkpoint
     /// slack from it (finding SEC-015,
     /// `usgp_audit::checkpoint_slack_records`).
     #[must_use]
     pub fn max_audit_writers(&self) -> u64 {
+        let device = if self.device.enabled {
+            self.device.max_connections
+        } else {
+            0
+        };
         let n = self
             .limits
             .max_connections
+            .saturating_add(device)
             .saturating_add(self.content.check_concurrency)
             .saturating_add(BACKGROUND_AUDIT_WRITERS);
         u64::try_from(n).unwrap_or(u64::MAX)
@@ -184,6 +195,7 @@ impl ApiConfig {
             credential_failure_records_global_per_min: 600,
             known_bad_kit_versions: Vec::new(),
             wim_limits: WimLimits::DEFAULT,
+            device: DeviceConfig::default(),
         }
     }
 
@@ -316,6 +328,7 @@ impl ApiConfig {
                 return Err(ConfigError { setting, range });
             }
         }
+        self.device.validate()?;
         if !c.root.is_absolute() {
             return Err(ConfigError {
                 setting: "content.root",

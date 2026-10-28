@@ -818,6 +818,7 @@ dependencies = [
  "toml",
  "usgp-common",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

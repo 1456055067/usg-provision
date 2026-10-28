@@ -7,8 +7,10 @@ Two hand-written golden files are checked in:
 - `suppress-v1.toml`: one MAC entry and one GUID entry
   (`tests/config.rs::golden_v1_suppression_parses`).
 
-Both were written by us from plan section 3.3/3.4 and contain no device or
-site data. Every other boot file, manifest, configuration file and
+Both were written by us from plan section 3.3/3.4 (M3: plan section 3.9
+for the `[tftp]` window and wrap keys and `[server_feed]`) and contain no
+device or site data. The `[server_feed]` URL, paths and boot service id
+are made-up examples. Every other boot file, manifest, configuration file and
 directory is generated at test time by `tests/common/mod.rs`:
 
 - boot file content: `common::bytes(len, seed)`, a deterministic xorshift

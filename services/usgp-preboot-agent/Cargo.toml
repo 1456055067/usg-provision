@@ -6,15 +6,54 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# The library holds everything; the binary is a thin start-up wrapper, so the
+# integration tests can drive the agent in-process.
+[lib]
+name = "usgp_preboot_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "usgp-preboot-agent"
 path = "src/main.rs"
 
 [dependencies]
-usgp-deploy.workspace = true
-usgp-proto.workspace = true
-usgp-crypto.workspace = true
 usgp-common.workspace = true
+usgp-crypto.workspace = true
+usgp-proto.workspace = true
+usgp-deploy.workspace = true
+usgp-disk.workspace = true
+usgp-image.workspace = true
+# Plan section 4: the blocking HTTP/1.1 client parses responses with
+# httparse only (no tokio networking in the agent, REL-M3-W0-004).
+httparse.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+# Decision 0019: all Windows FFI stays in usgp-winapi; `sink` gives WinSink.
+[target.'cfg(windows)'.dependencies]
+usgp-winapi = { workspace = true, features = ["sink"] }
+
+# Off Windows the only platform is the engine's simulation (plan WU-12: CI
+# end-to-end tests against a real server). It never reaches a block device.
+[target.'cfg(not(windows))'.dependencies]
+usgp-deploy = { workspace = true, features = ["sim"] }
+
+[features]
+# The simulated platform on any target (tests only; never in a release build).
+sim = ["usgp-deploy/sim"]
+
+# In-process server tests run on the CI hosts only. Kept off the Windows
+# target so the agent's Windows test build never gets tokio networking
+# (REL-M3-W0-004) or the server's tree.
+[target.'cfg(not(windows))'.dev-dependencies]
+usgp-api.workspace = true
+usgp-audit.workspace = true
+usgp-db.workspace = true
+usgp-crypto = { workspace = true, features = ["test-pki"] }
+usgp-image = { workspace = true, features = ["testkit"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
 
 [lints]
 workspace = true

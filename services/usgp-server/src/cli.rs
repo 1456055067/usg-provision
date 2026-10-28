@@ -6,10 +6,13 @@
 //! | `usgp-server --check-config PATH [--admin-uid UID]` | 0 valid, 78 invalid, 1 FIPS |
 //! | `usgp-server serve --config PATH [--admin-uid UID] [--allow-shared-admin-uid]` | 0 clean stop, 78 config, 1 FIPS, database or bind failure |
 //! | `usgp-server migrate --config PATH --owner-user U --owner-cert P --owner-key P [--admin-uid UID]` | 0, 78, 77, 1 |
-//! | `usgp-server keygen --purpose content\|audit --out-key K --out-pub P` | 0, 1 |
+//! | `usgp-server keygen --purpose content\|audit\|plan\|boot-policy --out-key K --out-pub P` | 0, 1 |
+//! | `usgp-server keygen --purpose code-hmac --out-key K` | 0, 1 |
 //! | `usgp-server operator enrol --config PATH --cert PEM --name N --role administrator\|none [--admin-uid UID]` | 0, 78, 77, 1 |
 //! | `usgp-server operator disable --config PATH --id UUID [--admin-uid UID]` | 0, 78, 77, 1 |
 //! | `usgp-server audit verify --config PATH --trusted-key P [--trusted-key P ...] [--admin-uid UID]` | 0 intact, 1 tampered, 69 unreadable, 78, 77 |
+//! | `usgp-server boot-service enrol --config PATH --cert PEM --name N --subnet CIDR [--subnet CIDR ...] [--admin-uid UID]` | 0, 78, 77, 1 |
+//! | `usgp-server boot-service disable --config PATH --id UUID [--admin-uid UID]` | 0, 78, 77, 1 |
 //! | `usgp-server -h` / `--help` | usage on stdout, 0 |
 //! | `usgp-server` (no args) or anything else | usage on stderr, 2 |
 //!
@@ -17,7 +20,8 @@
 //!
 //! `--admin-uid UID` names one uid that may own the trusted files besides
 //! uid 0 (`usgp_common::config::TrustPolicy`), as for the relay. The
-//! local administrative commands (`migrate`, `operator`, `audit verify`)
+//! local administrative commands (`migrate`, `operator`, `audit verify`,
+//! `boot-service`)
 //! run only as root or as that uid (decision 0015 item 3: audit records
 //! are read only by a local administrative command).
 
@@ -31,19 +35,25 @@ usage: usgp-server serve --config PATH [--admin-uid UID] [--allow-shared-admin-u
        usgp-server --self-check
        usgp-server migrate --config PATH --owner-user NAME --owner-cert PEM --owner-key PEM
                            [--admin-uid UID]
-       usgp-server keygen --purpose content|audit --out-key FILE --out-pub FILE
+       usgp-server keygen --purpose content|audit|plan|boot-policy --out-key FILE --out-pub FILE
+       usgp-server keygen --purpose code-hmac --out-key FILE
        usgp-server operator enrol --config PATH --cert PEM --name NAME
                                   --role administrator|none [--admin-uid UID]
        usgp-server operator disable --config PATH --id UUID [--admin-uid UID]
        usgp-server audit verify --config PATH --trusted-key PEM [--trusted-key PEM ...]
                                 [--max-unsigned-records N] [--max-checkpoint-age DUR]
                                 [--admin-uid UID]
+       usgp-server boot-service enrol --config PATH --cert PEM --name NAME
+                                      --subnet CIDR [--subnet CIDR ...] [--admin-uid UID]
+       usgp-server boot-service disable --config PATH --id UUID [--admin-uid UID]
        usgp-server --help
 
   --admin-uid UID           uid trusted, besides root, to own the configuration, keys,
                             certificates and CRLs; local administrative commands
-                            (migrate, operator, audit verify) run only as root or as
-                            the owner of the configuration file
+                            (migrate, operator, audit verify, boot-service) run
+                            only as root or as the owner of the configuration file
+  --subnet CIDR             (boot-service enrol) a subnet the boot service serves,
+                            for example 10.20.0.0/16; 1 to 64
   --max-unsigned-records N  (audit verify) longest run of records allowed without a
                             signed checkpoint; default from the configured cadence
                             and the number of concurrent writers
@@ -57,6 +67,9 @@ usage: usgp-server serve --config PATH [--admin-uid UID] [--allow-shared-admin-u
 
 /// Largest number of `--trusted-key` options.
 pub const MAX_TRUSTED_KEYS: usize = 16;
+/// Largest number of `--subnet` options (the boot-service record holds
+/// 1 to 64 subnets, plan M3 section 3.8).
+pub const MAX_SUBNETS: usize = 64;
 
 /// `--config PATH [--admin-uid UID] [--allow-shared-admin-uid]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +89,13 @@ pub enum KeyPurpose {
     Content,
     /// Signs audit checkpoints.
     Audit,
+    /// Signs job plans (M3 plan section 5).
+    Plan,
+    /// Signs boot-policy lists for relays (M3 plan section 5).
+    BootPolicy,
+    /// Keys the HMAC under which operator codes are stored (M3 plan
+    /// section 5): 32 raw bytes, no public half.
+    CodeHmac,
 }
 
 impl KeyPurpose {
@@ -85,7 +105,17 @@ impl KeyPurpose {
         match self {
             Self::Content => "content",
             Self::Audit => "audit",
+            Self::Plan => "plan",
+            Self::BootPolicy => "boot-policy",
+            Self::CodeHmac => "code-hmac",
         }
+    }
+
+    /// True for the signing purposes (an ECDSA key pair; `--out-pub`
+    /// required); false for the code HMAC key (`--out-pub` refused).
+    #[must_use]
+    pub const fn is_signing(self) -> bool {
+        !matches!(self, Self::CodeHmac)
     }
 }
 
@@ -124,10 +154,11 @@ pub enum Command {
     Keygen {
         /// Purpose.
         purpose: KeyPurpose,
-        /// Private key output (PKCS#8 PEM, created 0600).
+        /// Private key output (PKCS#8 PEM, or 32 raw bytes for
+        /// `code-hmac`; created 0600).
         out_key: PathBuf,
-        /// Public key output (SPKI PEM).
-        out_pub: PathBuf,
+        /// Public key output (SPKI PEM); `None` for `code-hmac`.
+        out_pub: Option<PathBuf>,
     },
     /// `operator enrol ...`.
     OperatorEnrol {
@@ -158,6 +189,24 @@ pub enum Command {
         /// `--max-checkpoint-age` (finding SEC-013), if given.
         max_checkpoint_age: Option<std::time::Duration>,
     },
+    /// `boot-service enrol ...` (decision 0021 item 1).
+    BootServiceEnrol {
+        /// Configuration.
+        config: ConfigArgs,
+        /// The relay's client certificate (PEM).
+        cert: PathBuf,
+        /// Unique name.
+        name: String,
+        /// Served subnets (CIDR text, 1 to 64; parsed by the command).
+        subnets: Vec<String>,
+    },
+    /// `boot-service disable ...`.
+    BootServiceDisable {
+        /// Configuration.
+        config: ConfigArgs,
+        /// Boot-service id (UUID text).
+        id: String,
+    },
 }
 
 /// Why the command line was refused (exit 2). Never echoes arguments.
@@ -187,6 +236,9 @@ pub enum UsageError {
     /// Too many `--trusted-key` options.
     #[error("at most 16 --trusted-key options are accepted")]
     TooManyKeys,
+    /// Too many `--subnet` options.
+    #[error("at most 64 --subnet options are accepted")]
+    TooManySubnets,
     /// Unknown option, subcommand or extra argument.
     #[error("unexpected argument")]
     Unexpected,
@@ -215,6 +267,7 @@ where
         Some("keygen") => keygen(&rest),
         Some("operator") => operator(&rest),
         Some("audit") => audit(&rest),
+        Some("boot-service") => boot_service(&rest),
         _ => Err(UsageError::Unexpected),
     }
 }
@@ -382,13 +435,25 @@ fn keygen(rest: &[OsString]) -> Result<Command, UsageError> {
     let purpose = match opts.text("--purpose")?.as_str() {
         "content" => KeyPurpose::Content,
         "audit" => KeyPurpose::Audit,
+        "plan" => KeyPurpose::Plan,
+        "boot-policy" => KeyPurpose::BootPolicy,
+        "code-hmac" => KeyPurpose::CodeHmac,
         _ => return Err(UsageError::BadValue("--purpose")),
     };
     let out_key = opts.path("--out-key")?;
-    let out_pub = opts.path("--out-pub")?;
-    if out_key == out_pub {
-        return Err(UsageError::BadValue("--out-pub"));
-    }
+    // The code HMAC key has no public half.
+    let out_pub = if purpose.is_signing() {
+        let p = opts.path("--out-pub")?;
+        if out_key == p {
+            return Err(UsageError::BadValue("--out-pub"));
+        }
+        Some(p)
+    } else {
+        if opts.get("--out-pub").is_some() {
+            return Err(UsageError::Unexpected);
+        }
+        None
+    };
     Ok(Command::Keygen {
         purpose,
         out_key,
@@ -497,6 +562,60 @@ fn audit(rest: &[OsString]) -> Result<Command, UsageError> {
         max_unsigned_records,
         max_checkpoint_age,
     })
+}
+
+fn boot_service(rest: &[OsString]) -> Result<Command, UsageError> {
+    let (sub, rest) = rest.split_first().ok_or(UsageError::Unexpected)?;
+    match sub.to_str() {
+        Some("enrol") => {
+            let opts = options(
+                rest,
+                &Spec {
+                    values: &["--config", "--admin-uid", "--cert", "--name", "--subnet"],
+                    flags: &[],
+                    repeatable: Some("--subnet"),
+                },
+            )?;
+            let mut subnets = Vec::new();
+            for v in opts.all("--subnet") {
+                let t = v.to_str().ok_or(UsageError::BadValue("--subnet"))?;
+                if t.is_empty() {
+                    return Err(UsageError::EmptyValue("--subnet"));
+                }
+                subnets.push(t.to_owned());
+            }
+            if subnets.is_empty() {
+                return Err(UsageError::Required("--subnet"));
+            }
+            if subnets.len() > MAX_SUBNETS {
+                return Err(UsageError::TooManySubnets);
+            }
+            Ok(Command::BootServiceEnrol {
+                config: opts.config()?,
+                cert: opts.path("--cert")?,
+                name: opts.text("--name")?,
+                subnets,
+            })
+        }
+        Some("disable") => {
+            let (config, id) = config_and_id(rest)?;
+            Ok(Command::BootServiceDisable { config, id })
+        }
+        _ => Err(UsageError::Unexpected),
+    }
+}
+
+/// `--config PATH --id UUID [--admin-uid UID]`.
+fn config_and_id(rest: &[OsString]) -> Result<(ConfigArgs, String), UsageError> {
+    let opts = options(
+        rest,
+        &Spec {
+            values: &["--config", "--admin-uid", "--id"],
+            flags: &[],
+            repeatable: None,
+        },
+    )?;
+    Ok((opts.config()?, opts.text("--id")?))
 }
 
 /// Longest `--max-checkpoint-age`: 366 days.
@@ -635,8 +754,54 @@ mod tests {
             Ok(Command::Keygen {
                 purpose: KeyPurpose::Audit,
                 out_key: "a.p8".into(),
-                out_pub: "a.pub".into(),
+                out_pub: Some("a.pub".into()),
             })
+        );
+        for (arg, purpose) in [
+            ("plan", KeyPurpose::Plan),
+            ("boot-policy", KeyPurpose::BootPolicy),
+        ] {
+            assert_eq!(
+                p(&[
+                    "keygen",
+                    "--purpose",
+                    arg,
+                    "--out-key",
+                    "k",
+                    "--out-pub",
+                    "p"
+                ]),
+                Ok(Command::Keygen {
+                    purpose,
+                    out_key: "k".into(),
+                    out_pub: Some("p".into()),
+                })
+            );
+            assert_eq!(
+                p(&["keygen", "--purpose", arg, "--out-key", "k"]),
+                Err(UsageError::Required("--out-pub"))
+            );
+        }
+        // The code HMAC key has no public half.
+        assert_eq!(
+            p(&["keygen", "--purpose", "code-hmac", "--out-key", "c.key"]),
+            Ok(Command::Keygen {
+                purpose: KeyPurpose::CodeHmac,
+                out_key: "c.key".into(),
+                out_pub: None,
+            })
+        );
+        assert_eq!(
+            p(&[
+                "keygen",
+                "--purpose",
+                "code-hmac",
+                "--out-key",
+                "c.key",
+                "--out-pub",
+                "c.pub"
+            ]),
+            Err(UsageError::Unexpected)
         );
         assert_eq!(
             p(&[
@@ -819,6 +984,91 @@ mod tests {
             many.extend(["--trusted-key", "k"]);
         }
         assert_eq!(p(&many), Err(UsageError::TooManyKeys));
+    }
+
+    #[test]
+    fn boot_service_args() {
+        assert_eq!(
+            p(&[
+                "boot-service",
+                "enrol",
+                "--config",
+                "s",
+                "--cert",
+                "r.pem",
+                "--name",
+                "Relay A",
+                "--subnet",
+                "10.20.0.0/16",
+                "--subnet",
+                "192.0.2.0/24",
+                "--admin-uid",
+                "9"
+            ]),
+            Ok(Command::BootServiceEnrol {
+                config: cfg("s", Some(9), false),
+                cert: "r.pem".into(),
+                name: "Relay A".into(),
+                subnets: vec!["10.20.0.0/16".into(), "192.0.2.0/24".into()],
+            })
+        );
+        assert_eq!(
+            p(&[
+                "boot-service",
+                "enrol",
+                "--config",
+                "s",
+                "--cert",
+                "r.pem",
+                "--name",
+                "n"
+            ]),
+            Err(UsageError::Required("--subnet"))
+        );
+        assert_eq!(
+            p(&[
+                "boot-service",
+                "enrol",
+                "--config",
+                "s",
+                "--cert",
+                "r.pem",
+                "--name",
+                "n",
+                "--subnet",
+                ""
+            ]),
+            Err(UsageError::EmptyValue("--subnet"))
+        );
+        let mut many = vec![
+            "boot-service",
+            "enrol",
+            "--config",
+            "s",
+            "--cert",
+            "c",
+            "--name",
+            "n",
+        ];
+        for _ in 0..=MAX_SUBNETS {
+            many.extend(["--subnet", "10.0.0.0/8"]);
+        }
+        assert_eq!(p(&many), Err(UsageError::TooManySubnets));
+        assert_eq!(
+            p(&["boot-service", "disable", "--config", "s", "--id", "x"]),
+            Ok(Command::BootServiceDisable {
+                config: cfg("s", None, false),
+                id: "x".into(),
+            })
+        );
+        assert_eq!(
+            p(&["boot-service", "list", "--config", "s"]),
+            Err(UsageError::Unexpected)
+        );
+        assert_eq!(
+            p(&["boot-stop", "clear", "--config", "s", "--id", "y"]),
+            Err(UsageError::Unexpected)
+        );
     }
 
     #[test]

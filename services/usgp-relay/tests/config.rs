@@ -80,6 +80,21 @@ mod config {
         assert_eq!(t.handshake_timeout, Duration::from_millis(2100));
         assert_eq!(t.max_transfer, Duration::from_secs(601));
         assert_eq!(t.max_file_size, 33_554_432);
+        assert_eq!(t.max_window_size, 4);
+        assert_eq!(t.block_wrap, usgp_tftp::BlockWrap::One);
+        let f = c.server_feed.as_ref().expect("server_feed enabled");
+        assert_eq!(f.url.host, "server.lab");
+        assert_eq!(f.url.port, 8443);
+        assert_eq!(f.server_name, "api.server.lab");
+        assert_eq!(
+            f.boot_service_id.to_string(),
+            "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b"
+        );
+        assert_eq!(f.poll_interval, Duration::from_secs(45));
+        assert_eq!(
+            f.cache_file.as_deref(),
+            Some(std::path::Path::new("/var/lib/usgp-relay/boot-policy.json"))
+        );
         assert_eq!(c.recheck_interval, Duration::from_secs(61));
         assert_eq!(
             c.suppression.file.as_deref(),
@@ -112,6 +127,7 @@ mod config {
             "[tftp]",
             "[content]",
             "[suppression]",
+            "[server_feed]",
             "[log]",
         ] {
             let text = GOLDEN.replacen(table, &format!("{table}\nunknown_key = 1"), 1);
@@ -197,8 +213,14 @@ mod config {
         // SEC-001: one resend and at most 2 s before the first ACK.
         assert_eq!(t.handshake_retries, 1);
         assert_eq!(t.handshake_timeout, Duration::from_millis(2000));
-        assert_eq!(t.max_transfer, Duration::from_secs(600));
-        assert_eq!(t.max_file_size, 67_108_864);
+        // M3 (plan section 3.9): Windows PE image defaults, window 8,
+        // wrap to zero.
+        assert_eq!(t.max_transfer, Duration::from_secs(1800));
+        assert_eq!(t.max_file_size, 1_073_741_824);
+        assert_eq!(t.max_window_size, 8);
+        assert_eq!(t.block_wrap, usgp_tftp::BlockWrap::Zero);
+        assert_eq!(c.tftp_window_config(), usgp_tftp::WindowConfig::default());
+        assert_eq!(c.server_feed, None);
         assert_eq!(c.recheck_interval, Duration::from_secs(60));
         assert_eq!(c.suppression.file, None);
         assert_eq!(c.suppression.reload_interval, Duration::from_secs(2));
@@ -206,11 +228,13 @@ mod config {
         assert_eq!(c.log.node_name, None);
         // The sans-IO server config carries the same values; the relay
         // shortens the handshake (one resend) relative to the library
-        // default.
+        // default and uses the M3 large-file limits.
         assert_eq!(
             c.tftp_server_config(),
             usgp_tftp::ServerConfig {
                 handshake_retries: 1,
+                max_file_size: usgp_tftp::LARGE_FILE_MAX_SIZE,
+                max_duration: usgp_tftp::LARGE_FILE_MAX_DURATION,
                 ..usgp_tftp::ServerConfig::default()
             }
         );
@@ -536,7 +560,13 @@ mod config {
                 "tftp.max_transfer_secs",
                 |d, v| t(d).max_transfer_secs = Some(v),
                 10,
-                3600,
+                7200,
+            ),
+            (
+                "tftp.max_window_size",
+                |d, v| t(d).max_window_size = Some(v),
+                1,
+                64,
             ),
             (
                 "tftp.max_file_size_bytes",
@@ -887,6 +917,162 @@ mod config {
         assert!(matches!(
             check_trust_paths(&missing),
             Err(ConfigLoadError::File(ConfigError::Io { .. }))
+        ));
+    }
+
+    fn feed_doc(s: &Scratch) -> ConfigDocument {
+        let mut d = doc(s);
+        d.server_feed = Some(usgp_relay::config::ServerFeedDocument {
+            enabled: Some(true),
+            url: Some("https://10.0.0.5:8443".to_owned()),
+            server_name: Some("server.lab".to_owned()),
+            trust_anchors: Some("/etc/usgp-relay/feed/ca.pem".to_owned()),
+            client_cert: Some("/etc/usgp-relay/feed/relay.pem".to_owned()),
+            client_key: Some("/etc/usgp-relay/feed/relay.key".to_owned()),
+            boot_policy_key_pub: Some("/etc/usgp-relay/feed/policy.pem".to_owned()),
+            boot_service_id: Some("6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b".to_owned()),
+            poll_interval_s: None,
+            cache_file: None,
+        });
+        d
+    }
+
+    /// M3 `[server_feed]` (plan section 3.9): off by default, every key
+    /// checked when enabled, `https` only, no way to skip TLS.
+    #[test]
+    fn server_feed_rules() {
+        let s = Scratch::new("feed-rules");
+        let c = RelayConfig::from_document(&feed_doc(&s)).unwrap();
+        let f = c.server_feed.unwrap();
+        assert_eq!(f.url.host, "10.0.0.5");
+        assert_eq!(f.url.port, 8443);
+        assert_eq!(f.poll_interval, Duration::from_secs(30));
+        assert_eq!(f.cache_file, None);
+
+        // Disabled (explicitly or by default): no feed, other keys ignored.
+        let mut d = feed_doc(&s);
+        d.server_feed.as_mut().unwrap().enabled = Some(false);
+        d.server_feed.as_mut().unwrap().url = Some("not a url".to_owned());
+        assert_eq!(RelayConfig::from_document(&d).unwrap().server_feed, None);
+        let mut d = feed_doc(&s);
+        d.server_feed.as_mut().unwrap().enabled = None;
+        assert_eq!(RelayConfig::from_document(&d).unwrap().server_feed, None);
+
+        type Edit = fn(&mut usgp_relay::config::ServerFeedDocument);
+        let cases: [(&str, Edit); 14] = [
+            ("server_feed.url", |f| f.url = None),
+            ("server_feed.url", |f| {
+                f.url = Some("http://10.0.0.5".to_owned())
+            }),
+            ("server_feed.url", |f| f.url = Some("https://".to_owned())),
+            ("server_feed.url", |f| {
+                f.url = Some("https://h.lab/v1/x".to_owned());
+            }),
+            ("server_feed.url", |f| {
+                f.url = Some("https://user@h.lab".to_owned());
+            }),
+            ("server_feed.url", |f| {
+                f.url = Some("https://h.lab:0".to_owned())
+            }),
+            ("server_feed.url", |f| {
+                f.url = Some("https://h.lab:65536".to_owned());
+            }),
+            ("server_feed.url", |f| {
+                f.url = Some("https://-h.lab".to_owned())
+            }),
+            ("server_feed.boot_service_id", |f| f.boot_service_id = None),
+            ("server_feed.boot_service_id", |f| {
+                f.boot_service_id = Some("00000000-0000-0000-0000-000000000000".to_owned());
+            }),
+            ("server_feed.trust_anchors", |f| {
+                f.trust_anchors = Some("relative.pem".to_owned());
+            }),
+            ("server_feed.client_key", |f| f.client_key = None),
+            ("server_feed.client_key", |f| {
+                f.client_key = f.client_cert.clone();
+            }),
+            ("server_feed.cache_file", |f| {
+                f.cache_file = Some("cache.json".to_owned());
+            }),
+        ];
+        for (field, edit) in cases {
+            let mut d = feed_doc(&s);
+            edit(d.server_feed.as_mut().unwrap());
+            assert_eq!(field_of(&d), field, "{field}");
+        }
+        for (v, ok) in [(5, true), (3600, true), (4, false), (3601, false)] {
+            let mut d = feed_doc(&s);
+            d.server_feed.as_mut().unwrap().poll_interval_s = Some(v);
+            assert_eq!(RelayConfig::from_document(&d).is_ok(), ok, "{v}");
+        }
+        // IPv6 literal and default port.
+        let mut d = feed_doc(&s);
+        d.server_feed.as_mut().unwrap().url = Some("https://[fd00::5]".to_owned());
+        d.server_feed.as_mut().unwrap().server_name = Some("server.lab".to_owned());
+        let f = RelayConfig::from_document(&d).unwrap().server_feed.unwrap();
+        assert_eq!((f.url.host.as_str(), f.url.port), ("fd00::5", 443));
+        assert_eq!(f.url.authority(), "[fd00::5]:443");
+        // The server name defaults to the URL host.
+        let mut d = feed_doc(&s);
+        d.server_feed.as_mut().unwrap().server_name = None;
+        let f = RelayConfig::from_document(&d).unwrap().server_feed.unwrap();
+        assert_eq!(f.server_name, "10.0.0.5");
+    }
+
+    /// M3 `[tftp] block_wrap` labels.
+    #[test]
+    fn block_wrap_labels() {
+        let s = Scratch::new("wrap-labels");
+        for (label, want) in [
+            ("zero", Some(usgp_tftp::BlockWrap::Zero)),
+            ("one", Some(usgp_tftp::BlockWrap::One)),
+            ("off", Some(usgp_tftp::BlockWrap::Off)),
+            ("Zero", None),
+            ("", None),
+            ("wrap", None),
+        ] {
+            let mut d = doc(&s);
+            d.tftp = Some(TftpDocument {
+                block_wrap: Some(label.to_owned()),
+                ..TftpDocument::default()
+            });
+            match want {
+                Some(w) => assert_eq!(RelayConfig::from_document(&d).unwrap().tftp.block_wrap, w),
+                None => assert_eq!(field_of(&d), "tftp.block_wrap", "{label}"),
+            }
+        }
+    }
+
+    /// The feed's files are trust anchors: `load` refuses a world-writable
+    /// one (CM-5).
+    #[test]
+    fn feed_files_must_be_trusted() {
+        let s = Scratch::new("feed-trust");
+        s.publish(&[(PROGRAM, b"payload")]);
+        let dir = s.dir.join("feed");
+        std::fs::create_dir_all(&dir).unwrap();
+        set_mode(&dir, 0o755);
+        for n in ["ca.pem", "relay.pem", "relay.key", "policy.pem"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+            set_mode(&dir.join(n), 0o644);
+        }
+        set_mode(&dir.join("relay.key"), 0o600);
+        let extra = format!(
+            "[server_feed]\nenabled = true\nurl = \"https://10.0.0.5\"\n\
+             trust_anchors = \"{d}/ca.pem\"\nclient_cert = \"{d}/relay.pem\"\n\
+             client_key = \"{d}/relay.key\"\nboot_policy_key_pub = \"{d}/policy.pem\"\n\
+             boot_service_id = \"6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b\"\n",
+            d = dir.display()
+        );
+        let p = write_config_toml(&s, &extra);
+        assert!(load(&p, trust()).unwrap().config.server_feed.is_some());
+        set_mode(&dir.join("ca.pem"), 0o666);
+        assert!(matches!(
+            load(&p, trust()).unwrap_err(),
+            ConfigLoadError::File(ConfigError::Untrusted {
+                rule: TrustRule::WorldWritable,
+                ..
+            })
         ));
     }
 }

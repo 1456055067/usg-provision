@@ -70,7 +70,7 @@ use crate::content::ContentStore;
 use crate::events::{self, COMPONENT, Outcome};
 use crate::limits::{BucketSpec, BucketTable, Counters, TokenBucket};
 use crate::lock;
-use crate::suppress::{Suppression, SuppressionList};
+use crate::suppress::{FeedGate, Suppression, SuppressionList, Verdict};
 
 /// How often a suppressed device is logged at most (plan section 7).
 pub const SUPPRESSED_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -96,6 +96,7 @@ impl Outbound {
 struct Policy<'a> {
     program: Option<&'a [u8]>,
     list: &'a SuppressionList,
+    feed: &'a FeedGate,
     locals: &'a [Ipv4Addr],
 }
 
@@ -110,7 +111,9 @@ impl BootPolicy for Policy<'_> {
     }
 
     fn is_suppressed(&self, mac: MacAddr, guid: Option<Guid>) -> bool {
-        self.list.contains(mac, guid)
+        // The suppression file and the boot-policy stop list together
+        // (REQ-BOOT-051, REQ-BOOT-067).
+        Verdict::of(self.list, self.feed, mac, guid) != Verdict::Serve
     }
 
     fn is_local_address(&self, addr: Ipv4Addr) -> bool {
@@ -297,10 +300,12 @@ impl DhcpService {
             return None;
         };
         let list = self.suppression.current();
+        let feed = self.suppression.feed();
         let program = self.content.offerable_program();
         let policy = Policy {
             program: program.map(|p| p.as_bytes()),
             list: &list,
+            feed: &feed,
             locals: &self.locals,
         };
         let ctx = ResponderContext {
@@ -311,9 +316,28 @@ impl DhcpService {
         let reply = match respond(&req, &ctx, &policy) {
             Decision::Reply(r) => r,
             Decision::Drop(reason) => {
-                lock(&self.drops).bump(reason.label());
                 if reason == DropReason::Suppressed {
-                    self.log_suppressed(iface, src, req.chaddr, req.guid, now);
+                    match Verdict::of(&list, &feed, req.chaddr, req.guid) {
+                        Verdict::Stopped(job) => {
+                            lock(&self.drops).bump("boot_stopped");
+                            self.log_stopped(
+                                iface,
+                                src,
+                                (req.chaddr, req.guid),
+                                (job, feed.generation()),
+                                now,
+                            );
+                        }
+                        Verdict::PolicyUnavailable => {
+                            lock(&self.drops).bump("boot_policy_unavailable");
+                        }
+                        Verdict::Suppressed | Verdict::Serve => {
+                            lock(&self.drops).bump(reason.label());
+                            self.log_suppressed(iface, src, req.chaddr, req.guid, now);
+                        }
+                    }
+                } else {
+                    lock(&self.drops).bump(reason.label());
                 }
                 return None;
             }
@@ -405,6 +429,37 @@ impl DhcpService {
             claimed_guid: guid.map(|g| g.to_string()),
             detail: &detail,
             ..AuditEvent::new(events::DHCP_SUPPRESSED, Outcome::Dropped, COMPONENT)
+        });
+    }
+
+    /// `boot.device.stopped`, throttled per device like `dhcp.suppressed`
+    /// (REQ-BOOT-067; plan section 7).
+    fn log_stopped(
+        &self,
+        iface: &InterfaceConfig,
+        src: SocketAddrV4,
+        (mac, guid): (MacAddr, Option<Guid>),
+        (job, generation): (usgp_proto::ids::JobId, Option<u64>),
+        now: Instant,
+    ) {
+        if !lock(&self.limits).suppressed_log.try_take(&mac, now) {
+            return;
+        }
+        let detail = [
+            ("action", "no reply".to_owned()),
+            ("job_id", job.to_string()),
+            (
+                "generation",
+                generation.map_or_else(String::new, |g| g.to_string()),
+            ),
+        ];
+        events::emit(AuditEvent {
+            interface: Some(&iface.name),
+            peer: Some(SocketAddr::V4(src)),
+            claimed_mac: Some(mac.to_string()),
+            claimed_guid: guid.map(|g| g.to_string()),
+            detail: &detail,
+            ..AuditEvent::new(events::BOOT_DEVICE_STOPPED, Outcome::Dropped, COMPONENT)
         });
     }
 

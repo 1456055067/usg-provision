@@ -10,7 +10,9 @@
 //! 2. **Route match**: 404 / 405, audited.
 //! 3. **Authorisation** against the route's permission before any path
 //!    parameter is parsed or any item is looked up: 403 never reveals
-//!    whether an item exists (REQ-RBAC-003). Audited `authz.denied`.
+//!    whether an item exists (REQ-RBAC-003). Audited `authz.denied`. A
+//!    boot service (relay, decision 0021) may call only
+//!    `GET /v1/relay/boot-policy`, and no operator may call it.
 //! 4. The **handler**. Its success records are written in its own
 //!    transaction; any error it returns is audited here unless it already
 //!    wrote one.
@@ -43,13 +45,13 @@ use usgp_db::Store;
 use usgp_proto::api::{JSON_MEDIA_TYPE, WWW_AUTHENTICATE};
 use usgp_proto::codes;
 
-use crate::authn::{AuthClass, authenticate};
+use crate::authn::{AuthClass, BootServicePrincipal, Caller, authenticate_caller};
 use crate::body::ApiBody;
 use crate::context::{Api, COMPONENT, RequestCtx};
 use crate::error::ApiError;
 use crate::handlers;
 use crate::rbac::allows;
-use crate::routes::{Match, allowed_methods, match_route};
+use crate::routes::{Access, Match, RouteSpec, allowed_methods, match_route};
 
 /// What the TLS layer established for a connection.
 #[derive(Debug, Clone)]
@@ -107,9 +109,10 @@ pub async fn handle<S: Store + 'static>(
             .with("path", path.as_str())
     };
 
-    // 1. Authentication.
-    let principal = match authenticate(api.store(), conn.peer.as_ref()).await {
-        Ok(Ok(p)) => p,
+    // 1. Authentication (an operator, or a boot service bound to its
+    // certificate).
+    let caller = match authenticate_caller(api.store(), conn.peer.as_ref()).await {
+        Ok(Ok(c)) => c,
         Ok(Err(f)) => {
             if api.inner.unauth.admit(
                 conn.remote.ip(),
@@ -157,7 +160,7 @@ pub async fn handle<S: Store + 'static>(
             let d = AuditDraft::new(
                 "api.request.refused",
                 Outcome::Refused,
-                principal.actor(),
+                caller.actor(),
                 Interface::Api,
             )
             .source(&source)
@@ -172,27 +175,41 @@ pub async fn handle<S: Store + 'static>(
         }
     };
 
+    // 3. Authorisation (before any lookup: no existence leak). A boot
+    // service may call only its own route; no operator permission grants
+    // that route.
+    let denied = |actor: usgp_audit::Actor| {
+        AuditDraft::new("authz.denied", Outcome::Refused, actor, Interface::Api)
+            .source(&source)
+            .reason(codes::FORBIDDEN.as_str())
+            .detail(
+                request_detail()
+                    .with("route", route.pattern)
+                    .with("permission", route.access.as_str()),
+            )
+    };
+    let principal = match caller {
+        Caller::BootService(b) => {
+            if route.access != Access::BootService {
+                api.record_refusal(&denied(b.actor())).await;
+                return Ok(error_response(&ApiError::forbidden()));
+            }
+            return Ok(boot_service_request(&api, &b, &source, route, req).await);
+        }
+        Caller::Operator(p) => p,
+    };
+    let role = principal.operator.role;
+    if !route.access.permissions().iter().any(|&p| allows(role, p)) {
+        api.record_refusal(&denied(principal.actor())).await;
+        return Ok(error_response(&ApiError::forbidden()));
+    }
+
     let ctx = RequestCtx {
         principal,
         source,
         route,
         params,
     };
-
-    // 3. Authorisation (before any lookup: no existence leak).
-    let role = ctx.principal.operator.role;
-    if !route.access.permissions().iter().any(|&p| allows(role, p)) {
-        let d = ctx
-            .draft("authz.denied", Outcome::Refused)
-            .reason(codes::FORBIDDEN.as_str())
-            .detail(
-                request_detail()
-                    .with("route", route.pattern)
-                    .with("permission", route.access.as_str()),
-            );
-        api.record_refusal(&d).await;
-        return Ok(error_response(&ApiError::forbidden()));
-    }
 
     // JSON routes need a JSON body (415 otherwise).
     if route.json_body && !is_json(&req) {
@@ -218,6 +235,55 @@ pub async fn handle<S: Store + 'static>(
                 audit_error(&api, &ctx, &e).await;
             }
             Ok(error_response(&e))
+        }
+    }
+}
+
+/// Runs the boot-service route and audits its refusals with the boot
+/// service as actor.
+async fn boot_service_request<S: Store + 'static>(
+    api: &Api<S>,
+    b: &BootServicePrincipal,
+    source: &str,
+    route: &'static RouteSpec,
+    req: Request<Incoming>,
+) -> Response<ApiBody> {
+    match handlers::boot_policy::get(api, b, source, &req).await {
+        Ok(mut r) => {
+            r.headers_mut()
+                .entry(header::CACHE_CONTROL)
+                .or_insert(HeaderValue::from_static("no-store"));
+            r
+        }
+        Err(e) => {
+            if !e.audited {
+                let outcome = if e.status.is_server_error() {
+                    Outcome::Failure
+                } else {
+                    Outcome::Refused
+                };
+                let mut detail = e
+                    .detail
+                    .clone()
+                    .unwrap_or_default()
+                    .with("http_status", &e.status.as_u16())
+                    .with("http_route", route.pattern);
+                if let Some(cause) = &e.internal {
+                    detail = detail.with("internal_cause", cause.as_str());
+                }
+                let d = AuditDraft::new(
+                    e.event.unwrap_or(route.refused_event),
+                    outcome,
+                    b.actor(),
+                    Interface::RelayFeed,
+                )
+                .source(source)
+                .target("boot_service", &b.boot_service.id.to_string())
+                .reason(e.code().as_str())
+                .detail(detail);
+                api.record_refusal(&d).await;
+            }
+            error_response(&e)
         }
     }
 }

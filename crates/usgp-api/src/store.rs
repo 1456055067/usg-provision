@@ -29,7 +29,7 @@
 // - Decision 0011 (integrity on every use)
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -258,6 +258,64 @@ impl ContentStore {
         &self,
         manifest: &ContentManifestV1,
     ) -> Result<VerifiedReader, VerifyError> {
+        let file = self.open_object(manifest)?;
+        Ok(VerifiedReader {
+            file,
+            chunks: manifest.chunk_sha256.clone(),
+            size: manifest.size,
+            next: 0,
+            total: usgp_crypto::provider().sha256_hasher(),
+            expected_total: manifest.sha256,
+        })
+    }
+
+    /// Reads chunk `index` (0-based) of an object and returns it only if
+    /// its SHA-256 equals the signed manifest's digest for that chunk
+    /// (device chunk fetch, plan M3 section 3.3; the manifest's signature
+    /// has already been verified). Refuses an index past the end.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifyError`]; nothing of a failing chunk is returned.
+    pub fn read_chunk(
+        &self,
+        manifest: &ContentManifestV1,
+        index: u64,
+    ) -> Result<Vec<u8>, VerifyError> {
+        let len = usgp_proto::content_manifest::chunk_len(manifest.size, index)
+            .ok_or(VerifyError::ChunkMismatch { index })?;
+        let want = usize::try_from(index)
+            .ok()
+            .and_then(|i| manifest.chunk_sha256.get(i))
+            .copied()
+            .ok_or(VerifyError::ChunkMismatch { index })?;
+        let offset = index
+            .checked_mul(usgp_proto::limits::CHUNK_SIZE)
+            .ok_or(VerifyError::ChunkMismatch { index })?;
+        let n = usize::try_from(len).map_err(|_| VerifyError::ChunkMismatch { index })?;
+        let mut file = self.open_object(manifest)?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(VerifyError::Io)?;
+        let mut buf = vec![0u8; n];
+        file.read_exact(&mut buf).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                VerifyError::SizeMismatch {
+                    expected: manifest.size,
+                    found: 0,
+                }
+            } else {
+                VerifyError::Io(e)
+            }
+        })?;
+        if usgp_crypto::provider().sha256(&buf) != want {
+            return Err(VerifyError::ChunkMismatch { index });
+        }
+        Ok(buf)
+    }
+
+    /// Opens an object for reading: never through a symbolic link, a
+    /// regular file of the signed size.
+    fn open_object(&self, manifest: &ContentManifestV1) -> Result<File, VerifyError> {
         let path = self.object_path(&manifest.sha256);
         // Never follow a symlink planted in the store: the link itself is
         // refused, and the opened handle must be a regular file.
@@ -275,14 +333,7 @@ impl ContentStore {
                 found: meta.len(),
             });
         }
-        Ok(VerifiedReader {
-            file,
-            chunks: manifest.chunk_sha256.clone(),
-            size: manifest.size,
-            next: 0,
-            total: usgp_crypto::provider().sha256_hasher(),
-            expected_total: manifest.sha256,
-        })
+        Ok(file)
     }
 }
 

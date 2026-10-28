@@ -30,11 +30,13 @@ use std::io::{Read, Seek};
 
 use usgp_crypto::CryptoProvider;
 
-use super::header::{Compression, HEADER_LEN, HEADER_LEN_U64, check_header, parse_header};
+use super::header::{
+    Compression, HEADER_LEN, HEADER_LEN_U64, WimHeader, check_header, parse_header,
+};
 use super::lookup::{self, ENTRY_LEN_U64};
 use super::reshdr::{RESHDR_FLAG_METADATA, ResourceHeader};
 use super::source::{Progress, Source};
-use super::xml::{WimXmlImage, parse_xml};
+use super::xml::{WimXml, WimXmlImage, parse_xml};
 use super::{integrity, resource};
 use crate::codec::XpressDecoder;
 use crate::error::WimError;
@@ -115,23 +117,30 @@ fn check_plain(rh: &ResourceHeader, what: &'static str) -> Result<(), WimError> 
     Ok(())
 }
 
-/// Checks an uploaded WIM file of `file_len` bytes.
-///
-/// `progress` is called after every read; returning `Break` stops the
-/// check with [`WimError::Stalled`].
-///
-/// # Errors
-///
-/// The first [`WimError`] found; each names one reason (REQ-IMG-022).
-pub fn check_wim<R: Read + Seek>(
-    r: &mut R,
+/// What steps 1 to 5a of the check establish: the header, the checked
+/// lookup table and the XML, all consistent with each other.
+pub(crate) struct Structure {
+    /// The header.
+    pub(crate) h: WimHeader,
+    /// The file's compression.
+    pub(crate) compression: Compression,
+    /// The checked lookup table.
+    pub(crate) scan: lookup::LookupScan,
+    /// The parsed XML.
+    pub(crate) xml: WimXml,
+    /// True if the header names an integrity table.
+    pub(crate) has_integrity: bool,
+}
+
+/// Steps 1 to 5a of [`check_wim`]: header and flags, resource bounds,
+/// lookup table, XML, counts and boot index. Shared with the apply path
+/// (M3), which must not accept a file the upload check would refuse at
+/// these steps.
+pub(crate) fn read_structure<R: Read + Seek>(
+    src: &mut Source<'_, R>,
     file_len: u64,
     limits: &WimLimits,
-    crypto: &dyn CryptoProvider,
-    progress: &mut dyn Progress,
-) -> Result<WimSummary, WimError> {
-    let mut src = Source::new(r, progress);
-
+) -> Result<Structure, WimError> {
     // 1. Header and flags.
     let head_len = usize::try_from(file_len.min(HEADER_LEN_U64)).map_err(|_| WimError::TooShort)?;
     let mut head = [0u8; HEADER_LEN];
@@ -185,7 +194,7 @@ pub fn check_wim<R: Read + Seek>(
         header_resources.push(h.integrity);
     }
     let scan = lookup::scan(
-        &mut src,
+        src,
         &h.lookup,
         &header_resources,
         compression,
@@ -249,6 +258,40 @@ pub fn check_wim<R: Read + Seek>(
         }
     }
 
+    Ok(Structure {
+        h,
+        compression,
+        scan,
+        xml,
+        has_integrity,
+    })
+}
+
+/// Checks an uploaded WIM file of `file_len` bytes.
+///
+/// `progress` is called after every read; returning `Break` stops the
+/// check with [`WimError::Stalled`].
+///
+/// # Errors
+///
+/// The first [`WimError`] found; each names one reason (REQ-IMG-022).
+pub fn check_wim<R: Read + Seek>(
+    r: &mut R,
+    file_len: u64,
+    limits: &WimLimits,
+    crypto: &dyn CryptoProvider,
+    progress: &mut dyn Progress,
+) -> Result<WimSummary, WimError> {
+    let mut src = Source::new(r, progress);
+
+    let Structure {
+        h,
+        compression,
+        scan,
+        xml,
+        has_integrity,
+    } = read_structure(&mut src, file_len, limits)?;
+
     // 5b. Metadata work budget, before anything is decoded (SEC-003).
     // COMPLIANCE MAPPING:
     // - NIST 800-53: SC-5 (Denial of Service Protection) - a metadata
@@ -311,7 +354,13 @@ pub fn check_wim<R: Read + Seek>(
             hasher.update(piece);
             Ok(())
         };
-        resource::read_resource(&mut src, &entry.reshdr, decoder.as_mut(), &mut sink)?;
+        resource::read_resource(
+            &mut src,
+            &entry.reshdr,
+            decoder.as_mut(),
+            resource::RawChunks::Refuse,
+            &mut sink,
+        )?;
         if hasher.finish().0 != entry.sha1 {
             return Err(WimError::MetadataHashMismatch { index });
         }

@@ -10,7 +10,8 @@ use usgp_audit::verify_chain;
 
 use crate::common::{Harness, Who};
 
-/// Plan section 3.2, method and path for every route.
+/// Plan section 3.2 (M2) and M3 plan section 3.5, method and path for
+/// every route.
 const PLAN: &[(&str, &str)] = &[
     ("GET", "/v1/limits"),
     ("POST", "/v1/uploads"),
@@ -33,6 +34,22 @@ const PLAN: &[(&str, &str)] = &[
     ("POST", "/v1/packages/{id}/clone"),
     ("DELETE", "/v1/packages/{id}"),
     ("GET", "/v1/packages/{id}/manifest"),
+    // M3 plan section 3.5.
+    ("POST", "/v1/auth-codes"),
+    ("GET", "/v1/auth-codes"),
+    ("DELETE", "/v1/auth-codes/{id}"),
+    ("GET", "/v1/device-sessions"),
+    ("POST", "/v1/device-sessions/{id}/approve"),
+    ("POST", "/v1/device-sessions/{id}/refuse"),
+    ("GET", "/v1/jobs"),
+    ("GET", "/v1/jobs/{id}"),
+    ("POST", "/v1/jobs/{id}/acknowledge"),
+    ("GET", "/v1/boot-services"),
+    ("GET", "/v1/boot-services/{id}"),
+    ("PUT", "/v1/boot-services/{id}/packages"),
+    ("GET", "/v1/boot-stops"),
+    ("POST", "/v1/boot-stops/{id}/clear"),
+    ("GET", "/v1/relay/boot-policy"),
 ];
 
 #[test]
@@ -54,6 +71,11 @@ fn every_route_has_permission_and_audit() {
         match r.access {
             Access::One(_) => {}
             Access::ByKind { image, pe } => assert_ne!(image, pe),
+            // Only the relay route; no operator permission names it.
+            Access::BootService => {
+                assert_eq!(r.pattern, "/v1/relay/boot-policy");
+                assert!(r.access.permissions().is_empty());
+            }
         }
     }
 }

@@ -30,6 +30,17 @@
 //! 7. `audit verify` with the audit key → exit 0 (intact); with another
 //!    key → exit 1.
 //!
+//! M3 (plan WU-10; the same flow as `device_e2e.rs` on the in-memory
+//! store): the configuration enables the device listener with the plan,
+//! boot-policy and code keys; step 2 adds `boot-service enrol` (a relay
+//! certificate on 127.0.0.0/8; the operator's certificate is refused);
+//! step 4 continues with `common::device::run` (code authorisation,
+//! package, disk, confirm, verified plan, verified chunks, progress to
+//! success, the relay's signed policy showing the stop); after the
+//! restart of step 6 the stop is still listed, the operator clears it
+//! (`POST /v1/boot-stops/{id}/clear`, decision 0021 item 3) and the
+//! relay's policy no longer lists the device.
+//!
 //! Modified-row detection on PostgreSQL is `usgp-db` `audit_pg` (owner
 //! tampering) and, through this command's code, `tests/serve.rs`
 //! (`audit_verify_detects_tampering`); this package has no SQL client to
@@ -50,8 +61,11 @@ mod e2e {
     use usgp_image::testkit::builder::WimBuilder;
     use usgp_proto::WimCompression;
 
+    use usgp_crypto::test_pki::LeafSpec;
+
+    use crate::common::device;
     use crate::common::flow::{self, Expect, Source};
-    use crate::common::pg::{PgSetup, text, wait_state};
+    use crate::common::pg::{PgSetup, device_addr, text, wait_state};
     use crate::common::stream::{Body, digest_bytes};
     use crate::common::{Fixture, https, json_str};
 
@@ -91,7 +105,8 @@ mod e2e {
         let f = Fixture::new("e2e-pg");
         // Copies the CI files in, so the trust rules see this test's own
         // files (owner = the test uid, passed as --admin-uid).
-        let pg = PgSetup::new(&f, |t| t);
+        // M3: the device listener and its keys (plan section 3.9).
+        let pg = PgSetup::new(&f, |t| f.m3_overlay(&t));
         let cfg = pg.cfg();
 
         // 1. Migrations, as the owner; the second run applies nothing.
@@ -130,9 +145,46 @@ mod e2e {
         ]);
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
 
+        // M3: enrol the relay as a boot service (administrative role).
+        let relay = f
+            .pki
+            .intermediate
+            .issue(&LeafSpec::client("relay e2e pg"))
+            .unwrap();
+        let relay_pem = f.scratch.write("relay.pem", &relay.chain_pem(), 0o644);
+        let enrol_relay = |cert: &str, name: &str| {
+            crate::common::pg::server(&[
+                "boot-service",
+                "enrol",
+                "--config",
+                cfg,
+                "--cert",
+                cert,
+                "--name",
+                name,
+                "--subnet",
+                "127.0.0.0/8",
+                "--admin-uid",
+                &crate::common::pg::uid(),
+            ])
+        };
+        // An operator's certificate is refused (both would be locked out).
+        let out = enrol_relay(admin_pem.to_str().unwrap(), "Not A Relay");
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        assert!(text(&out.stdout).contains("certificate_bound_to_operator"));
+        let out = enrol_relay(relay_pem.to_str().unwrap(), "Relay E2E");
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert!(text(&out.stdout).contains("boot_service.enrolled"));
+        let bs_id = text(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("boot service id: ").map(str::to_owned))
+            .unwrap();
+
         // 3. Serve.
-        let s = pg.serve();
+        let mut s = pg.serve();
         let addr = s.addr;
+        let device_at = device_addr(&s.wait_for("\"event\":\"server.start\""));
+        assert_ne!(device_at, addr);
         let r = https(addr, &f.pki, None, "GET", "/v1/limits", None)
             .await
             .unwrap();
@@ -228,6 +280,28 @@ mod e2e {
         )
         .await;
 
+        // M3: a device session on PostgreSQL to success; the relay's
+        // policy shows the stop.
+        let out = Box::pin(device::run(
+            addr,
+            device_at,
+            &f,
+            &bs_id,
+            &ids.package,
+            image.digests.total,
+            &relay,
+        ))
+        .await;
+        let r = device::op(addr, &f, "GET", "/v1/boot-stops", &[], None).await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        let stop_id = r.json()["stops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["mac"] == out.mac.to_string())
+            .map(|v| v["id"].as_str().unwrap().to_owned())
+            .expect("the device's boot stop");
+
         // A session left open across a restart.
         let open = format!(
             r#"{{"kind":"image","display_name":"Interrupted","file_name":"x.wim","size":4096,"sha256":"{}"}}"#,
@@ -268,9 +342,30 @@ mod e2e {
             "\"event\":\"content.download.completed\"",
             "\"event\":\"server.stop\"",
             "\"event\":\"audit.checkpoint\"",
+            // M3.
+            "\"event\":\"boot_service.packages.set\"",
+            "\"event\":\"auth_code.issued\"",
+            "\"event\":\"device.session.opened\"",
+            "\"event\":\"auth_code.used\"",
+            "\"event\":\"device.session.authorised\"",
+            "\"event\":\"device.session.package_chosen\"",
+            "\"event\":\"device.session.disk_chosen\"",
+            "\"event\":\"disk.wipe.authorised\"",
+            "\"event\":\"job.created\"",
+            "\"event\":\"job.plan.issued\"",
+            "\"event\":\"job.content.read\"",
+            "\"event\":\"job.step.completed\"",
+            "\"event\":\"job.succeeded\"",
+            "\"event\":\"boot_stop.added\"",
+            "\"event\":\"boot_policy.read\"",
+            "\"actor_kind\":\"device_session\"",
+            "\"interface\":\"device_api\"",
+            "\"actor_kind\":\"boot_service\"",
+            "\"interface\":\"relay_feed\"",
         ] {
             assert!(all.contains(e), "{e} missing:\n{all}");
         }
+        assert!(all.contains(&out.job_id) && all.contains(&out.session_id));
         assert!(!all.contains("\"event\":\"content.download.aborted\""));
         assert!(!all.contains("\"event\":\"content.integrity.failed\""));
         assert!(
@@ -284,6 +379,19 @@ mod e2e {
         // 6. Restart recovery: the open session fails, the package stays
         // Ready and its manifest still verifies.
         let s = pg.serve();
+        // M3: the stop survived the restart; the operator clears it and
+        // the relay's policy no longer stops the device.
+        let g = device::open_policy(&f, &device::pull(s.addr, &f, &relay, 0).await);
+        assert_eq!(g.generation, out.generation);
+        assert!(g.stop_set().contains(&out.mac));
+        let clear = format!("/v1/boot-stops/{stop_id}/clear");
+        let r = device::op(s.addr, &f, "POST", &clear, &[], None).await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        let r = device::op(s.addr, &f, "POST", &clear, &[], None).await;
+        assert_eq!(r.status, 409, "{}", r.text());
+        let g = device::open_policy(&f, &device::pull(s.addr, &f, &relay, out.generation).await);
+        assert_eq!(g.generation, out.generation + 1);
+        assert!(!g.stop_set().contains(&out.mac));
         let r = wait_state(
             s.addr,
             &f,

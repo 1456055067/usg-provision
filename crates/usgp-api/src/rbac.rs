@@ -1,5 +1,10 @@
 //! Permissions and the one built-in role (REQ-RBAC-001, REQ-RBAC-004).
 //!
+//! M3 adds the code, device-session, job, boot-service and boot-stop
+//! permissions (plan M3 section 3.5). A boot service (relay) is not an
+//! operator and holds none of these; its one route is marked
+//! [`crate::routes::Access::BootService`].
+//!
 //! The permission set is fixed and closed. M2 has one role,
 //! `administrator`, which holds every permission. An operator holds that
 //! role or none; an operator with no role is refused (403) on every route,
@@ -12,6 +17,8 @@
 // - NIST 800-53: AC-6 (Least Privilege) - no role means no permission.
 // - SPEC: specs/operator-access.md#REQ-RBAC-001, #REQ-RBAC-003,
 //   #REQ-RBAC-004
+// - SPEC: specs/targeting.md#REQ-TGT-001, #REQ-TGT-013, #REQ-TGT-014;
+//   specs/progress.md#REQ-JOB-001; specs/boot-network.md#REQ-BOOT-067
 
 use usgp_db::OperatorRole;
 
@@ -42,6 +49,28 @@ pub enum Permission {
     PackageClone,
     /// Delete a package.
     PackageDelete,
+    /// Issue a single-use device code (M3, REQ-TGT-013).
+    AuthCodeIssue,
+    /// List codes (never their values).
+    AuthCodeView,
+    /// Revoke an unused code.
+    AuthCodeRevoke,
+    /// View device sessions (REQ-TGT-014, REQ-TGT-016).
+    DeviceSessionView,
+    /// Approve or refuse a waiting device session (REQ-TGT-014).
+    DeviceSessionApprove,
+    /// View jobs (REQ-JOB-001).
+    JobView,
+    /// Acknowledge a failed job.
+    JobAcknowledge,
+    /// View boot services and their packages (REQ-TGT-001, REQ-TGT-008).
+    BootServiceView,
+    /// Set the packages a boot service offers (REQ-TGT-001).
+    BootServiceAssign,
+    /// View boot stops (REQ-BOOT-067).
+    BootStopView,
+    /// Clear a boot stop, the minimal reversal of REQ-BOOT-067.
+    DeviceBootReenable,
 }
 
 impl Permission {
@@ -59,6 +88,17 @@ impl Permission {
         Self::PackageEdit,
         Self::PackageClone,
         Self::PackageDelete,
+        Self::AuthCodeIssue,
+        Self::AuthCodeView,
+        Self::AuthCodeRevoke,
+        Self::DeviceSessionView,
+        Self::DeviceSessionApprove,
+        Self::JobView,
+        Self::JobAcknowledge,
+        Self::BootServiceView,
+        Self::BootServiceAssign,
+        Self::BootStopView,
+        Self::DeviceBootReenable,
     ];
 
     /// Stable name (audit detail).
@@ -77,6 +117,17 @@ impl Permission {
             Self::PackageEdit => "package.edit",
             Self::PackageClone => "package.clone",
             Self::PackageDelete => "package.delete",
+            Self::AuthCodeIssue => "auth_code.issue",
+            Self::AuthCodeView => "auth_code.view",
+            Self::AuthCodeRevoke => "auth_code.revoke",
+            Self::DeviceSessionView => "device_session.view",
+            Self::DeviceSessionApprove => "device_session.approve",
+            Self::JobView => "job.view",
+            Self::JobAcknowledge => "job.acknowledge",
+            Self::BootServiceView => "boot_service.view",
+            Self::BootServiceAssign => "boot_service.assign",
+            Self::BootStopView => "boot_stop.view",
+            Self::DeviceBootReenable => "device.boot_reenable",
         }
     }
 }

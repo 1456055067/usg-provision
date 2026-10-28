@@ -747,8 +747,12 @@ mod tftp {
             &long,
             "caf\u{e9}.efi".as_bytes(),
             b"./usgp-test-payload.efi",
-            b"/usgp-test-payload.efi",
-            b"USGP-TEST-PAYLOAD.EFI",
+            // M3: one leading separator is dropped and case is ignored
+            // (`backslash_and_case_normalised`), but not twice, and not
+            // past the allow-list.
+            b"//usgp-test-payload.efi",
+            b"\\\\usgp-test-payload.efi",
+            b"USGP-TEST-PAYLOAD.EF",
             b"usgp-test-payload.efi/",
             b"root/usgp-test-payload.efi",
             b"../root/usgp-test-payload.efi",
@@ -823,8 +827,14 @@ mod tftp {
     #[tokio::test]
     async fn block_count_limit_refused_before_data() {
         // 65535 * 512 octets needs 65536 DATA packets at the default block
-        // size (the final one empty): refused with ERROR 3 (REQ-BOOT-035).
-        let r = rig("blocks", 65_535 * 512).await;
+        // size (the final one empty): with `block_wrap = "off"` (the M1
+        // behaviour, still available) refused with ERROR 3
+        // (REQ-BOOT-035). The M3 default wraps instead
+        // (`wrap_default_serves_more_than_65535_blocks`).
+        let r = rig_with("blocks", 65_535 * 512, |cfg| {
+            cfg.tftp.block_wrap = usgp_tftp::BlockWrap::Off;
+        })
+        .await;
         let c = r.net.bind(client_ip(50));
         r.listener
             .handle_request(c.addr, &rrq(PROGRAM.as_bytes(), &[]));
@@ -1002,5 +1012,341 @@ mod tftp {
         })
         .await
         .expect("only the stalled transfer remains");
+    }
+
+    // -----------------------------------------------------------------
+    // M3 (plan WU-11): request names, windowsize, wraparound, PE kit
+    // -----------------------------------------------------------------
+
+    /// A rig serving `files` (name, bytes) with `program` as the boot
+    /// program and `kit` (TOML text, possibly empty) appended to the
+    /// manifest.
+    async fn kit_rig(
+        tag: &str,
+        files: &[(&str, &[u8])],
+        program: &str,
+        kit: &str,
+    ) -> (Rig, Arc<usgp_relay::content::ContentStore>) {
+        let s = Scratch::new(tag);
+        s.publish(files);
+        if !kit.is_empty() {
+            let mut text = std::fs::read_to_string(s.manifest_path()).unwrap();
+            text.push('\n');
+            text.push_str(kit);
+            std::fs::write(s.manifest_path(), text).unwrap();
+        }
+        let mut cfg = config(&s);
+        cfg.boot.uefi_x64_program = usgp_proto::BootFileName::try_from(program).unwrap();
+        let c = content(&cfg).await;
+        let net = MemNet::new();
+        let shed = Arc::new(Mutex::new(Counters::default()));
+        let shared = TftpShared::new(&cfg.limits, shed, tokio::time::Instant::now().into_std());
+        let listener = TftpListener::new(
+            iface(),
+            Arc::clone(&c),
+            cfg.tftp_listener_config(),
+            MemFactory {
+                net: Arc::clone(&net),
+                ip: IpAddr::V4(IFACE_ADDR),
+            },
+            shared,
+        );
+        (
+            Rig {
+                _s: s,
+                net,
+                listener,
+                data: Vec::new(),
+            },
+            c,
+        )
+    }
+
+    /// RFC 7440 client: ACKs after `window` in-order blocks or the short
+    /// final block; wire numbers wrap 65535 -> 0. Returns the file and the
+    /// number of wraps seen.
+    async fn windowed_download(c: &MemSocket, block_size: usize, window: usize) -> (Vec<u8>, u64) {
+        let mut out = Vec::new();
+        let mut next: u64 = 1;
+        let mut since_ack = 0usize;
+        let mut wraps = 0u64;
+        loop {
+            let (pkt, from) = c.recv().await;
+            match parse(&pkt).unwrap() {
+                Packet::Oack(o) => {
+                    assert_eq!(
+                        o.get(b"windowsize"),
+                        Some(window.to_string().as_bytes()),
+                        "windowsize acknowledged"
+                    );
+                    c.send(from, &encode_ack(0));
+                }
+                Packet::Data { block, data } => {
+                    let want = u16::try_from(next & 0xffff).unwrap();
+                    if block != want {
+                        continue;
+                    }
+                    if want == 0 {
+                        wraps += 1;
+                    }
+                    out.extend_from_slice(data);
+                    next += 1;
+                    since_ack += 1;
+                    let last = data.len() < block_size;
+                    if last || since_ack == window {
+                        c.send(from, &encode_ack(block));
+                        since_ack = 0;
+                    }
+                    if last {
+                        return (out, wraps);
+                    }
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    /// REQ-BOOT-035 / REQ-BOOT-064 / DEC-0018 item 2: with the M3 defaults
+    /// a file needing more than 65535 blocks is served in full, the block
+    /// number wrapping to 0, in windows of the negotiated size.
+    #[tokio::test]
+    async fn wrap_default_serves_more_than_65535_blocks() {
+        // 65,540 blocks of 8 bytes plus a short final block.
+        let size = 65_540 * 8 + 3;
+        let r = rig("wrap", size).await;
+        let c = r.net.bind(client_ip(60));
+        assert_eq!(
+            r.listener.handle_request(
+                c.addr,
+                &rrq(
+                    PROGRAM.as_bytes(),
+                    &[(b"blksize", b"8"), (b"windowsize", b"8"), (b"tsize", b"0")],
+                ),
+            ),
+            Disposition::Started
+        );
+        let (got, wraps) = windowed_download(&c, 8, 8).await;
+        assert_eq!(wraps, 1);
+        assert_eq!(got.len(), r.data.len());
+        assert!(got == r.data, "reassembled bytes differ");
+        wait_idle(&r.listener).await;
+    }
+
+    /// RFC 7440: the window granted is capped by `tftp.max_window_size`.
+    #[tokio::test]
+    async fn windowsize_capped_by_config() {
+        let r = rig_with("wincap", 20_000, |cfg| cfg.tftp.max_window_size = 4).await;
+        let c = r.net.bind(client_ip(61));
+        r.listener
+            .handle_request(c.addr, &rrq(PROGRAM.as_bytes(), &[(b"windowsize", b"16")]));
+        let (got, wraps) = windowed_download(&c, 512, 4).await;
+        assert_eq!(wraps, 0);
+        assert!(got == r.data);
+        wait_idle(&r.listener).await;
+    }
+
+    /// REQ-BOOT-063: Microsoft-style names (backslashes, a leading
+    /// separator, other letter case) reach the published file; the matched
+    /// manifest name is what is read.
+    #[tokio::test]
+    async fn backslash_and_case_normalised() {
+        let bcd = bytes(3000, 21);
+        let prog = bytes(700, 22);
+        let (r, _) = kit_rig(
+            "names",
+            &[(PROGRAM, &prog), ("Boot/BCD", &bcd)],
+            PROGRAM,
+            "",
+        )
+        .await;
+        for (i, (name, want)) in [
+            (&b"\\Boot\\BCD"[..], &bcd),
+            (b"/boot/bcd", &bcd),
+            (b"Boot\\bcd", &bcd),
+            (b"/USGP-TEST-PAYLOAD.EFI", &prog),
+            (b"Usgp-Test-Payload.efi", &prog),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let c = r.net.bind(client_ip(70 + u8::try_from(i).unwrap()));
+            assert_eq!(
+                r.listener.handle_request(c.addr, &rrq(name, &[])),
+                Disposition::Started,
+                "case {i}"
+            );
+            let (got, _) = download(&c, 512).await;
+            assert!(got == *want, "case {i}");
+        }
+        wait_idle(&r.listener).await;
+    }
+
+    /// Names that differ only in case make a case-insensitive match
+    /// ambiguous: the manifest is refused at load (exit 78).
+    #[tokio::test]
+    async fn collision_manifest_refused() {
+        let s = Scratch::new("collide");
+        s.publish(&[(PROGRAM, b"p"), ("Boot/BCD", b"a"), ("boot/bcd", b"b")]);
+        let cfg = config(&s);
+        let e = usgp_relay::content::ContentStore::load(
+            &cfg.boot.manifest,
+            &cfg.boot.root,
+            &cfg.boot.uefi_x64_program,
+            cfg.tftp.max_file_size,
+            cfg.limits.verify_concurrency,
+            &cfg.trust,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                e,
+                usgp_relay::content::ContentLoadError::NameCollision { .. }
+            ),
+            "{e}"
+        );
+    }
+
+    const KIT_FILES: [&str; 5] = [
+        "bootmgfw.efi",
+        "Boot/BCD",
+        "Boot/boot.sdi",
+        "Boot/boot.wim",
+        "Boot/Fonts/wgl4_boot.ttf",
+    ];
+
+    fn kit_section(wim_sha: &str, fonts: &str) -> String {
+        format!(
+            "[pe_kit]\nboot_program = \"bootmgfw.efi\"\nbcd = \"Boot/BCD\"\n\
+             sdi = \"Boot/boot.sdi\"\nwim = \"Boot/boot.wim\"\nfonts = [{fonts}]\n\
+             pe_content_sha256 = \"{wim_sha}\"\n"
+        )
+    }
+
+    /// REQ-BOOT-063 / REQ-PE-011/012: a complete kit is offered and every
+    /// file the boot manager asks for (BCD, SDI, WIM, fonts) is served
+    /// byte for byte under its Microsoft-style name.
+    #[tokio::test]
+    async fn pe_kit_files_served() {
+        let contents: Vec<Vec<u8>> = (0..5u64)
+            .map(|i| bytes(1000 + 777 * i as usize, 30 + i))
+            .collect();
+        let files: Vec<(&str, &[u8])> = KIT_FILES
+            .iter()
+            .zip(&contents)
+            .map(|(n, c)| (*n, c.as_slice()))
+            .collect();
+        let wim_sha = usgp_crypto::sha256(&contents[3]).to_hex();
+        let (r, c) = kit_rig(
+            "kit-ok",
+            &files,
+            "bootmgfw.efi",
+            &kit_section(&wim_sha, "\"Boot/Fonts/wgl4_boot.ttf\""),
+        )
+        .await;
+        assert_eq!(
+            c.state().current(),
+            usgp_relay::state::ServiceState::Running
+        );
+        assert_eq!(
+            c.offerable_program().map(|p| p.as_str()),
+            Some("bootmgfw.efi")
+        );
+        assert!(c.pe_kit().is_some());
+        for (i, name) in [
+            &b"bootmgfw.efi"[..],
+            b"\\Boot\\BCD",
+            b"\\Boot\\boot.sdi",
+            b"\\Boot\\boot.wim",
+            b"\\Boot\\Fonts\\wgl4_boot.ttf",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cl = r.net.bind(client_ip(80 + u8::try_from(i).unwrap()));
+            assert_eq!(
+                r.listener.handle_request(cl.addr, &rrq(name, &[])),
+                Disposition::Started,
+                "file {i}"
+            );
+            let (got, _) = download(&cl, 512).await;
+            assert!(got == contents[i], "file {i}");
+        }
+        wait_idle(&r.listener).await;
+    }
+
+    /// REQ-PE-012 / REQ-BOOT-052: a kit naming a file that is not
+    /// published is incomplete, which is missing content: no boot program
+    /// is offered, and the kit's status says why.
+    #[tokio::test]
+    async fn incomplete_kit_is_missing_content() {
+        let contents: Vec<Vec<u8>> = (0..4u64).map(|i| bytes(500, 40 + i)).collect();
+        let files: Vec<(&str, &[u8])> = KIT_FILES[..4]
+            .iter()
+            .zip(&contents)
+            .map(|(n, c)| (*n, c.as_slice()))
+            .collect();
+        let wim_sha = usgp_crypto::sha256(&contents[3]).to_hex();
+        let (_r, c) = kit_rig(
+            "kit-incomplete",
+            &files,
+            "bootmgfw.efi",
+            &kit_section(&wim_sha, "\"Boot/Fonts/absent.ttf\""),
+        )
+        .await;
+        assert_eq!(
+            c.state().current(),
+            usgp_relay::state::ServiceState::RunningMissingContent
+        );
+        assert!(c.offerable_program().is_none());
+        let kit_status = c
+            .state()
+            .files()
+            .into_iter()
+            .find(|(n, _)| n == usgp_relay::pe_kit::KIT_STATUS_NAME)
+            .map(|(_, s)| s);
+        assert_eq!(kit_status, Some(usgp_relay::state::FileStatus::Missing));
+    }
+
+    /// REQ-PE-012 ("matches the imported environment"): a WIM whose
+    /// digest is not the imported PE's, or a kit whose boot program is not
+    /// the configured one, is missing content too.
+    #[tokio::test]
+    async fn mismatched_kit_is_missing_content() {
+        let contents: Vec<Vec<u8>> = (0..4u64).map(|i| bytes(500, 50 + i)).collect();
+        let files: Vec<(&str, &[u8])> = KIT_FILES[..4]
+            .iter()
+            .zip(&contents)
+            .map(|(n, c)| (*n, c.as_slice()))
+            .collect();
+        let other_sha = usgp_crypto::sha256(b"another pe").to_hex();
+        let (_r, c) = kit_rig(
+            "kit-digest",
+            &files,
+            "bootmgfw.efi",
+            &kit_section(&other_sha, ""),
+        )
+        .await;
+        assert!(c.offerable_program().is_none());
+        let wim_sha = usgp_crypto::sha256(&contents[3]).to_hex();
+        let (_r2, c2) = kit_rig(
+            "kit-prog",
+            &files,
+            "Boot/boot.sdi",
+            &kit_section(&wim_sha, ""),
+        )
+        .await;
+        assert!(c2.offerable_program().is_none());
+        for store in [&c, &c2] {
+            let kit_status = store
+                .state()
+                .files()
+                .into_iter()
+                .find(|(n, _)| n == usgp_relay::pe_kit::KIT_STATUS_NAME)
+                .map(|(_, s)| s);
+            assert_eq!(
+                kit_status,
+                Some(usgp_relay::state::FileStatus::IntegrityFailed)
+            );
+        }
     }
 }

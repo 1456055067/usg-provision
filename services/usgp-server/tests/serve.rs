@@ -91,7 +91,8 @@ mod serve {
         let addr = tokio::time::timeout(Duration::from_secs(20), ready_rx)
             .await
             .expect("server did not start")
-            .expect("server stopped before serving");
+            .expect("server stopped before serving")
+            .api;
         Running {
             addr,
             stop: stop_tx,

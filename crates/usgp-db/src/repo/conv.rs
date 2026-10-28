@@ -7,11 +7,13 @@
 // - NIST 800-53: SI-10 (Information Input Validation) - stored rows are
 //   untrusted input on read.
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio_postgres::Row;
 use tokio_postgres::types::FromSql;
 use usgp_common::Sha256Digest;
 use usgp_crypto::KeyId;
-use usgp_proto::UnixMicros;
+use usgp_proto::{MacAddress, MacList, Step, UnixMicros};
 
 use crate::error::DbError;
 
@@ -159,6 +161,85 @@ pub(crate) fn texts<T: Copy>(
     as_str: impl Fn(T) -> &'static str,
 ) -> Vec<&'static str> {
     values.iter().map(|v| as_str(*v)).collect()
+}
+
+/// A `bytea[]` column of MAC addresses, re-validated as a [`MacList`].
+pub(crate) fn col_macs(row: &Row, name: &'static str) -> Result<MacList, DbError> {
+    let raw: Vec<Vec<u8>> = col(row, name)?;
+    let macs = raw
+        .iter()
+        .map(|m| {
+            let octets =
+                <[u8; 6]>::try_from(m.as_slice()).map_err(|_| DbError::Corrupt { what: name })?;
+            MacAddress::new(octets).map_err(|_| DbError::Corrupt { what: name })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    MacList::new(macs).map_err(|_| DbError::Corrupt { what: name })
+}
+
+/// MAC addresses as a `bytea[]` parameter.
+pub(crate) fn mac_params(macs: &MacList) -> Vec<&[u8]> {
+    macs.as_slice()
+        .iter()
+        .map(|m| m.octets().as_slice())
+        .collect()
+}
+
+/// A 6-byte `bytea` column as a [`MacAddress`].
+pub(crate) fn col_mac(row: &Row, name: &'static str) -> Result<MacAddress, DbError> {
+    let v: &[u8] = col(row, name)?;
+    let octets = <[u8; 6]>::try_from(v).map_err(|_| DbError::Corrupt { what: name })?;
+    MacAddress::new(octets).map_err(|_| DbError::Corrupt { what: name })
+}
+
+/// A `text` column holding JSON of type `T`, re-validated by its parser.
+pub(crate) fn col_json<T: DeserializeOwned>(row: &Row, name: &'static str) -> Result<T, DbError> {
+    let s: &str = col(row, name)?;
+    from_json(s, name)
+}
+
+/// A nullable `text` column holding JSON of type `T`.
+pub(crate) fn col_opt_json<T: DeserializeOwned>(
+    row: &Row,
+    name: &'static str,
+) -> Result<Option<T>, DbError> {
+    let s: Option<&str> = col(row, name)?;
+    s.map(|s| from_json(s, name)).transpose()
+}
+
+/// Parses stored JSON; any failure is [`DbError::Corrupt`].
+pub(crate) fn from_json<T: DeserializeOwned>(s: &str, name: &'static str) -> Result<T, DbError> {
+    if s.len() > MAX_JSON_COLUMN_BYTES {
+        return Err(DbError::Corrupt { what: name });
+    }
+    serde_json::from_str(s).map_err(|_| DbError::Corrupt { what: name })
+}
+
+/// Renders a value for a JSON `text` column (at most
+/// [`MAX_JSON_COLUMN_BYTES`], as the column constraint).
+pub(crate) fn to_json<T: Serialize>(v: &T, what: &'static str) -> Result<String, DbError> {
+    let s = serde_json::to_string(v).map_err(|_| DbError::InvalidArgument { what })?;
+    if s.len() > MAX_JSON_COLUMN_BYTES {
+        return Err(DbError::InvalidArgument { what });
+    }
+    Ok(s)
+}
+
+/// Longest JSON document stored in a `text` column (migration 0004).
+pub(crate) const MAX_JSON_COLUMN_BYTES: usize = 65_536;
+
+/// A `smallint` step column.
+pub(crate) fn col_step(row: &Row, name: &'static str) -> Result<Step, DbError> {
+    let v: i16 = col(row, name)?;
+    u8::try_from(v)
+        .ok()
+        .and_then(|n| Step::new(n).ok())
+        .ok_or(DbError::Corrupt { what: name })
+}
+
+/// A step as a `smallint` parameter.
+pub(crate) fn step_param(s: Step) -> i16 {
+    i16::from(s.get())
 }
 
 #[cfg(test)]

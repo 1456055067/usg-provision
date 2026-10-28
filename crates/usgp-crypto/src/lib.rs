@@ -7,11 +7,13 @@
 //! dependencies. Every other crate reaches cryptography through the
 //! [`CryptoProvider`] trait and the functions exported here.
 //!
-//! Status: M2. FIPS status, SHA-256 (one-shot and streaming), legacy SHA-1
+//! Status: M3. FIPS status, SHA-256 (one-shot and streaming), legacy SHA-1
 //! for WIM format hashes, DRBG output, ECDSA P-384 signing keys with
 //! domain-separated typed signatures ([`envelope`]), X.509 facts
 //! ([`x509`]), and TLS server/client configurations with operator
-//! client-certificate validation ([`tls`]). The `test-pki` feature adds a
+//! client-certificate validation ([`tls`]). M3 adds HMAC-SHA-256 keys and
+//! constant-time comparison ([`hmac`]) and a blocking TLS client for the
+//! pre-boot agent ([`tls::BlockingClientTls`]). The `test-pki` feature adds a
 //! test certificate hierarchy ([`test_pki`]); release builds never enable
 //! it. AEAD is deferred to M4 (plan M2 section 1.2). See
 //! docs/ARCHITECTURE.md.
@@ -27,6 +29,7 @@ pub mod crl;
 pub mod digest;
 pub mod envelope;
 pub mod error;
+pub mod hmac;
 pub mod pem;
 pub mod rand;
 pub mod sign;
@@ -39,6 +42,7 @@ pub use crl::{CrlFacts, CrlNumber, crl_facts};
 pub use digest::{DigestAlgorithm, LegacySha1Hasher, Sha1Digest, Sha256Hasher};
 pub use envelope::{sign_typed, verify_typed};
 pub use error::CryptoError;
+pub use hmac::{HmacKey, HmacTag, ct_eq, hmac_sha256};
 pub use rand::fill_random;
 pub use sign::{KeyId, SIGNATURE_ALGORITHM, SigningKey, VerifyingKey, verify_signing_input};
 pub use usgp_common::Sha256Digest;

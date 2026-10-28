@@ -11,15 +11,15 @@ use usgp_common::config::TrustPolicy;
 use usgp_common::telemetry::{self, Level, LogFormat};
 use usgp_crypto::PeerCertificate;
 use usgp_db::{OperatorRole, PgStore, SCHEMA_VERSION};
-use usgp_proto::{DisplayName, OperatorId};
+use usgp_proto::{BootServiceId, DisplayName, OperatorId};
 use usgp_server::cli::{self, Command, ConfigArgs, RoleArg, USAGE};
 use usgp_server::config::{self, LoadedConfig};
 use usgp_server::events::{self, LocalUser};
 use usgp_server::material::{self, DbRole};
 use usgp_server::serve::{self, RunOptions, ServeError};
 use usgp_server::{
-    EXIT_CONFIG, EXIT_FAILURE, EXIT_NOPERM, EXIT_UNAVAILABLE, EXIT_USAGE, audit_cmd, keys,
-    migrate_cmd, operator,
+    EXIT_CONFIG, EXIT_FAILURE, EXIT_NOPERM, EXIT_UNAVAILABLE, EXIT_USAGE, audit_cmd,
+    boot_service_cmd, keys, migrate_cmd, operator,
 };
 
 /// How long shutdown waits for blocking work (a running content check)
@@ -65,7 +65,7 @@ fn main() -> ExitCode {
             purpose,
             out_key,
             out_pub,
-        }) => match keys::keygen(purpose, &out_key, &out_pub) {
+        }) => match keys::keygen(purpose, &out_key, out_pub.as_deref()) {
             Ok(g) => {
                 // NIST-011: no database here; the event is mirrored
                 // unpersisted with the local uid and node.
@@ -75,12 +75,16 @@ fn main() -> ExitCode {
                     &keys::generated_draft(&g, usgp_common::process::effective_uid().ok()),
                 );
                 println!("purpose: {}", g.purpose.as_str());
-                println!("key id: {}", g.key_id);
+                if let Some(id) = &g.key_id {
+                    println!("key id: {id}");
+                }
                 println!(
                     "private key: {} (mode 0600; set owner root:<service group>, mode 0640)",
                     out_key.display()
                 );
-                println!("public key: {}", out_pub.display());
+                if let Some(p) = &out_pub {
+                    println!("public key: {}", p.display());
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -118,6 +122,13 @@ fn main() -> ExitCode {
                 max_checkpoint_age,
             },
         ),
+        Ok(Command::BootServiceEnrol {
+            config,
+            cert,
+            name,
+            subnets,
+        }) => boot_service_enrol(&config, &cert, &name, &subnets),
+        Ok(Command::BootServiceDisable { config, id }) => boot_service_disable(&config, &id),
     }
 }
 
@@ -191,6 +202,18 @@ fn check_config(args: &ConfigArgs) -> ExitCode {
     println!("listen: {}", cfg.listen);
     println!("content key id: {}", prepared.content_key_id);
     println!("audit key id: {}", prepared.audit_key_id);
+    match &prepared.provisioning {
+        Some(k) => {
+            println!("plan key id: {}", k.plan_key_id());
+            println!("boot-policy key id: {}", k.boot_policy_key_id());
+            println!("code hmac key: loaded (32 bytes)");
+        }
+        None => println!("provisioning keys: not configured (device sessions and relay feed off)"),
+    }
+    match &cfg.device_listener {
+        Some(d) => println!("device listen: {} (server-authenticated TLS)", d.listen),
+        None => println!("device listen: off"),
+    }
     println!("crl files: {}", prepared.crls.crls.len());
     println!(
         "database: {}:{}/{} as {} (certificate login)",
@@ -682,4 +705,155 @@ fn audit_verify(
         store.close();
         code
     })
+}
+
+/// Reads a certificate named on the command line under the trusted-file
+/// rules (CM-5): it decides who is trusted.
+fn read_cert_arg(
+    cert: &std::path::Path,
+    policy: &TrustPolicy,
+) -> Result<PeerCertificate, ExitCode> {
+    let pem = usgp_server::files::read_trusted_public(
+        cert,
+        u64::try_from(usgp_crypto::pem::MAX_CERT_PEM_BYTES).unwrap_or(u64::MAX),
+        policy,
+    )
+    .map_err(|e| {
+        eprintln!("usgp-server: --cert: {e}");
+        ExitCode::from(EXIT_CONFIG)
+    })?;
+    PeerCertificate::from_pem(&pem).map_err(|e| {
+        eprintln!("usgp-server: --cert: {e}");
+        ExitCode::from(EXIT_CONFIG)
+    })
+}
+
+/// Runs one administrative boot-service command on the `usgp_admin`
+/// role (decision 0016), after the genesis check.
+fn run_admin<T, Fut>(
+    args: &ConfigArgs,
+    needs_genesis: bool,
+    f: impl FnOnce(PgStore, AuditChain, LocalUser) -> Fut,
+    report: impl FnOnce(Result<T, boot_service_cmd::BootServiceCmdError>) -> ExitCode,
+) -> ExitCode
+where
+    Fut: std::future::Future<Output = (PgStore, Result<T, boot_service_cmd::BootServiceCmdError>)>,
+{
+    let (loaded, who) = match local_setup(args) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let cfg = &loaded.config;
+    let policy = trust(args);
+    let audit_key_id = if needs_genesis {
+        match keys::load_signing_key("signing.audit_key", &cfg.signing.audit_key, &policy) {
+            Ok(k) => Some(k.key_id()),
+            Err(e) => {
+                eprintln!("usgp-server: {e}");
+                return ExitCode::from(EXIT_CONFIG);
+            }
+        }
+    } else {
+        None
+    };
+    let chain = match chain_for(cfg) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let Some(rt) = runtime() else {
+        return ExitCode::from(EXIT_FAILURE);
+    };
+    rt.block_on(async {
+        let store = match connect_admin(cfg, &policy, EXIT_FAILURE).await {
+            Ok(s) => s,
+            Err(code) => return code,
+        };
+        if let Some(k) = &audit_key_id
+            && let Err(e) = events::ensure_genesis(&store, &chain, k).await
+        {
+            store.close();
+            eprintln!("usgp-server: {e}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+        let (store, r) = f(store, chain, who).await;
+        store.close();
+        report(r)
+    })
+}
+
+fn boot_service_enrol(
+    args: &ConfigArgs,
+    cert: &std::path::Path,
+    name: &str,
+    subnets: &[String],
+) -> ExitCode {
+    let Ok(name) = DisplayName::new(name) else {
+        eprintln!("usgp-server: --name is not an acceptable display name");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    let subnets = match boot_service_cmd::parse_subnets(subnets) {
+        Ok(s) => s,
+        Err(why) => {
+            eprintln!("usgp-server: {why}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let cert = match read_cert_arg(cert, &trust(args)) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let req = boot_service_cmd::BootServiceEnrolment {
+        cert,
+        name,
+        subnets,
+    };
+    run_admin(
+        args,
+        true,
+        |store, chain, who| async move {
+            let r = boot_service_cmd::enrol(&store, &chain, &who, &req).await;
+            (store, r)
+        },
+        |r| match r {
+            Ok(b) => {
+                println!("boot service id: {}", b.id);
+                println!("certificate sha256: {}", b.cert_sha256);
+                println!("status: {}", b.status.as_str());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("usgp-server: boot-service enrol: {e}");
+                ExitCode::from(EXIT_FAILURE)
+            }
+        },
+    )
+}
+
+fn boot_service_disable(args: &ConfigArgs, id: &str) -> ExitCode {
+    let Ok(id) = BootServiceId::parse(id) else {
+        eprintln!("usgp-server: --id is not a boot-service id (hyphenated UUID)");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    run_admin(
+        args,
+        false,
+        |store, chain, who| async move {
+            let r = boot_service_cmd::disable(&store, &chain, &who, id).await;
+            (store, r)
+        },
+        |r| match r {
+            Ok(boot_service_cmd::Disabled::Changed) => {
+                println!("boot service {id}: disabled");
+                ExitCode::SUCCESS
+            }
+            Ok(boot_service_cmd::Disabled::AlreadyDisabled) => {
+                println!("boot service {id}: already disabled");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("usgp-server: boot-service disable: {e}");
+                ExitCode::from(EXIT_FAILURE)
+            }
+        },
+    )
 }

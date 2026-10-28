@@ -5,6 +5,9 @@
 //! deployment packages over HTTPS with the operator's client certificate
 //! (`limits`, `image ...`, `pe ...`, `package ...`). See
 //! docs/ARCHITECTURE.md.
+//! M3 (plan WU-13): device codes, device sessions, jobs, boot services and
+//! boot stops (`code`, `session`, `job`, `boot-service`, `boot-stop`), and
+//! `boot-manifest create --pe-kit`.
 //!
 //! Process contract (plan section 3.6):
 //!
@@ -14,6 +17,7 @@
 //! | `usgp-cli --help` | usage on stdout, 0 |
 //! | `usgp-cli boot-manifest create\|verify ...` | 0 ok, 1 failure, 2 usage |
 //! | `usgp-cli limits\|image\|pe\|package ...` | 0 ok, 1 failure, 2 usage |
+//! | `usgp-cli code\|session\|job\|boot-service\|boot-stop ...` | 0 ok, 1 failure, 2 usage |
 //!
 //! `boot-manifest`: audit events are JSON lines on stdout; operator
 //! messages go to stderr. M2 commands: results on stdout, errors and
@@ -28,13 +32,18 @@
 mod client;
 mod args;
 mod boot_manifest;
+mod cmd_boot_service;
+mod cmd_code;
 mod cmd_content;
 mod cmd_image;
+mod cmd_job;
 mod cmd_package;
 mod cmd_pe;
+mod cmd_session;
 mod config;
 mod display;
 mod https;
+mod pe_kit;
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -43,10 +52,15 @@ use std::process::ExitCode;
 use usgp_common::telemetry::{self, Level, LogFormat};
 use usgp_proto::status::ContentKind;
 
-use crate::args::{Action, ApiCommand, Command};
+use crate::args::{Action, ApiCommand, Command, ConnArgs, KitCreateArgs};
 use crate::client::{ApiClient, Transport};
+use crate::cmd_boot_service::{boot_service_id, boot_stop_id};
+use crate::cmd_code::code_id;
 use crate::cmd_content::{CmdError, PinnedKey, content_id};
+use crate::cmd_job::job_id;
 use crate::cmd_package::package_id;
+use crate::cmd_session::session_id;
+use crate::https::HttpsTransport;
 
 const USAGE: &str = "\
 usage: usgp-cli [-h | --help]
@@ -64,6 +78,17 @@ usage: usgp-cli [-h | --help]
        usgp-cli package edit ID [--name N] [--description D] [--image ID] [--index N] [--pe ID] [CONN]
        usgp-cli package list | view ID | clone ID --name N | delete ID [--yes] [CONN]
        usgp-cli package manifest ID --out FILE [CONN]
+       usgp-cli boot-manifest create --pe-kit --root DIR --out FILE --pe ID
+                --boot-program NAME --bcd NAME --sdi NAME --wim NAME
+                [--font NAME]... [CONN] [--] [NAME...]
+       usgp-cli code issue [--ttl SECONDS] [--note TEXT] | list | revoke ID [CONN]
+       usgp-cli session list [--state S] | show ID [CONN]
+       usgp-cli session approve --display-code CODE [ID] [CONN]
+       usgp-cli session refuse ID [--note TEXT] [CONN]
+       usgp-cli job list [--state S] | show ID | ack ID [CONN]
+       usgp-cli boot-service list | show ID [CONN]
+       usgp-cli boot-service set-packages ID (PACKAGE_ID... | --none) [--if-match TAG] [CONN]
+       usgp-cli boot-stop list | clear ID [CONN]
 
 CONN: [--config FILE] [--server https://HOST[:PORT]] [--server-ca FILE]
       [--client-cert FILE] [--client-key FILE] [--content-key-pub FILE]
@@ -80,6 +105,20 @@ image|pe download     verify the signed manifest with --content-key-pub, then
                       each 8 MiB chunk, before writing FILE (never overwrites)
 package manifest      verify the signed package manifest, then write it to FILE
 delete                warns and asks for confirmation unless --yes is given
+create --pe-kit       also hash the kit files (the BCD is the operator's own
+                      file, never generated), check that the boot program is
+                      a UEFI x64 application, check that the WIM is the Ready
+                      x64 PE ID on the server, write the [pe_kit] section and
+                      print the memory the PE needs
+code issue            print a new device code ONCE; it is not shown again
+session approve       approve the waiting session that shows CODE on its
+                      screen (give ID if more than one does)
+job show              status, steps, disk, layout and any persistent error
+job ack               acknowledge a failed job's error (it stays failed)
+boot-service set-packages
+                      replace the package list; --if-match binds the change
+                      to the assignment tag printed by show
+boot-stop clear       offer a boot program to the device again
 
 exit status: 0 ok, 1 failure, 2 usage error
 ";
@@ -110,6 +149,7 @@ fn main() -> ExitCode {
         }
         Command::Create(a) => with_audit(|| boot_manifest::run_create(&a)),
         Command::Verify(a) => with_audit(|| boot_manifest::run_verify(&a)),
+        Command::CreateKit(a) => with_audit(|| run_create_kit(&a)),
         Command::Api(cmd) => ExitCode::from(run_api(*cmd)),
     }
 }
@@ -123,33 +163,54 @@ const fn needs_content_key(a: &Action) -> bool {
     )
 }
 
-/// Runs an M2 command: resolves settings, pins the content key when it is
-/// needed, builds TLS, connects, and dispatches. Returns 0 or 1.
-fn run_api(cmd: ApiCommand) -> u8 {
+/// Resolves settings, pins the content key when `need_key`, builds TLS
+/// and the transport. The error is the operator message.
+fn connect(
+    conn: &ConnArgs,
+    need_key: bool,
+) -> Result<(ApiClient<HttpsTransport>, Option<PinnedKey>), String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let prepared = config::resolve(&cmd.conn, home.as_deref()).and_then(|s| {
-        let key = if needs_content_key(&cmd.action) {
-            Some(PinnedKey::new(config::content_key(&s)?))
-        } else {
-            None
-        };
-        Ok((config::client_tls(&s)?, s, key))
-    });
-    let (tls, settings, key) = match prepared {
+    let (tls, settings, key) = config::resolve(conn, home.as_deref())
+        .and_then(|s| {
+            let key = if need_key {
+                Some(PinnedKey::new(config::content_key(&s)?))
+            } else {
+                None
+            };
+            Ok((config::client_tls(&s)?, s, key))
+        })
+        .map_err(|e| e.to_string())?;
+    let transport = HttpsTransport::new(settings.server, tls).map_err(|e| e.to_string())?;
+    Ok((ApiClient::new(transport), key))
+}
+
+/// `boot-manifest create --pe-kit`: connects first (a setup failure is
+/// reported and audited before any file is read), then builds the
+/// manifest, reading the PE's record over the operator's connection.
+fn run_create_kit(a: &KitCreateArgs) -> u8 {
+    match connect(&a.conn, false) {
+        Ok((mut api, _)) => {
+            let mut lookup = |id| {
+                cmd_pe::get(&mut api, id)
+                    .map(|(v, _)| v)
+                    .map_err(|e| e.to_string())
+            };
+            boot_manifest::run_create_kit(a, Ok(&mut lookup))
+        }
+        Err(e) => boot_manifest::run_create_kit(a, Err(e)),
+    }
+}
+
+/// Runs an API command: resolves settings, pins the content key when it
+/// is needed, builds TLS, connects, and dispatches. Returns 0 or 1.
+fn run_api(cmd: ApiCommand) -> u8 {
+    let (mut api, key) = match connect(&cmd.conn, needs_content_key(&cmd.action)) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("usgp-cli: {e}");
             return 1;
         }
     };
-    let transport = match https::HttpsTransport::new(settings.server, tls) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("usgp-cli: {e}");
-            return 1;
-        }
-    };
-    let mut api = ApiClient::new(transport);
     let mut input = io::stdin().lock();
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();
@@ -234,6 +295,36 @@ fn dispatch<T: Transport>(
         Action::PackageManifest(id, file) => {
             cmd_package::manifest(api, package_id(&id)?, &file, pinned(key)?, out)
         }
+        Action::CodeIssue { ttl_s, note } => cmd_code::issue(api, ttl_s, note.as_deref(), out),
+        Action::CodeList => cmd_code::list(api, out),
+        Action::CodeRevoke(id) => cmd_code::revoke(api, code_id(&id)?, out),
+        Action::SessionList(state) => cmd_session::list(api, state.as_deref(), out),
+        Action::SessionShow(id) => cmd_session::show(api, session_id(&id)?, out),
+        Action::SessionApprove { id, display_code } => {
+            let id = id.as_deref().map(session_id).transpose()?;
+            cmd_session::approve(api, id, &display_code, out)
+        }
+        Action::SessionRefuse { id, note } => {
+            cmd_session::refuse(api, session_id(&id)?, note.as_deref(), out)
+        }
+        Action::JobList(state) => cmd_job::list(api, state.as_deref(), out),
+        Action::JobShow(id) => cmd_job::show(api, job_id(&id)?, out),
+        Action::JobAck(id) => cmd_job::ack(api, job_id(&id)?, out),
+        Action::BootServiceList => cmd_boot_service::list(api, out),
+        Action::BootServiceShow(id) => cmd_boot_service::show(api, boot_service_id(&id)?, out),
+        Action::BootServiceSetPackages {
+            id,
+            packages,
+            if_match,
+        } => cmd_boot_service::set_packages(
+            api,
+            boot_service_id(&id)?,
+            &packages,
+            if_match.as_deref(),
+            out,
+        ),
+        Action::BootStopList => cmd_boot_service::list_stops(api, out),
+        Action::BootStopClear(id) => cmd_boot_service::clear_stop(api, boot_stop_id(&id)?, out),
     }
 }
 

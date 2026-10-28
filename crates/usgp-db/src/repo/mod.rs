@@ -33,24 +33,35 @@
 // - Decision 0015
 
 pub(crate) mod audit;
+pub(crate) mod boot_services;
+pub(crate) mod codes;
 pub(crate) mod content;
 pub(crate) mod conv;
+pub(crate) mod devices;
+pub(crate) mod jobs;
 pub(crate) mod operators;
 pub(crate) mod packages;
 
 use std::future::Future;
+use std::net::IpAddr;
 
 use usgp_audit::AuditTx;
 use usgp_common::Sha256Digest;
+use usgp_crypto::HmacTag;
+use usgp_proto::device::SessionState;
+use usgp_proto::ops::BootServiceStatus;
 use usgp_proto::{
-    ContentId, ContentKind, ContentState, OperatorId, PackageId, PackageStatus, SupportState,
-    UnixMicros, UploadId, UploadState,
+    AuthCodeId, BootServiceId, BootStopId, ContentId, ContentKind, ContentState, DiskDescriptorV1,
+    ErrorCode, FailureV1, JobId, JobState, LayoutReportV1, MacList, OperatorId, PackageId,
+    PackageStatus, SessionId, Step, StepState, SupportState, UnixMicros, UploadId, UploadState,
 };
 
 use crate::error::DbError;
 use crate::model::{
-    Content, Edition, EditionDeclaration, NewContent, Operator, OperatorStatus, Package,
-    PackageRef, ReadyContent, Reason, StoredManifest, Upload,
+    AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
+    DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
+    NewDeviceSession, NewJob, Operator, OperatorStatus, Package, PackageRef, ReadyContent, Reason,
+    SessionAuth, StoredManifest, Upload,
 };
 
 /// A source of transactions.
@@ -294,6 +305,374 @@ pub trait RepoTx: AuditTx + Send + Sized {
         expected_revision: u64,
     ) -> impl Future<Output = Result<(), DbError>> + Send;
 
+    // ------------------------------------------------------ boot services
+
+    /// The boot service with this id.
+    fn boot_service(
+        &mut self,
+        id: BootServiceId,
+    ) -> impl Future<Output = Result<Option<BootService>, DbError>> + Send;
+
+    /// The boot service bound to this client-certificate fingerprint
+    /// (relay authentication, decision 0021).
+    fn boot_service_by_cert(
+        &mut self,
+        cert_sha256: &Sha256Digest,
+    ) -> impl Future<Output = Result<Option<BootService>, DbError>> + Send;
+
+    /// Every boot service, ordered by creation time. Resolving a device's
+    /// boot service from its source address is the caller's: more than
+    /// one active service containing the address is ambiguous and must be
+    /// refused.
+    fn list_boot_services(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<BootService>, DbError>> + Send;
+
+    /// Enrols a boot service (administrative role only on PostgreSQL).
+    /// [`DbError::Conflict`] if the id, name or certificate is enrolled.
+    fn insert_boot_service(
+        &mut self,
+        b: &BootService,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Sets a boot service's status (administrative role only).
+    fn set_boot_service_status(
+        &mut self,
+        id: BootServiceId,
+        status: BootServiceStatus,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The packages assigned to a boot service, ordered by assignment time.
+    fn boot_service_packages(
+        &mut self,
+        id: BootServiceId,
+    ) -> impl Future<Output = Result<Vec<BootServicePackage>, DbError>> + Send;
+
+    /// Replaces a boot service's assignments with `package_ids` (distinct,
+    /// at most 256). Kept assignments keep their original `added_by` and
+    /// `added_at`. Serialised per boot service. [`DbError::NotFound`] for
+    /// an unknown service; [`DbError::Constraint`] for an unknown package.
+    fn set_boot_service_packages(
+        &mut self,
+        id: BootServiceId,
+        package_ids: &[PackageId],
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Boot services a package is assigned to. An assigned package cannot
+    /// be deleted ([`DbError::Constraint`] from
+    /// [`RepoTx::delete_package`]); name these instead.
+    fn boot_services_using_package(
+        &mut self,
+        id: PackageId,
+    ) -> impl Future<Output = Result<Vec<BootServiceId>, DbError>> + Send;
+
+    // --------------------------------------------------------- boot stops
+
+    /// The boot stop with this id.
+    fn boot_stop(
+        &mut self,
+        id: BootStopId,
+    ) -> impl Future<Output = Result<Option<BootStop>, DbError>> + Send;
+
+    /// Boot stops of one service (every service if `None`), only the
+    /// uncleared ones if `active_only`, ordered by creation time.
+    fn list_boot_stops(
+        &mut self,
+        boot_service: Option<BootServiceId>,
+        active_only: bool,
+    ) -> impl Future<Output = Result<Vec<BootStop>, DbError>> + Send;
+
+    /// Adds a stop for a device MAC (REQ-BOOT-067). `false` (nothing
+    /// written) if an uncleared stop for that service and MAC exists.
+    fn add_boot_stop(
+        &mut self,
+        s: &NewBootStop,
+    ) -> impl Future<Output = Result<bool, DbError>> + Send;
+
+    /// Clears a stop (the minimal reversal). [`DbError::Conflict`] if
+    /// already cleared.
+    fn clear_boot_stop(
+        &mut self,
+        id: BootStopId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The current boot-policy generation of a service (0 before the
+    /// first).
+    fn boot_policy_generation(
+        &mut self,
+        id: BootServiceId,
+    ) -> impl Future<Output = Result<u64, DbError>> + Send;
+
+    /// Increments the generation (from 0 to 1 the first time) and returns
+    /// the new value. Call with every change to the service's stop set.
+    fn bump_boot_policy_generation(
+        &mut self,
+        id: BootServiceId,
+    ) -> impl Future<Output = Result<u64, DbError>> + Send;
+
+    // ---------------------------------------------------- operator codes
+
+    /// Stores a new code by its HMAC. [`DbError::Conflict`] if the id or
+    /// HMAC exists (draw a new code).
+    fn insert_auth_code(
+        &mut self,
+        c: &NewAuthCode,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// One code's record (no value, no HMAC).
+    fn auth_code(
+        &mut self,
+        id: AuthCodeId,
+    ) -> impl Future<Output = Result<Option<AuthCodeRecord>, DbError>> + Send;
+
+    /// Every code's record, ordered by issue time.
+    fn list_auth_codes(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<AuthCodeRecord>, DbError>> + Send;
+
+    /// Uses the code with this HMAC for `session` at `at`, atomically.
+    /// `None` for a wrong, expired, used or revoked code alike (no
+    /// oracle); nothing changes then.
+    fn consume_auth_code(
+        &mut self,
+        code_hmac: &HmacTag,
+        session: SessionId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<Option<AuthCodeId>, DbError>> + Send;
+
+    /// Revokes an unused code. [`DbError::Conflict`] if used or revoked.
+    fn revoke_auth_code(
+        &mut self,
+        id: AuthCodeId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    // --------------------------------------------------- device sessions
+
+    /// Opens a session in state `awaiting_authorisation`.
+    /// [`DbError::Conflict`] if the id or token exists or the display code
+    /// is in use by a live session (draw a new one).
+    fn insert_device_session(
+        &mut self,
+        s: &NewDeviceSession,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The session with this id.
+    fn device_session(
+        &mut self,
+        id: SessionId,
+    ) -> impl Future<Output = Result<Option<DeviceSession>, DbError>> + Send;
+
+    /// As [`RepoTx::device_session`], locking the row.
+    fn lock_device_session(
+        &mut self,
+        id: SessionId,
+    ) -> impl Future<Output = Result<Option<DeviceSession>, DbError>> + Send;
+
+    /// The session whose bearer token has this SHA-256.
+    fn device_session_by_token(
+        &mut self,
+        token_sha256: &Sha256Digest,
+    ) -> impl Future<Output = Result<Option<DeviceSession>, DbError>> + Send;
+
+    /// Sessions whose state is in `states` (every state if empty), ordered
+    /// by creation time.
+    fn list_device_sessions(
+        &mut self,
+        states: &[SessionState],
+    ) -> impl Future<Output = Result<Vec<DeviceSession>, DbError>> + Send;
+
+    /// Serialises session-cap decisions until the transaction ends (as
+    /// [`RepoTx::lock_upload_quota`]).
+    fn lock_device_session_quota(&mut self) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Number of sessions in `states` (every state if empty), from one
+    /// source address or all.
+    fn count_device_sessions(
+        &mut self,
+        states: &[SessionState],
+        source_ip: Option<IpAddr>,
+    ) -> impl Future<Output = Result<u64, DbError>> + Send;
+
+    /// Records that the device was seen at `at` (never moves back). Not a
+    /// state change: needs no audit record (plan section 3.1, poll).
+    fn touch_device_session(
+        &mut self,
+        id: SessionId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// `awaiting_authorisation` → `authorised` by a code or an approval,
+    /// if not expired at `at`. [`DbError::Conflict`] otherwise.
+    fn authorise_device_session(
+        &mut self,
+        id: SessionId,
+        auth: SessionAuth,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Counts a failed code attempt on a waiting session and returns the
+    /// new count. [`DbError::Conflict`] if the session is not waiting.
+    fn record_failed_code_attempt(
+        &mut self,
+        id: SessionId,
+    ) -> impl Future<Output = Result<u32, DbError>> + Send;
+
+    /// Records the chosen package on an authorised session and clears any
+    /// chosen disk (its size is checked against the package again).
+    fn choose_session_package(
+        &mut self,
+        id: SessionId,
+        p: ChosenPackage,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Records the chosen disk on an authorised session that has a
+    /// package. [`DbError::Conflict`] otherwise.
+    fn choose_session_disk(
+        &mut self,
+        id: SessionId,
+        disk: &DiskDescriptorV1,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Moves a session from one of `from` to `to` (`confirmed`, `refused`,
+    /// `cancelled`, `expired` or `ended`; use
+    /// [`RepoTx::authorise_device_session`] for `authorised`). Every
+    /// target but `confirmed` records `at` as the end and `reason`.
+    /// `confirmed` needs a chosen disk. [`DbError::Conflict`] otherwise.
+    fn set_device_session_state(
+        &mut self,
+        id: SessionId,
+        from: &[SessionState],
+        to: SessionState,
+        reason: Option<&ErrorCode>,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Expires every waiting or authorised session whose expiry is at or
+    /// before `at`, and returns their ids (one `device.session.expired`
+    /// record each is the caller's).
+    fn expire_device_sessions(
+        &mut self,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<Vec<SessionId>, DbError>> + Send;
+
+    // --------------------------------------------------------------- jobs
+
+    /// Creates a job (state `running`, step 1 running, steps 2 to 5
+    /// pending). The transaction must also hold the `disk.wipe.authorised`
+    /// record that `j.wipe_audit_seq` and `j.wipe_record_hash` name, with
+    /// outcome success and target (`job`, the job id): otherwise the
+    /// commit is refused ([`DbError::Constraint`]) and nothing is written
+    /// (the wipe guard, REQ-DISK-006). [`DbError::Conflict`] if the job,
+    /// its session or its wipe record already has a job.
+    fn insert_job(&mut self, j: &NewJob) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The job with this id.
+    fn job(&mut self, id: JobId) -> impl Future<Output = Result<Option<Job>, DbError>> + Send;
+
+    /// As [`RepoTx::job`], locking the row.
+    fn lock_job(&mut self, id: JobId) -> impl Future<Output = Result<Option<Job>, DbError>> + Send;
+
+    /// The job of a session.
+    fn job_by_session(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<Option<Job>, DbError>> + Send;
+
+    /// Jobs whose state is in `states` (every state if empty), ordered by
+    /// start time.
+    fn list_jobs(
+        &mut self,
+        states: &[JobState],
+    ) -> impl Future<Output = Result<Vec<Job>, DbError>> + Send;
+
+    /// The five steps of a job, in order.
+    fn job_steps(
+        &mut self,
+        id: JobId,
+    ) -> impl Future<Output = Result<Vec<JobStep>, DbError>> + Send;
+
+    /// The latest failed or lost job sharing a MAC with `macs`
+    /// (REQ-JOB-009 `previous_job_id`).
+    fn previous_failed_job(
+        &mut self,
+        macs: &MacList,
+    ) -> impl Future<Output = Result<Option<JobId>, DbError>> + Send;
+
+    /// Moves a step: pending → running (every earlier step must be done;
+    /// the job's current step follows), running → done or failed.
+    /// [`DbError::Conflict`] for any other move or a finished job.
+    fn set_job_step(
+        &mut self,
+        id: JobId,
+        step: Step,
+        to: StepState,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Moves a job from one of `from` to `to` (`running`, `lost` or
+    /// `succeeded`; use [`RepoTx::fail_job`] for `failed`). `succeeded`
+    /// needs step 4 done (REQ-JOB-013) and records `at` as the finish.
+    /// [`DbError::Conflict`] otherwise; a finished job never changes.
+    fn set_job_state(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        to: JobState,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Fails a job from one of `from` with its failure (final).
+    fn fail_job(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        failure: &FailureV1,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Records the layout written (step 2) on an unfinished job.
+    fn set_job_layout(
+        &mut self,
+        id: JobId,
+        layout: &LayoutReportV1,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Records an accepted report's sequence number, time and byte counts
+    /// (`None` keeps the stored count) on an unfinished job. Not a state
+    /// change: needs no audit record (plan section 3.4, `progress`).
+    /// [`DbError::Conflict`] if `seq` is not above the last one, the job
+    /// is finished, or the done count would exceed the total.
+    fn record_job_progress(
+        &mut self,
+        id: JobId,
+        seq: u64,
+        bytes_done: Option<u64>,
+        bytes_total: Option<u64>,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Acknowledges a failed job once. [`DbError::Conflict`] otherwise.
+    fn acknowledge_job_failure(
+        &mut self,
+        id: JobId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Marks every running job not heard from since before `silent_before`
+    /// as lost and returns their ids (one `job.lost` record each is the
+    /// caller's).
+    fn mark_lost_jobs(
+        &mut self,
+        silent_before: UnixMicros,
+    ) -> impl Future<Output = Result<Vec<JobId>, DbError>> + Send;
+
     // ---------------------------------------------------------- lifecycle
 
     /// Commits. Refused with [`DbError::Unaudited`] (and rolled back) if
@@ -476,6 +855,295 @@ impl RepoTx for crate::pool::PgTx {
         expected_revision: u64,
     ) -> Result<(), DbError> {
         packages::delete(self, id, expected_revision).await
+    }
+
+    async fn boot_service(&mut self, id: BootServiceId) -> Result<Option<BootService>, DbError> {
+        boot_services::get(self, id).await
+    }
+
+    async fn boot_service_by_cert(
+        &mut self,
+        cert_sha256: &Sha256Digest,
+    ) -> Result<Option<BootService>, DbError> {
+        boot_services::by_cert(self, cert_sha256).await
+    }
+
+    async fn list_boot_services(&mut self) -> Result<Vec<BootService>, DbError> {
+        boot_services::list(self).await
+    }
+
+    async fn insert_boot_service(&mut self, b: &BootService) -> Result<(), DbError> {
+        boot_services::insert(self, b).await
+    }
+
+    async fn set_boot_service_status(
+        &mut self,
+        id: BootServiceId,
+        status: BootServiceStatus,
+    ) -> Result<(), DbError> {
+        boot_services::set_status(self, id, status).await
+    }
+
+    async fn boot_service_packages(
+        &mut self,
+        id: BootServiceId,
+    ) -> Result<Vec<BootServicePackage>, DbError> {
+        boot_services::packages(self, id).await
+    }
+
+    async fn set_boot_service_packages(
+        &mut self,
+        id: BootServiceId,
+        package_ids: &[PackageId],
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        boot_services::set_packages(self, id, package_ids, by, at).await
+    }
+
+    async fn boot_services_using_package(
+        &mut self,
+        id: PackageId,
+    ) -> Result<Vec<BootServiceId>, DbError> {
+        boot_services::using_package(self, id).await
+    }
+
+    async fn boot_stop(&mut self, id: BootStopId) -> Result<Option<BootStop>, DbError> {
+        boot_services::stop(self, id).await
+    }
+
+    async fn list_boot_stops(
+        &mut self,
+        boot_service: Option<BootServiceId>,
+        active_only: bool,
+    ) -> Result<Vec<BootStop>, DbError> {
+        boot_services::stops(self, boot_service, active_only).await
+    }
+
+    async fn add_boot_stop(&mut self, s: &NewBootStop) -> Result<bool, DbError> {
+        boot_services::add_stop(self, s).await
+    }
+
+    async fn clear_boot_stop(
+        &mut self,
+        id: BootStopId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        boot_services::clear_stop(self, id, by, at).await
+    }
+
+    async fn boot_policy_generation(&mut self, id: BootServiceId) -> Result<u64, DbError> {
+        boot_services::generation(self, id).await
+    }
+
+    async fn bump_boot_policy_generation(&mut self, id: BootServiceId) -> Result<u64, DbError> {
+        boot_services::bump_generation(self, id).await
+    }
+
+    async fn insert_auth_code(&mut self, c: &NewAuthCode) -> Result<(), DbError> {
+        codes::insert(self, c).await
+    }
+
+    async fn auth_code(&mut self, id: AuthCodeId) -> Result<Option<AuthCodeRecord>, DbError> {
+        codes::get(self, id).await
+    }
+
+    async fn list_auth_codes(&mut self) -> Result<Vec<AuthCodeRecord>, DbError> {
+        codes::list(self).await
+    }
+
+    async fn consume_auth_code(
+        &mut self,
+        code_hmac: &HmacTag,
+        session: SessionId,
+        at: UnixMicros,
+    ) -> Result<Option<AuthCodeId>, DbError> {
+        codes::consume(self, code_hmac, session, at).await
+    }
+
+    async fn revoke_auth_code(
+        &mut self,
+        id: AuthCodeId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        codes::revoke(self, id, by, at).await
+    }
+
+    async fn insert_device_session(&mut self, s: &NewDeviceSession) -> Result<(), DbError> {
+        devices::insert(self, s).await
+    }
+
+    async fn device_session(&mut self, id: SessionId) -> Result<Option<DeviceSession>, DbError> {
+        devices::get(self, id, false).await
+    }
+
+    async fn lock_device_session(
+        &mut self,
+        id: SessionId,
+    ) -> Result<Option<DeviceSession>, DbError> {
+        devices::get(self, id, true).await
+    }
+
+    async fn device_session_by_token(
+        &mut self,
+        token_sha256: &Sha256Digest,
+    ) -> Result<Option<DeviceSession>, DbError> {
+        devices::by_token(self, token_sha256).await
+    }
+
+    async fn list_device_sessions(
+        &mut self,
+        states: &[SessionState],
+    ) -> Result<Vec<DeviceSession>, DbError> {
+        devices::list(self, states).await
+    }
+
+    async fn lock_device_session_quota(&mut self) -> Result<(), DbError> {
+        devices::lock_quota(self).await
+    }
+
+    async fn count_device_sessions(
+        &mut self,
+        states: &[SessionState],
+        source_ip: Option<IpAddr>,
+    ) -> Result<u64, DbError> {
+        devices::count(self, states, source_ip).await
+    }
+
+    async fn touch_device_session(&mut self, id: SessionId, at: UnixMicros) -> Result<(), DbError> {
+        devices::touch(self, id, at).await
+    }
+
+    async fn authorise_device_session(
+        &mut self,
+        id: SessionId,
+        auth: SessionAuth,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        devices::authorise(self, id, auth, at).await
+    }
+
+    async fn record_failed_code_attempt(&mut self, id: SessionId) -> Result<u32, DbError> {
+        devices::failed_code_attempt(self, id).await
+    }
+
+    async fn choose_session_package(
+        &mut self,
+        id: SessionId,
+        p: ChosenPackage,
+    ) -> Result<(), DbError> {
+        devices::choose_package(self, id, p).await
+    }
+
+    async fn choose_session_disk(
+        &mut self,
+        id: SessionId,
+        disk: &DiskDescriptorV1,
+    ) -> Result<(), DbError> {
+        devices::choose_disk(self, id, disk).await
+    }
+
+    async fn set_device_session_state(
+        &mut self,
+        id: SessionId,
+        from: &[SessionState],
+        to: SessionState,
+        reason: Option<&ErrorCode>,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        devices::set_state(self, id, from, to, reason, at).await
+    }
+
+    async fn expire_device_sessions(&mut self, at: UnixMicros) -> Result<Vec<SessionId>, DbError> {
+        devices::expire(self, at).await
+    }
+
+    async fn insert_job(&mut self, j: &NewJob) -> Result<(), DbError> {
+        jobs::insert(self, j).await
+    }
+
+    async fn job(&mut self, id: JobId) -> Result<Option<Job>, DbError> {
+        jobs::get(self, id, false).await
+    }
+
+    async fn lock_job(&mut self, id: JobId) -> Result<Option<Job>, DbError> {
+        jobs::get(self, id, true).await
+    }
+
+    async fn job_by_session(&mut self, session: SessionId) -> Result<Option<Job>, DbError> {
+        jobs::by_session(self, session).await
+    }
+
+    async fn list_jobs(&mut self, states: &[JobState]) -> Result<Vec<Job>, DbError> {
+        jobs::list(self, states).await
+    }
+
+    async fn job_steps(&mut self, id: JobId) -> Result<Vec<JobStep>, DbError> {
+        jobs::steps(self, id).await
+    }
+
+    async fn previous_failed_job(&mut self, macs: &MacList) -> Result<Option<JobId>, DbError> {
+        jobs::previous_failed(self, macs).await
+    }
+
+    async fn set_job_step(
+        &mut self,
+        id: JobId,
+        step: Step,
+        to: StepState,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::set_step(self, id, step, to, at).await
+    }
+
+    async fn set_job_state(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        to: JobState,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::set_state(self, id, from, to, at).await
+    }
+
+    async fn fail_job(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        failure: &FailureV1,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::fail(self, id, from, failure, at).await
+    }
+
+    async fn set_job_layout(&mut self, id: JobId, layout: &LayoutReportV1) -> Result<(), DbError> {
+        jobs::set_layout(self, id, layout).await
+    }
+
+    async fn record_job_progress(
+        &mut self,
+        id: JobId,
+        seq: u64,
+        bytes_done: Option<u64>,
+        bytes_total: Option<u64>,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::record_progress(self, id, seq, bytes_done, bytes_total, at).await
+    }
+
+    async fn acknowledge_job_failure(
+        &mut self,
+        id: JobId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::acknowledge(self, id, by, at).await
+    }
+
+    async fn mark_lost_jobs(&mut self, silent_before: UnixMicros) -> Result<Vec<JobId>, DbError> {
+        jobs::mark_lost(self, silent_before).await
     }
 
     async fn commit(self) -> Result<(), DbError> {

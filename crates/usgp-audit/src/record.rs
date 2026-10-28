@@ -29,6 +29,8 @@
 // - NIST 800-53: SI-10 (Information Input Validation) - bounded, cleaned
 //   text; closed value sets.
 // - SPEC: specs/operator-access.md#REQ-AUD-001, #REQ-AUD-002, #REQ-AUD-003
+// - SPEC: specs/progress.md#REQ-JOB-012 and specs/targeting.md#REQ-TGT-016
+//   (device sessions and boot services as named actors; plan M3 section 7)
 
 use std::collections::BTreeSet;
 
@@ -75,6 +77,15 @@ pub enum ActorKind {
     /// A local user running a server command (`server-cli`). The uid is
     /// reported by the OS and recorded as claimed.
     LocalUser,
+    /// A pre-boot device session on the device listener (plan M3 section
+    /// 7): the id is the session id; the label names the MACs and source
+    /// address the device claimed. The device holds no credential
+    /// (decision 0020); the session is authorised by code or approval.
+    DeviceSession,
+    /// A relay authenticated by its client certificate bound to a
+    /// boot-service record (decision 0021): the id is the boot-service id;
+    /// the label names the boot service and its certificate SHA-256.
+    BootService,
 }
 
 impl ActorKind {
@@ -86,6 +97,8 @@ impl ActorKind {
             Self::Unauthenticated => "unauthenticated",
             Self::System => "system",
             Self::LocalUser => "local_user",
+            Self::DeviceSession => "device_session",
+            Self::BootService => "boot_service",
         }
     }
 }
@@ -100,6 +113,10 @@ pub enum Interface {
     ServerCli,
     /// Internal server activity.
     System,
+    /// The device listener (pre-boot agent sessions, plan M3 section 3.1).
+    DeviceApi,
+    /// The relay's boot-policy feed (plan M3 section 3.6).
+    RelayFeed,
 }
 
 impl Interface {
@@ -110,6 +127,8 @@ impl Interface {
             Self::Api => "api",
             Self::ServerCli => "server-cli",
             Self::System => "system",
+            Self::DeviceApi => "device_api",
+            Self::RelayFeed => "relay_feed",
         }
     }
 }
@@ -178,6 +197,29 @@ impl Actor {
             kind: ActorKind::LocalUser,
             id: Some(format!("uid:{uid}")),
             label: name.map(|n| clean_text(n, MAX_TEXT_LEN)),
+        }
+    }
+
+    /// A pre-boot device session: `session_id` is the session id,
+    /// `claimed` what the device stated about itself (MACs, source
+    /// address), which the caller marks as claimed.
+    #[must_use]
+    pub fn device_session(session_id: &str, claimed: &str) -> Self {
+        Self {
+            kind: ActorKind::DeviceSession,
+            id: Some(clean_text(session_id, MAX_TEXT_LEN)),
+            label: Some(clean_text(claimed, MAX_TEXT_LEN)),
+        }
+    }
+
+    /// A relay acting as a boot service: `boot_service_id` is the
+    /// boot-service id, `label` its name and certificate SHA-256.
+    #[must_use]
+    pub fn boot_service(boot_service_id: &str, label: &str) -> Self {
+        Self {
+            kind: ActorKind::BootService,
+            id: Some(clean_text(boot_service_id, MAX_TEXT_LEN)),
+            label: Some(clean_text(label, MAX_TEXT_LEN)),
         }
     }
 
@@ -506,7 +548,8 @@ pub struct AuditRecord {
     pub outcome: String,
     /// Actor kind text.
     pub actor_kind: String,
-    /// Operator id, `uid:<n>`, or none.
+    /// Operator id, `uid:<n>`, device-session id, boot-service id, or
+    /// none.
     pub actor_id: Option<String>,
     /// Display label of the actor.
     pub actor_label: Option<String>,
@@ -691,6 +734,40 @@ mod tests {
         );
         let l = Actor::local_user(1000, None);
         assert_eq!(l.id.as_deref(), Some("uid:1000"));
+        let d = Actor::device_session("s-1", "macs 02:00:00:00:00:01 (claimed)\n");
+        assert_eq!(d.kind().as_str(), "device_session");
+        assert_eq!(d.id.as_deref(), Some("s-1"));
+        assert_eq!(
+            d.label.as_deref(),
+            Some("macs 02:00:00:00:00:01 (claimed)\u{FFFD}")
+        );
+        let b = Actor::boot_service("b-1", "relay-a; cert sha256 ab");
+        assert_eq!(b.kind().as_str(), "boot_service");
+        assert_eq!(b.id.as_deref(), Some("b-1"));
+    }
+
+    #[test]
+    fn closed_sets_text() {
+        let kinds = [
+            ActorKind::Operator,
+            ActorKind::Unauthenticated,
+            ActorKind::System,
+            ActorKind::LocalUser,
+            ActorKind::DeviceSession,
+            ActorKind::BootService,
+        ];
+        let texts: BTreeSet<_> = kinds.iter().map(|k| k.as_str()).collect();
+        assert_eq!(texts.len(), kinds.len());
+        let ifaces = [
+            Interface::Api,
+            Interface::ServerCli,
+            Interface::System,
+            Interface::DeviceApi,
+            Interface::RelayFeed,
+        ];
+        let texts: BTreeSet<_> = ifaces.iter().map(|i| i.as_str()).collect();
+        assert_eq!(texts.len(), ifaces.len());
+        assert!(texts.contains("device_api") && texts.contains("relay_feed"));
     }
 
     #[test]

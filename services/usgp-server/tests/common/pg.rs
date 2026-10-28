@@ -285,6 +285,15 @@ pub fn listen_addr(line: &str) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
+/// The device listener's address from the `server.start` line (its
+/// detail holds `device_listen` = `127.0.0.1:<port>`).
+pub fn device_addr(line: &str) -> SocketAddr {
+    let at = line
+        .find("device_listen")
+        .expect("device_listen in server.start");
+    listen_addr(&line[at..])
+}
+
 /// Polls `GET <view>` (for example `/v1/images/<id>`) every 250 ms until
 /// its body shows state `want`, for at most `limit`.
 pub async fn wait_state(

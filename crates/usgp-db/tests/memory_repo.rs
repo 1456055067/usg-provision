@@ -10,6 +10,7 @@ pub mod common;
 mod t {
     use super::common;
 
+    use common::m3;
     use common::{
         Audit, append, enrol, flow_atomic_with_audit, flow_chain_verifies, flow_content_lifecycle,
         flow_operator_rules, flow_package_lifecycle, flow_unaudited_change_refused, init_audit,
@@ -17,6 +18,8 @@ mod t {
     };
     use usgp_audit::{AuditRead, verify_store};
     use usgp_db::{DbError, MemoryStore, RepoTx, Store};
+    use usgp_proto::JobId;
+    use usgp_proto::device::SessionState;
 
     async fn setup() -> (MemoryStore, Audit) {
         let store = MemoryStore::new();
@@ -158,6 +161,115 @@ mod t {
                 .is_err()
         );
         assert!(matches!(tx.commit().await, Err(DbError::TxFailed)));
+    }
+
+    // ------------------------------------------------- M3 (migration 0004)
+
+    #[tokio::test]
+    async fn m3_boot_services() {
+        let (s, a) = setup().await;
+        m3::flow_boot_services(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_codes() {
+        let (s, a) = setup().await;
+        m3::flow_codes(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_sessions() {
+        let (s, a) = setup().await;
+        m3::flow_sessions(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_expiry_is_audited() {
+        let (s, a) = setup().await;
+        m3::flow_expiry_is_audited(&s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_job_success() {
+        let (s, a) = setup().await;
+        m3::flow_job_success(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_job_failure() {
+        let (s, a) = setup().await;
+        m3::flow_job_failure(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_wipe_guard() {
+        let (s, a) = setup().await;
+        m3::flow_wipe_guard(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_whole_flow_chain_verifies() {
+        let (s, a) = setup().await;
+        m3::flow_boot_services(&s, &s, &a).await;
+        m3::flow_codes(&s, &s, &a).await;
+        m3::flow_job_success(&s, &s, &a).await;
+        m3::flow_wipe_guard(&s, &s, &a).await;
+        flow_chain_verifies(&s, &a).await;
+    }
+
+    /// Acceptance criterion 3 (brief): when `disk.wipe.authorised` cannot
+    /// be written, the confirm transaction fails, no job exists, the
+    /// session is still authorised, and the chain head has not moved; once
+    /// the audit store recovers, the same confirmation succeeds.
+    #[tokio::test]
+    async fn wipe_record_failure_creates_no_job() {
+        let (s, a) = setup().await;
+        let op = enrol(&s, &a, "wipe fault").await;
+        let bs = m3::enrol_boot_service(&s, &a, "relay fault").await;
+        let p = m3::ready_package(&s, &a, &op).await;
+        let session = m3::ready_session(&s, &a, &op, bs.id, &p, m3::macs(1)).await;
+        let head = s.head().await.unwrap();
+
+        s.fail_audit_on(m3::WIPE_EVENT);
+        let id = JobId::from_random_bytes(common::rand_bytes());
+        let mut tx = s.begin().await.unwrap();
+        // job.created is still written ...
+        append(&a, &mut tx, "job.created", "job", &id.to_string()).await;
+        // ... the wipe record is not.
+        assert!(a.chain.append(&mut tx, &m3::wipe_draft(id)).await.is_err());
+        // The transaction is dead: no job, no plan.
+        assert!(matches!(tx.lock_job(id).await, Err(DbError::TxFailed)));
+        assert!(matches!(tx.commit().await, Err(DbError::TxFailed)));
+        assert_eq!(s.head().await.unwrap(), head);
+        let mut tx = s.begin().await.unwrap();
+        assert!(tx.job_by_session(session.id).await.unwrap().is_none());
+        assert_eq!(
+            tx.device_session(session.id).await.unwrap().unwrap().state,
+            SessionState::Authorised
+        );
+        tx.rollback().await;
+        // The helper sees the same refusal.
+        assert!(m3::confirm(&s, &a, &session, bs.id, &p).await.is_err());
+
+        // Other events are unaffected; the fault is per event.
+        let other = m3::open_session(&s, &a, None, m3::macs(1)).await;
+        let mut tx = s.begin().await.unwrap();
+        assert!(tx.device_session(other.id).await.unwrap().is_some());
+        tx.rollback().await;
+
+        s.clear_audit_faults();
+        let job = m3::confirm(&s, &a, &session, bs.id, &p).await.unwrap();
+        let mut tx = s.begin().await.unwrap();
+        let j = tx.job(job).await.unwrap().unwrap();
+        let rec = s
+            .audit_records()
+            .into_iter()
+            .find(|r| r.seq == j.wipe_audit_seq)
+            .unwrap();
+        assert_eq!(rec.event, m3::WIPE_EVENT);
+        assert_eq!(rec.record_hash, j.wipe_record_hash);
+        assert_eq!(rec.target_id.as_deref(), Some(job.to_string().as_str()));
+        tx.rollback().await;
     }
 
     /// Transactions are serialised: a second `begin` waits for the first.

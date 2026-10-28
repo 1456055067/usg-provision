@@ -4,7 +4,14 @@
 //! ([`cli`]) and runs one command. The library is public so integration
 //! tests can drive configuration loading ([`config`]), start-up
 //! ([`serve::run`] on the in-memory store) and the local administrative
-//! commands ([`operator`], [`audit_cmd`]) in-process.
+//! commands ([`operator`], [`audit_cmd`], [`boot_service_cmd`]) in-process.
+//!
+//! M3 (plan WU-10): `[device_api]`, `[codes]` and `[jobs]` map onto
+//! `ApiConfig.device`; the plan, boot-policy and code HMAC keys are loaded
+//! under the trusted-file rules and given to the API; the device listener
+//! runs beside the operator listener when enabled; `keygen` writes the new
+//! key types; `boot-service enrol|disable` are local administrative
+//! commands under the `usgp_admin` role.
 //!
 //! Start-up order of `serve` (plan sections 3.4, 5.5; WU-3a notes):
 //!
@@ -18,8 +25,10 @@
 //! 5. audit chain genesis ([`usgp_audit::AuditChain::ensure_genesis`]);
 //! 6. API built, content root checked, restart recovery
 //!    ([`usgp_api::Api::recover`]);
-//! 7. listener bound, `server.start` recorded, serving until SIGTERM or
-//!    SIGINT, CRLs reloaded every `tls.crl_reload_s`;
+//! 7. listener bound (and the device listener, if enabled),
+//!    `server.start` recorded, serving until SIGTERM or SIGINT, CRLs
+//!    reloaded every `tls.crl_reload_s`, maintenance (session expiry,
+//!    lost jobs, checkpoints) every minute;
 //! 8. `server.stop` recorded and a final audit checkpoint signed.
 //!
 //! Any failure before serving refuses start-up and is recorded as
@@ -41,9 +50,13 @@
 //   (decision 0012).
 // - SPEC: specs/operator-access.md#REQ-AUD-001, #REQ-AUD-005,
 //   #REQ-AUD-007, #REQ-RBAC-005; specs/os-images.md#REQ-IMG-021
-// - Decisions 0001, 0007, 0008, 0010, 0011, 0012, 0015
+// - SPEC (M3): specs/targeting.md#REQ-TGT-012, #REQ-TGT-013;
+//   specs/boot-network.md#REQ-BOOT-067
+// - Decisions 0001, 0007, 0008, 0010, 0011, 0012, 0015, 0016, 0018, 0020,
+//   0021
 
 pub mod audit_cmd;
+pub mod boot_service_cmd;
 pub mod cli;
 pub mod config;
 pub mod events;

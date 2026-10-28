@@ -11,6 +11,14 @@
 //! start-up and is recorded as `relay.start` with outcome `failure` and
 //! the reason; a serving task that ends unexpectedly stops the process
 //! (fail closed) and is recorded as `relay.stop` with outcome `failure`.
+//!
+//! M3 (plan WU-11): Windows PE boot files through the manifest's
+//! `[pe_kit]` ([`pe_kit`]); TFTP `windowsize`, block-number wraparound and
+//! request-name normalisation ([`tftp`]); and, with `[server_feed]`, the
+//! signed boot-policy pull that stops offering a boot program to devices
+//! whose jobs succeeded ([`feed`], REQ-BOOT-067, decision 0021). The feed
+//! material and the optional cache are loaded in [`prepare`]; the pull
+//! runs as one more serving task.
 
 // Handles network input and operator files: indexing and slicing that can
 // panic are denied (CLAUDE.md, Engineering Rules).
@@ -22,7 +30,9 @@
 // - NIST 800-53: CM-6 / CM-7 / SC-5 / SC-7 / SI-7 / SI-10 - see modules.
 // - NIST 800-53: AU-2 / AU-12 - relay.start / relay.stop and every state
 //   change are events.
-// - SPEC: specs/boot-network.md (REQ-BOOT-001..053, 070 in M1 scope)
+// - SPEC: specs/boot-network.md (REQ-BOOT-001..053, 070 in M1 scope;
+//   REQ-BOOT-035, 063, 064, 067 in M3)
+// - SPEC: specs/preinstall-env.md#REQ-PE-011, #REQ-PE-012
 // - DECISION: docs/decisions/0003-proxy-dhcp-only.md,
 //   docs/decisions/0004 (UEFI x86-64 + IPv4)
 
@@ -31,8 +41,11 @@ pub mod config;
 pub mod content;
 pub mod dhcp;
 pub mod events;
+pub mod feed;
+pub mod files;
 pub mod limits;
 pub mod net;
+pub mod pe_kit;
 pub mod state;
 pub mod suppress;
 pub mod tftp;
@@ -50,6 +63,7 @@ use crate::config::{ConfigLoadError, InterfaceConfig, LoadedConfig, RelayConfig}
 use crate::content::{ContentLoadError, ContentStore};
 use crate::dhcp::DhcpService;
 use crate::events::Outcome;
+use crate::feed::{BootPolicyFeed, FeedSetupError};
 use crate::limits::Counters;
 use crate::net::{NetError, UdpTidFactory, bind_plan};
 use crate::state::{FileStatus, ServiceState};
@@ -87,6 +101,9 @@ pub enum RelayError {
     /// Suppression file invalid at start-up (exit 78).
     #[error(transparent)]
     Suppression(#[from] SuppressionError),
+    /// `[server_feed]` material unusable at start-up (exit 78).
+    #[error(transparent)]
+    Feed(#[from] FeedSetupError),
     /// Socket set-up failed or the platform is unsupported (exit 1).
     #[error(transparent)]
     Net(#[from] NetError),
@@ -120,6 +137,7 @@ impl RelayError {
             Self::Config(_)
             | Self::Content(_)
             | Self::Suppression(_)
+            | Self::Feed(_)
             | Self::SharedAdminUid(_)
             | Self::PrefixUnknown(_) => EXIT_CONFIG,
             Self::Net(_) | Self::TaskEnded | Self::Signal(_) => EXIT_FAILURE,
@@ -133,6 +151,7 @@ impl RelayError {
             Self::Config(e) => e.field(),
             Self::Content(_) => "boot.manifest".to_owned(),
             Self::Suppression(_) => "suppression.file".to_owned(),
+            Self::Feed(e) => e.field(),
             Self::SharedAdminUid(_) => "--admin-uid".to_owned(),
             Self::PrefixUnknown(field) => field.clone(),
             Self::Net(_) | Self::TaskEnded | Self::Signal(_) => String::new(),
@@ -161,16 +180,20 @@ pub(crate) fn write_lock<T>(m: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 pub struct Prepared {
     /// The published content.
     pub content: Arc<ContentStore>,
-    /// The suppression list.
+    /// The suppression list (and the boot-policy stop list in effect).
     pub suppression: Arc<Suppression>,
+    /// The boot-policy feed, when `[server_feed]` is enabled.
+    pub feed: Option<Arc<BootPolicyFeed>>,
 }
 
-/// Loads the manifest, verifies every published file, and loads the
-/// suppression file (if configured).
+/// Loads the manifest, verifies every published file, loads the
+/// suppression file (if configured), and with `[server_feed]` loads the
+/// feed material and the verified cache (no network).
 ///
 /// # Errors
 ///
-/// [`RelayError::Content`] or [`RelayError::Suppression`] (exit 78).
+/// [`RelayError::Content`], [`RelayError::Suppression`] or
+/// [`RelayError::Feed`] (exit 78).
 pub async fn prepare(config: &RelayConfig) -> Result<Prepared, RelayError> {
     let content = Arc::new(ContentStore::load(
         &config.boot.manifest,
@@ -191,9 +214,29 @@ pub async fn prepare(config: &RelayConfig) -> Result<Prepared, RelayError> {
         }
         None => Suppression::disabled(),
     });
+    let feed = match &config.server_feed {
+        Some(fc) => {
+            let fc = fc.clone();
+            let trust = config.trust;
+            let s = Arc::clone(&suppression);
+            let feed = tokio::task::spawn_blocking(move || {
+                let material = feed::load_material(&fc, &trust)?;
+                let feed = BootPolicyFeed::new(fc, material, s);
+                // A missing or refused cache leaves the relay without a
+                // list until the first pull: no offers (fail closed).
+                let _ = feed.load_cache();
+                Ok::<_, FeedSetupError>(feed)
+            })
+            .await
+            .map_err(|_| RelayError::TaskEnded)??;
+            Some(feed)
+        }
+        None => None,
+    };
     Ok(Prepared {
         content,
         suppression,
+        feed,
     })
 }
 
@@ -206,6 +249,9 @@ pub struct CheckReport {
     pub files: Vec<(String, FileStatus)>,
     /// Suppression entries, if a file is configured.
     pub suppression_entries: Option<usize>,
+    /// Boot-policy state (`disabled`, `awaiting`, `applied`) and the
+    /// applied generation (from the cache; `--check-config` never pulls).
+    pub boot_policy: (&'static str, Option<u64>),
 }
 
 impl CheckReport {
@@ -236,6 +282,10 @@ pub async fn check(config: &RelayConfig) -> Result<CheckReport, RelayError> {
             .file
             .as_ref()
             .map(|_| p.suppression.current().len()),
+        boot_policy: {
+            let g = p.suppression.feed();
+            (g.label(), g.generation())
+        },
     })
 }
 
@@ -452,7 +502,20 @@ pub async fn run(loaded: LoadedConfig, opts: RunOptions) -> Result<(), RelayErro
             opts.allow_shared_admin_uid.to_string(),
         ),
         ("interface_prefixes", prefixes),
+        ("block_wrap", cfg.tftp.block_wrap.label().to_owned()),
+        ("max_window_size", cfg.tftp.max_window_size.to_string()),
+        (
+            "boot_policy",
+            prepared.suppression.feed().label().to_owned(),
+        ),
     ];
+    if let Some(f) = &cfg.server_feed {
+        start_detail.push(("boot_service_id", f.boot_service_id.to_string()));
+        start_detail.push(("boot_policy_server", f.url.authority()));
+        if let Some(g) = prepared.suppression.feed().generation() {
+            start_detail.push(("boot_policy_generation", g.to_string()));
+        }
+    }
     if let Some(w) = privilege_warning(service_uid, &cfg.trust) {
         start_detail.push(("warning", w.to_owned()));
     }
@@ -490,6 +553,9 @@ pub async fn run(loaded: LoadedConfig, opts: RunOptions) -> Result<(), RelayErro
             Arc::clone(&prepared.suppression),
             cfg.suppression.reload_interval,
         ));
+    }
+    if let Some(feed) = &prepared.feed {
+        tasks.spawn(Arc::clone(feed).run());
     }
     tasks.spawn(summary_loop(
         Arc::clone(&dhcp),

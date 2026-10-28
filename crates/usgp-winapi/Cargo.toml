@@ -11,6 +11,30 @@ publish.workspace = true
 # On other targets the crate is empty.
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+# Only for the tree_manifest example (SHA-256 through the FIPS provider,
+# decision 0001). Optional, so the agent's use of this crate never pulls it.
+usgp-crypto = { workspace = true, optional = true }
+# The ApplySink trait for WinSink (feature `sink`). Optional: usgp-image
+# brings usgp-crypto's FIPS C build, which cannot be cross-built from macOS,
+# so the rest of the crate stays checkable for the Windows target there.
+usgp-image = { workspace = true, optional = true }
+
+[features]
+# Builds examples/tree_manifest.rs (plan WU-5; S16 and the fidelity check).
+manifest-tool = ["dep:usgp-crypto"]
+# WinSink (src/winsink.rs). The pre-boot agent enables it.
+sink = ["dep:usgp-image"]
+# tests/winsink.rs: the synthetic-WIM builder and SHA-256 for the manifest.
+# Tests only; never enabled by a release build.
+sink-testkit = ["sink", "manifest-tool", "usgp-image/testkit"]
+
+[[example]]
+name = "tree_manifest"
+required-features = ["manifest-tool"]
+
+[[test]]
+name = "winsink"
+required-features = ["sink-testkit"]
 
 # A copy of the workspace lints with one change: `unsafe_code` is "deny", not
 # "forbid", so that src/ffi.rs alone can allow it (decision 0019 item 2).

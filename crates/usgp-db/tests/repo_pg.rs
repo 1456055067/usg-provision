@@ -23,6 +23,7 @@ pub mod common;
 mod t {
     use super::common;
 
+    use common::m3;
     use common::pg::{TestDb, assert_sqlstate};
     use common::{
         enrol, flow_atomic_with_audit, flow_chain_verifies, flow_content_lifecycle,
@@ -31,7 +32,8 @@ mod t {
     };
     use tokio_postgres::error::SqlState;
     use usgp_db::{DbError, RepoTx, Store};
-    use usgp_proto::ContentKind;
+    use usgp_proto::device::SessionState;
+    use usgp_proto::{ContentKind, JobState, Step, StepState};
 
     #[tokio::test]
     async fn unaudited_change_refused() {
@@ -225,6 +227,388 @@ mod t {
             "{err:?}"
         );
         tx.rollback().await;
+        db.finish().await;
+    }
+
+    // ------------------------------------------------- M3 (migration 0004)
+
+    #[tokio::test]
+    async fn m3_boot_services() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_boot_services(&db.admin, &db.app, &a).await;
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn m3_codes() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_codes(&db.admin, &db.app, &a).await;
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn m3_sessions() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_sessions(&db.admin, &db.app, &a).await;
+        m3::flow_expiry_is_audited(&db.app, &a).await;
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn m3_job_success() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_job_success(&db.admin, &db.app, &a).await;
+        flow_chain_verifies(&db.app, &a).await;
+        db.finish().await;
+    }
+
+    #[tokio::test]
+    async fn m3_job_failure() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_job_failure(&db.admin, &db.app, &a).await;
+        db.finish().await;
+    }
+
+    /// The deferred wipe guard on PostgreSQL (REQ-DISK-006).
+    #[tokio::test]
+    async fn m3_wipe_guard() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_wipe_guard(&db.admin, &db.app, &a).await;
+        flow_chain_verifies(&db.app, &a).await;
+        db.finish().await;
+    }
+
+    /// Plan section 3.8: the application role reads every new table,
+    /// never writes boot services, deletes only assignments, and changes
+    /// nothing else by DELETE or TRUNCATE.
+    #[tokio::test]
+    async fn m3_application_role_least_privilege() {
+        let db = TestDb::migrated().await;
+        let app = db.raw_app().await;
+        for t in [
+            "boot_service",
+            "boot_service_package",
+            "auth_code",
+            "device_session",
+            "job",
+            "job_step",
+            "boot_stop",
+            "boot_policy_generation",
+        ] {
+            app.batch_execute(&format!("SELECT count(*) FROM {t}"))
+                .await
+                .unwrap();
+        }
+        for (sql, what) in [
+            (
+                "INSERT INTO boot_service (id) VALUES (gen_random_uuid())",
+                "insert boot_service",
+            ),
+            (
+                "UPDATE boot_service SET status = 'active'",
+                "update boot_service",
+            ),
+            ("DELETE FROM boot_service", "delete boot_service"),
+            ("SELECT 1 FROM boot_service FOR UPDATE", "lock boot_service"),
+            (
+                "UPDATE boot_service_package SET added_at_us = 0",
+                "update boot_service_package",
+            ),
+            ("DELETE FROM auth_code", "delete auth_code"),
+            ("DELETE FROM device_session", "delete device_session"),
+            ("DELETE FROM job", "delete job"),
+            ("DELETE FROM job_step", "delete job_step"),
+            ("DELETE FROM boot_stop", "delete boot_stop"),
+            (
+                "DELETE FROM boot_policy_generation",
+                "delete boot_policy_generation",
+            ),
+            ("TRUNCATE job", "truncate job"),
+            ("TRUNCATE auth_code", "truncate auth_code"),
+            ("ALTER TABLE job DISABLE TRIGGER USER", "disable job guards"),
+            (
+                "ALTER TABLE auth_code DISABLE TRIGGER USER",
+                "disable code guards",
+            ),
+            ("DROP TRIGGER job_guard ON job", "drop job guard"),
+        ] {
+            assert_sqlstate(
+                app.batch_execute(sql).await,
+                &SqlState::INSUFFICIENT_PRIVILEGE,
+                what,
+            );
+        }
+        db.finish().await;
+    }
+
+    /// Decisions 0016 and 0021: the administrative role enrols and
+    /// disables boot services, and touches nothing else of 0004.
+    #[tokio::test]
+    async fn m3_admin_role_least_privilege() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.admin).await;
+        let bs = m3::enrol_boot_service(&db.admin, &a, "admin relay").await;
+        let admin = db.raw_admin().await;
+        admin
+            .batch_execute("SELECT count(*) FROM boot_service")
+            .await
+            .unwrap();
+        for (sql, what) in [
+            ("SELECT count(*) FROM auth_code", "read auth_code"),
+            ("SELECT count(*) FROM device_session", "read device_session"),
+            ("SELECT count(*) FROM job", "read job"),
+            (
+                "SELECT count(*) FROM boot_service_package",
+                "read boot_service_package",
+            ),
+            ("SELECT count(*) FROM boot_stop", "read boot_stop"),
+            (
+                "INSERT INTO boot_policy_generation VALUES (gen_random_uuid(), 1)",
+                "insert boot_policy_generation",
+            ),
+            ("DELETE FROM boot_service", "delete boot_service"),
+            ("TRUNCATE boot_service", "truncate boot_service"),
+        ] {
+            assert_sqlstate(
+                admin.batch_execute(sql).await,
+                &SqlState::INSUFFICIENT_PRIVILEGE,
+                what,
+            );
+        }
+        let mut tx = db.app.begin().await.unwrap();
+        assert_eq!(tx.boot_service(bs.id).await.unwrap().unwrap().id, bs.id);
+        tx.rollback().await;
+        db.finish().await;
+    }
+
+    /// Migration 0004 guards against the application role writing rows
+    /// directly: a used or revoked code stays so and its HMAC never
+    /// changes; a finished job never changes; the wipe reference never
+    /// changes; the generation only increases; a cleared stop stays
+    /// cleared.
+    #[tokio::test]
+    async fn m3_guards_refuse_direct_changes() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        let op = enrol(&db.admin, &a, "guarded").await;
+        let bs = m3::enrol_boot_service(&db.admin, &a, "relay guards").await;
+        let p = m3::ready_package(&db.app, &a, &op).await;
+
+        // A used code and a revoked code.
+        let used = m3::issue_code(&db.app, &a, &op, "USED000001", 900).await;
+        let revoked = m3::issue_code(&db.app, &a, &op, "REV0KED001", 900).await;
+        let s = m3::open_session(&db.app, &a, None, m3::macs(1)).await;
+        let mut tx = db.app.begin().await.unwrap();
+        assert_eq!(
+            tx.consume_auth_code(&m3::code_hmac("USED000001"), s.id, common::now())
+                .await
+                .unwrap(),
+            Some(used)
+        );
+        tx.revoke_auth_code(revoked, op.id, common::now())
+            .await
+            .unwrap();
+        common::append(&a, &mut tx, "auth_code.used", "auth_code", "x").await;
+        tx.commit().await.unwrap();
+
+        // A failed job and a running one.
+        let s1 = m3::ready_session(&db.app, &a, &op, bs.id, &p, m3::macs(1)).await;
+        let failed = m3::confirm(&db.app, &a, &s1, bs.id, &p).await.unwrap();
+        let mut tx = db.app.begin().await.unwrap();
+        tx.set_job_step(
+            failed,
+            Step::VERIFY_CONTENT,
+            StepState::Failed,
+            common::now(),
+        )
+        .await
+        .unwrap();
+        tx.fail_job(
+            failed,
+            &[JobState::Running],
+            &m3::failure(Step::VERIFY_CONTENT),
+            common::now(),
+        )
+        .await
+        .unwrap();
+        tx.bump_boot_policy_generation(bs.id).await.unwrap();
+        common::append(&a, &mut tx, "job.failed", "job", &failed.to_string()).await;
+        tx.commit().await.unwrap();
+        let s2 = m3::ready_session(&db.app, &a, &op, bs.id, &p, m3::macs(1)).await;
+        let running = m3::confirm(&db.app, &a, &s2, bs.id, &p).await.unwrap();
+
+        let app = db.raw_app().await;
+        let uid = |b: &[u8; 16]| uuid::Uuid::from_bytes(*b);
+        let (u, r) = (uid(used.as_bytes()), uid(revoked.as_bytes()));
+        let (f, run) = (uid(failed.as_bytes()), uid(running.as_bytes()));
+        let b = uid(bs.id.as_bytes());
+        let refused: [(&str, &[&(dyn tokio_postgres::types::ToSql + Sync)], &str); 11] = [
+            (
+                "UPDATE auth_code SET used_at_us = NULL, used_by_session = NULL WHERE id = $1",
+                &[&u],
+                "un-use a code",
+            ),
+            (
+                "UPDATE auth_code SET code_hmac = decode(repeat('11', 32), 'hex') WHERE id = $1",
+                &[&u],
+                "change a code HMAC",
+            ),
+            (
+                "UPDATE auth_code SET expires_at_us = expires_at_us + 1 WHERE id = $1",
+                &[&r],
+                "extend a code",
+            ),
+            (
+                "UPDATE auth_code SET revoked_at_us = NULL, revoked_by = NULL WHERE id = $1",
+                &[&r],
+                "un-revoke a code",
+            ),
+            (
+                "UPDATE job SET state = 'running', finished_at_us = NULL, failure_step = NULL, \
+                 failure_category = NULL, failure_detail = NULL WHERE id = $1",
+                &[&f],
+                "reopen a failed job",
+            ),
+            (
+                "UPDATE job SET bytes_done = 1 WHERE id = $1",
+                &[&f],
+                "change a failed job",
+            ),
+            (
+                "UPDATE job SET wipe_audit_seq = wipe_audit_seq + 1 WHERE id = $1",
+                &[&run],
+                "move the wipe reference",
+            ),
+            (
+                "UPDATE job SET plan_sha256 = decode(repeat('22', 32), 'hex') WHERE id = $1",
+                &[&run],
+                "change the plan digest",
+            ),
+            (
+                "UPDATE job_step SET state = 'running', finished_at_us = NULL \
+                 WHERE job_id = $1 AND step = 1",
+                &[&f],
+                "reopen a failed step",
+            ),
+            (
+                "UPDATE boot_policy_generation SET generation = generation - 1 \
+                 WHERE boot_service_id = $1",
+                &[&b],
+                "roll back the generation",
+            ),
+            (
+                "UPDATE device_session SET state = 'authorised' WHERE id = $1",
+                &[&uid(s1.id.as_bytes())],
+                "reopen a confirmed session",
+            ),
+        ];
+        for (sql, params, what) in refused {
+            let r = app.execute(sql, params).await;
+            assert_sqlstate(r, &SqlState::INTEGRITY_CONSTRAINT_VIOLATION, what);
+        }
+        // Progress cannot go backwards on a running job.
+        app.execute("UPDATE job SET last_seq = 5 WHERE id = $1", &[&run])
+            .await
+            .unwrap();
+        assert_sqlstate(
+            app.execute("UPDATE job SET last_seq = 4 WHERE id = $1", &[&run])
+                .await,
+            &SqlState::INTEGRITY_CONSTRAINT_VIOLATION,
+            "seq backwards",
+        );
+        // The guards bind the owner too (only disabling them would not).
+        let owner = db.raw_owner().await;
+        assert_sqlstate(
+            owner
+                .execute("UPDATE job SET state = 'succeeded' WHERE id = $1", &[&f])
+                .await,
+            &SqlState::INTEGRITY_CONSTRAINT_VIOLATION,
+            "owner changes a failed job",
+        );
+        // A stored session state outside the set is refused (CHECK).
+        assert_sqlstate(
+            app.execute(
+                "UPDATE device_session SET state = 'bogus' WHERE id = $1",
+                &[&uid(s.id.as_bytes())],
+            )
+            .await,
+            &SqlState::CHECK_VIOLATION,
+            "unknown session state",
+        );
+        let mut tx = db.app.begin().await.unwrap();
+        assert_eq!(
+            tx.device_session(s1.id).await.unwrap().unwrap().state,
+            SessionState::Confirmed
+        );
+        tx.rollback().await;
+        db.finish().await;
+    }
+
+    /// Stored session rows are re-validated on read.
+    #[tokio::test]
+    async fn m3_tampered_session_is_corrupt_on_read() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        let s = m3::open_session(&db.app, &a, None, m3::macs(1)).await;
+        let owner = db.raw_owner().await;
+        let id = uuid::Uuid::from_bytes(*s.id.as_bytes());
+        // Identity columns are guarded even against the owner; an attacker
+        // with owner rights disables the guard first (column checks stay).
+        owner
+            .batch_execute("ALTER TABLE device_session DISABLE TRIGGER device_session_guard")
+            .await
+            .unwrap();
+        // Seven characters (passes the column check) but not base32.
+        owner
+            .execute(
+                "UPDATE device_session SET display_code = 'IIL-OOO' WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap();
+        let mut tx = db.app.begin().await.unwrap();
+        let err = tx.device_session(s.id).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DbError::Corrupt {
+                    what: "display_code"
+                }
+            ),
+            "{err:?}"
+        );
+        tx.rollback().await;
+        // A multicast MAC (6 bytes, so the column check passes).
+        owner
+            .execute(
+                "UPDATE device_session SET display_code = 'ABC-DEF', \
+                 macs = ARRAY[decode('010000000001', 'hex')] WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap();
+        let mut tx = db.app.begin().await.unwrap();
+        let err = tx.device_session(s.id).await.unwrap_err();
+        assert!(matches!(err, DbError::Corrupt { what: "macs" }), "{err:?}");
+        tx.rollback().await;
+        // A MAC of the wrong length is refused by the column check.
+        assert_sqlstate(
+            owner
+                .execute(
+                    "UPDATE device_session SET macs = ARRAY[decode('0200000001', 'hex')] \
+                     WHERE id = $1",
+                    &[&id],
+                )
+                .await,
+            &SqlState::CHECK_VIOLATION,
+            "five-byte MAC",
+        );
         db.finish().await;
     }
 }

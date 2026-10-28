@@ -6,11 +6,12 @@
 //! Every fixture is generated at test time. Nothing touches a real
 //! device, a real certificate authority or a production database.
 
-#[cfg(feature = "pg-integration")]
+// `flow` and `stream` (and `pg::wait_state`) also serve the in-memory
+// M3 end-to-end test (`device_e2e.rs`); `pg`'s process helpers are used
+// only behind `pg-integration`.
+pub mod device;
 pub mod flow;
-#[cfg(feature = "pg-integration")]
 pub mod pg;
-#[cfg(feature = "pg-integration")]
 pub mod stream;
 
 use std::net::SocketAddr;
@@ -85,6 +86,10 @@ pub struct Fixture {
     pub audit_pub: VerifyingKey,
     /// Content public key.
     pub content_pub: VerifyingKey,
+    /// Plan public key (M3; `plan.p8` / `plan.pub`).
+    pub plan_pub: VerifyingKey,
+    /// Boot-policy public key (M3; `boot-policy.p8` / `boot-policy.pub`).
+    pub policy_pub: VerifyingKey,
 }
 
 /// Database settings written into the configuration.
@@ -147,14 +152,77 @@ impl Fixture {
             audit.verifying_key().to_spki_pem().unwrap().as_bytes(),
             0o644,
         );
+        // M3 keys: plan and boot-policy signing keys, and the 32-byte code
+        // HMAC key (plan section 3.9).
+        let plan = SigningKey::generate().unwrap();
+        let policy = SigningKey::generate().unwrap();
+        for (name, k) in [("plan", &plan), ("boot-policy", &policy)] {
+            scratch.write(&format!("{name}.p8"), &k.to_pkcs8_pem().unwrap(), 0o600);
+            scratch.write(
+                &format!("{name}.pub"),
+                k.verifying_key().to_spki_pem().unwrap().as_bytes(),
+                0o644,
+            );
+        }
+        let hmac = usgp_crypto::HmacKey::generate_key_bytes().unwrap();
+        scratch.write("code-hmac.key", &hmac, 0o600);
         std::fs::create_dir_all(scratch.path("content")).unwrap();
         set_mode(&scratch.path("content"), 0o700);
         Self {
             audit_pub: audit.verifying_key().clone(),
             content_pub: content.verifying_key().clone(),
+            plan_pub: plan.verifying_key().clone(),
+            policy_pub: policy.verifying_key().clone(),
             scratch,
             pki,
         }
+    }
+
+    /// [`Self::config_text`] with the M3 keys and the device listener
+    /// enabled on `127.0.0.1:0` (the server's own certificate and key),
+    /// with rate limits raised for tests.
+    pub fn config_text_m3(&self, db: &DbFiles) -> String {
+        self.m3_overlay(&self.config_text(db))
+    }
+
+    /// Adds the M3 keys and the device listener to a configuration text
+    /// written by [`Self::config_text`].
+    pub fn m3_overlay(&self, base: &str) -> String {
+        let p = |n: &str| self.scratch.path(n).display().to_string();
+        assert!(base.contains("[signing]\n"));
+        let base = base.replacen(
+            "[signing]\n",
+            &format!(
+                "[signing]\nplan_key = \"{}\"\nboot_policy_key = \"{}\"\n",
+                p("plan.p8"),
+                p("boot-policy.p8")
+            ),
+            1,
+        );
+        format!(
+            r#"{base}
+[device_api]
+enabled = true
+listen = "127.0.0.1:0"
+cert_chain = "{cert}"
+private_key = "{key}"
+min_version = "1.2"
+session_opens_per_ip_per_min = 1000
+code_attempts_per_ip_per_min = 1000
+max_pending_sessions_per_ip = 64
+
+[codes]
+hmac_key = "{hmac}"
+default_ttl_s = 900
+max_ttl_s = 3600
+
+[jobs]
+lost_after_s = 900
+"#,
+            cert = p("server.pem"),
+            key = p("server.key"),
+            hmac = p("code-hmac.key"),
+        )
     }
 
     /// Database settings pointing at a closed local port.
@@ -311,6 +379,100 @@ pub async fn https(
         status,
         head: head.to_ascii_lowercase(),
         body: body.to_owned(),
+    })
+}
+
+/// A response with its body as bytes.
+#[derive(Debug, Clone)]
+pub struct RawResponse {
+    /// Status code.
+    pub status: u16,
+    /// Header block (lower-cased).
+    pub head: String,
+    /// Body bytes.
+    pub body: Vec<u8>,
+}
+
+impl RawResponse {
+    /// The body as text (lossy).
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// The body as JSON.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {}", self.text()))
+    }
+
+    /// The value of header `name` (lower-case), if present.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.head.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == name).then(|| v.trim().to_owned())
+        })
+    }
+}
+
+/// One HTTP/1.1 request over TLS with extra `headers` and a byte body;
+/// the client certificate is `cert` (none for the device listener).
+/// `Err` if no HTTP response arrived.
+pub async fn request(
+    addr: SocketAddr,
+    pki: &TestPki,
+    cert: Option<&TestCert>,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<RawResponse, String> {
+    let client = ClientTls::new(&pki.client_settings(cert, TlsMinVersion::Tls12).unwrap())
+        .map_err(|e| e.to_string())?;
+    let tcp = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+    let mut s = client
+        .connect(tcp, "localhost")
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Length: {}\r\n",
+        body.len()
+    );
+    if !body.is_empty() {
+        head.push_str("Content-Type: application/json\r\n");
+    }
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    s.write_all(head.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    s.write_all(body).await.map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    // On the heap: a large array would live in every future that awaits
+    // this one.
+    let mut chunk = vec![0u8; 65536];
+    loop {
+        match s.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let split = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| "no HTTP response".to_owned())?;
+    let head = String::from_utf8_lossy(&buf[..split]).to_ascii_lowercase();
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| "no status".to_owned())?;
+    Ok(RawResponse {
+        status,
+        head,
+        body: buf[split + 4..].to_vec(),
     })
 }
 

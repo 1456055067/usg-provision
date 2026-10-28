@@ -44,6 +44,8 @@ handshake_retries = 3
 handshake_timeout_ms = 2100
 max_transfer_secs = 601
 max_file_size_bytes = 33554432
+max_window_size = 4
+block_wrap = "one"
 
 [content]
 recheck_interval_secs = 61
@@ -51,6 +53,18 @@ recheck_interval_secs = 61
 [suppression]
 file = "/etc/usgp-relay/suppress.toml"
 reload_interval_secs = 3
+
+[server_feed]
+enabled = true
+url = "https://server.lab:8443"
+server_name = "api.server.lab"
+trust_anchors = "/etc/usgp-relay/feed/server-ca.pem"
+client_cert = "/etc/usgp-relay/feed/relay.pem"
+client_key = "/etc/usgp-relay/feed/relay.key"
+boot_policy_key_pub = "/etc/usgp-relay/feed/boot-policy.pub.pem"
+boot_service_id = "6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b"
+poll_interval_s = 45
+cache_file = "/var/lib/usgp-relay/boot-policy.json"
 
 [log]
 level = "debug"

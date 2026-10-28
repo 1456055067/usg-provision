@@ -32,6 +32,11 @@
 //! the anonymous budget (its record, when admitted, still names it and
 //! says `trust_anchor: not_chained`).
 //!
+//! A relay (boot service) authenticates the same way, with a client
+//! certificate an administrator bound to its boot-service record
+//! ([`authenticate_caller`], decision 0021); it is a different principal
+//! kind ([`Caller::BootService`]) and holds no operator permission.
+//!
 //! A source is an IPv4 address (/32) or an IPv6 /64 ([`source_key`]), so
 //! rotating addresses inside one IPv6 subnet does not multiply the budget
 //! (finding SEC-004). Each budget also has a global per-minute ceiling;
@@ -59,7 +64,8 @@ use std::time::{Duration, Instant};
 
 use usgp_audit::Actor;
 use usgp_crypto::PeerCertificate;
-use usgp_db::{Operator, OperatorStatus, RepoTx, Store};
+use usgp_db::{BootService, Operator, OperatorStatus, RepoTx, Store};
+use usgp_proto::ops::BootServiceStatus;
 
 /// An authenticated operator for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +91,53 @@ impl Principal {
     }
 }
 
+/// An authenticated boot service (relay) for one request: its client
+/// certificate is bound to exactly one active boot-service record
+/// (decision 0021 item 1). It holds no operator permission; it may call
+/// only the routes marked [`crate::routes::Access::BootService`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootServicePrincipal {
+    /// The boot-service record.
+    pub boot_service: BootService,
+}
+
+impl BootServicePrincipal {
+    /// The audit actor (plan M3 section 7: kind `boot_service`, id, cert
+    /// SHA-256).
+    #[must_use]
+    pub fn actor(&self) -> Actor {
+        let b = &self.boot_service;
+        Actor::boot_service(
+            &b.id.to_string(),
+            &format!(
+                "{}; cert sha256 {}",
+                b.name.as_str(),
+                b.cert_sha256.to_hex()
+            ),
+        )
+    }
+}
+
+/// Who made an operator-listener request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// An operator (every operator route, by role).
+    Operator(Principal),
+    /// A boot service (only `GET /v1/relay/boot-policy`).
+    BootService(BootServicePrincipal),
+}
+
+impl Caller {
+    /// The audit actor.
+    #[must_use]
+    pub fn actor(&self) -> Actor {
+        match self {
+            Self::Operator(p) => p.actor(),
+            Self::BootService(b) => b.actor(),
+        }
+    }
+}
+
 /// Why a request was not authenticated (all 401).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthnFailure {
@@ -102,6 +155,17 @@ pub enum AuthnFailure {
         /// The operator id.
         operator: String,
     },
+    /// The bound boot service is disabled.
+    BootServiceDisabled {
+        /// What was presented.
+        presented: String,
+    },
+    /// The certificate is bound both to an operator and to a boot
+    /// service; neither is trusted (fail closed).
+    Ambiguous {
+        /// What was presented.
+        presented: String,
+    },
 }
 
 impl AuthnFailure {
@@ -112,6 +176,8 @@ impl AuthnFailure {
             Self::NoCertificate => "auth.unauthenticated",
             Self::UnknownCertificate { .. } => "auth.unknown_certificate",
             Self::Disabled { .. } => "auth.operator_disabled",
+            Self::BootServiceDisabled { .. } => "auth.boot_service_disabled",
+            Self::Ambiguous { .. } => "auth.ambiguous_certificate",
         }
     }
 
@@ -122,6 +188,8 @@ impl AuthnFailure {
             Self::NoCertificate => "no_client_certificate",
             Self::UnknownCertificate { .. } => "unknown_certificate",
             Self::Disabled { .. } => "operator_disabled",
+            Self::BootServiceDisabled { .. } => "boot_service_disabled",
+            Self::Ambiguous { .. } => "ambiguous_certificate",
         }
     }
 
@@ -130,9 +198,10 @@ impl AuthnFailure {
     pub fn actor(&self) -> Actor {
         match self {
             Self::NoCertificate => Actor::unauthenticated(None),
-            Self::UnknownCertificate { presented } | Self::Disabled { presented, .. } => {
-                Actor::unauthenticated(Some(presented))
-            }
+            Self::UnknownCertificate { presented }
+            | Self::Disabled { presented, .. }
+            | Self::BootServiceDisabled { presented }
+            | Self::Ambiguous { presented } => Actor::unauthenticated(Some(presented)),
         }
     }
 }
@@ -177,6 +246,55 @@ pub async fn authenticate<S: Store>(
     })
 }
 
+/// Resolves the caller of an operator-listener request: an operator, or
+/// a boot service (relay) whose client certificate an administrator bound
+/// to its record (decision 0021 item 1). Both lookups run on every
+/// request, so disabling either takes effect at once; a certificate bound
+/// to both is refused.
+///
+/// # Errors
+///
+/// `Ok(Err(AuthnFailure))` for a 401; `Err(DbError)` if a lookup failed
+/// (the router answers 500: fail closed).
+pub async fn authenticate_caller<S: Store>(
+    store: &S,
+    peer: Option<&PeerCertificate>,
+) -> Result<Result<Caller, AuthnFailure>, usgp_db::DbError> {
+    let Some(cert) = peer else {
+        return Ok(Err(AuthnFailure::NoCertificate));
+    };
+    let mut tx = store.begin().await?;
+    let op = tx.operator_by_cert(&cert.sha256).await;
+    let bs = if op.is_ok() {
+        tx.boot_service_by_cert(&cert.sha256).await
+    } else {
+        Ok(None)
+    };
+    tx.rollback().await;
+    let (op, bs) = (op?, bs?);
+    Ok(match (op, bs) {
+        (Some(_), Some(_)) => Err(AuthnFailure::Ambiguous {
+            presented: presented(cert),
+        }),
+        (None, None) => Err(AuthnFailure::UnknownCertificate {
+            presented: presented(cert),
+        }),
+        (Some(o), None) if o.status == OperatorStatus::Disabled => Err(AuthnFailure::Disabled {
+            presented: presented(cert),
+            operator: o.id.to_string(),
+        }),
+        (Some(o), None) => Ok(Caller::Operator(Principal { operator: o })),
+        (None, Some(b)) if b.status != BootServiceStatus::Active => {
+            Err(AuthnFailure::BootServiceDisabled {
+                presented: presented(cert),
+            })
+        }
+        (None, Some(b)) => Ok(Caller::BootService(BootServicePrincipal {
+            boot_service: b,
+        })),
+    })
+}
+
 /// The source an address belongs to for caps: the IPv4 address itself
 /// (/32), or the IPv6 /64 prefix (one subnet's worth of addresses is one
 /// source). IPv4-mapped IPv6 addresses count as their IPv4 address.
@@ -216,9 +334,10 @@ impl AuthClass {
     pub const fn of_http(failure: &AuthnFailure) -> Self {
         match failure {
             AuthnFailure::NoCertificate => Self::Anonymous,
-            AuthnFailure::UnknownCertificate { .. } | AuthnFailure::Disabled { .. } => {
-                Self::Credential
-            }
+            AuthnFailure::UnknownCertificate { .. }
+            | AuthnFailure::Disabled { .. }
+            | AuthnFailure::BootServiceDisabled { .. }
+            | AuthnFailure::Ambiguous { .. } => Self::Credential,
         }
     }
 

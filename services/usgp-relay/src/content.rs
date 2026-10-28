@@ -10,9 +10,14 @@
 //! cached copy is handed out, so memory stays at one copy per file plus at
 //! most `verify_concurrency` reads in flight.
 //!
-//! Request names are matched byte for byte against manifest names and are
-//! never used to build a path. Manifest names are validated
-//! [`BootFileName`]s (no `..`, no absolute paths, no backslash, no NUL).
+//! Request names are normalised (`\` to `/`, one leading separator
+//! dropped, the published-name allow-list) and matched ASCII
+//! case-insensitively against manifest names
+//! ([`ContentStore::resolve`]; M3 plan section 1.2(e)); a manifest whose
+//! names collide case-insensitively is refused at load. Request names are
+//! never used to build a path: only the matched manifest name is. Manifest
+//! names are validated [`BootFileName`]s (no `..`, no absolute paths, no
+//! backslash, no NUL).
 //! Every directory component of a name below the boot root must be a real
 //! directory, not a symbolic link, and the final component is opened with
 //! `O_NOFOLLOW`. After the open the directory components are checked again
@@ -26,7 +31,9 @@
 //! for the service state ([`RelayState::record_check`]).
 //!
 //! The manifest is read under the trusted-file rules
-//! (`usgp_common::config::read_trusted`).
+//! (`usgp_common::config::read_trusted`). Its optional `[pe_kit]` section
+//! is checked by [`crate::pe_kit`]; an incomplete or mismatched kit is
+//! tracked as missing content under [`crate::pe_kit::KIT_STATUS_NAME`].
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-7 (Software, Firmware, and Information Integrity) -
@@ -38,7 +45,8 @@
 // - NIST 800-53: SC-5 - verification concurrency is bounded.
 // - SPEC: specs/boot-network.md#REQ-BOOT-033 (missing file), #REQ-BOOT-040
 //   (read-only), #REQ-BOOT-041 (published files only), #REQ-BOOT-052
-//   (missing content state)
+//   (missing content state), #REQ-BOOT-063 (Windows PE boot files)
+// - SPEC: specs/preinstall-env.md#REQ-PE-012 (complete kit)
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -51,9 +59,11 @@ use usgp_common::Sha256Digest;
 use usgp_common::config::{ConfigError, TrustPolicy, read_trusted};
 use usgp_proto::boot_manifest::MAX_MANIFEST_BYTES;
 use usgp_proto::{BootFileName, BootManifest, ManifestEntry, ManifestError};
+use usgp_tftp::{NameRefusal, case_insensitive_collision, normalize_request_name};
 
 use crate::events::{self, Outcome};
 use crate::lock;
+use crate::pe_kit::{self, KIT_STATUS_NAME, PeKit, PeKitShapeError};
 use crate::state::{FileStatus, RelayState};
 
 /// A request's verification of a published file did not finish within
@@ -85,6 +95,36 @@ pub enum ContentLoadError {
     /// could never be served.
     #[error("a manifest entry is larger than tftp.max_file_size_bytes")]
     EntryTooLarge,
+    /// Two manifest names are equal ASCII case-insensitively, so a request
+    /// could match either (names are operator-published, not secrets).
+    #[error("boot manifest names {first} and {second} differ only in letter case")]
+    NameCollision {
+        /// The first name.
+        first: String,
+        /// The second name.
+        second: String,
+    },
+    /// The `[pe_kit]` section has an invalid shape.
+    #[error(transparent)]
+    PeKit(#[from] PeKitShapeError),
+}
+
+impl From<pe_kit::ParseError> for ContentLoadError {
+    fn from(e: pe_kit::ParseError) -> Self {
+        match e {
+            pe_kit::ParseError::Manifest(m) => Self::Manifest(m),
+            pe_kit::ParseError::Shape(s) => Self::PeKit(s),
+        }
+    }
+}
+
+/// Why a request name matched no published file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unresolved {
+    /// The name can never be a published name (normalisation refused it).
+    Refused(NameRefusal),
+    /// A valid name that is not published.
+    NotPublished,
 }
 
 /// Why a published file could not be served. The TFTP answer is ERROR 1 in
@@ -153,6 +193,7 @@ impl Fault {
 pub struct ContentStore {
     root: PathBuf,
     manifest: BootManifest,
+    pe_kit: Option<PeKit>,
     manifest_sha256: Sha256Digest,
     program: BootFileName,
     max_file_size: u64,
@@ -189,25 +230,58 @@ impl ContentStore {
         let max = u64::try_from(MAX_MANIFEST_BYTES).unwrap_or(u64::MAX);
         let text = read_trusted(manifest_path, max, trust)?;
         let manifest_sha256 = usgp_crypto::sha256(text.as_bytes());
-        let manifest = BootManifest::from_toml(&text)?;
+        let (manifest, kit) = pe_kit::parse_manifest(&text)?;
         if manifest.get(program.as_bytes()).is_none() {
             return Err(ContentLoadError::ProgramNotPublished);
         }
         if manifest.files.iter().any(|f| f.size > max_file_size) {
             return Err(ContentLoadError::EntryTooLarge);
         }
-        let state = Arc::new(RelayState::new(
-            manifest.files.iter().map(|f| f.name.as_str().to_owned()),
-        ));
-        let detail = [
+        // COMPLIANCE MAPPING:
+        // - NIST 800-53: SI-10 / AC-3 - requests are matched
+        //   case-insensitively, so names that differ only in case would
+        //   make the match ambiguous: refuse the manifest.
+        // - SPEC: specs/boot-network.md#REQ-BOOT-041, #REQ-BOOT-063
+        if let Some((i, j)) =
+            case_insensitive_collision(manifest.files.iter().map(|f| f.name.as_bytes()))
+        {
+            let name = |k: usize| {
+                manifest
+                    .files
+                    .get(k)
+                    .map_or_else(String::new, |f| f.name.as_str().to_owned())
+            };
+            return Err(ContentLoadError::NameCollision {
+                first: name(i),
+                second: name(j),
+            });
+        }
+        let mut tracked: Vec<String> = manifest
+            .files
+            .iter()
+            .map(|f| f.name.as_str().to_owned())
+            .collect();
+        if kit.is_some() {
+            tracked.push(KIT_STATUS_NAME.to_owned());
+        }
+        let state = Arc::new(RelayState::new(tracked));
+        let mut detail = vec![
             ("manifest_sha256", manifest_sha256.to_hex()),
             ("file_count", manifest.files.len().to_string()),
             ("uefi_x64_program", program.as_str().to_owned()),
+            ("pe_kit", kit.is_some().to_string()),
         ];
+        if let Some(k) = &kit {
+            detail.push(("pe_content_sha256", k.pe_content_sha256().to_hex()));
+        }
         events::emit_simple(events::MANIFEST_LOADED, Outcome::Success, &detail);
+        if let Some(k) = &kit {
+            record_kit(&state, k, &manifest, program);
+        }
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
+            pe_kit: kit,
             manifest_sha256,
             program: program.clone(),
             max_file_size,
@@ -245,10 +319,41 @@ impl ContentStore {
         self.state.content_available().then_some(&self.program)
     }
 
+    /// The `[pe_kit]` section, if the manifest has one.
+    #[must_use]
+    pub fn pe_kit(&self) -> Option<&PeKit> {
+        self.pe_kit.as_ref()
+    }
+
     /// Whether `name` is a published name (byte-exact; no file access).
     #[must_use]
     pub fn is_published(&self, name: &[u8]) -> bool {
         self.manifest.get(name).is_some()
+    }
+
+    /// The published name a TFTP request name refers to: the request is
+    /// normalised (`usgp_tftp::normalize_request_name`) and compared ASCII
+    /// case-insensitively with every manifest name. No file access; the
+    /// request bytes are never used as a path.
+    ///
+    /// # Errors
+    ///
+    /// [`Unresolved`]; the caller answers ERROR 1.
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SI-10, AC-3 - allow-list after normalisation; only a
+    //   manifest name ever leaves this function.
+    // - SPEC: specs/boot-network.md#REQ-BOOT-041, #REQ-BOOT-063;
+    //   specs/standards/winpe-network-boot.md §5 (backslash paths)
+    pub fn resolve(&self, raw: &[u8]) -> Result<&BootFileName, Unresolved> {
+        let name = normalize_request_name(raw).map_err(Unresolved::Refused)?;
+        // At most one entry matches: case-insensitive collisions are
+        // refused at load.
+        self.manifest
+            .files
+            .iter()
+            .find(|e| name.matches(e.name.as_bytes()))
+            .map(|e| &e.name)
+            .ok_or(Unresolved::NotPublished)
     }
 
     /// Reads and verifies the published file `name` for serving.
@@ -456,6 +561,28 @@ impl ContentStore {
         };
         events::emit_simple(event, Outcome::Failure, &detail);
     }
+}
+
+/// Records the kit's completeness under [`KIT_STATUS_NAME`] and emits
+/// `boot.kit.incomplete` when it is not complete (REQ-PE-012).
+fn record_kit(state: &RelayState, kit: &PeKit, manifest: &BootManifest, program: &BootFileName) {
+    let problems = pe_kit::assess(kit, manifest, program);
+    let status = problems
+        .iter()
+        .map(pe_kit::KitProblem::status)
+        .find(|s| *s == FileStatus::IntegrityFailed)
+        .or_else(|| problems.first().map(pe_kit::KitProblem::status))
+        .unwrap_or(FileStatus::Verified);
+    if !problems.is_empty() {
+        let reasons: Vec<String> = problems.iter().map(pe_kit::KitProblem::describe).collect();
+        let detail = [
+            ("reasons", reasons.join(",")),
+            ("pe_content_sha256", kit.pe_content_sha256().to_hex()),
+            ("action", "no boot program offered".to_owned()),
+        ];
+        events::emit_simple(events::KIT_INCOMPLETE, Outcome::Failure, &detail);
+    }
+    state.record(KIT_STATUS_NAME, status, "startup");
 }
 
 fn millis(d: Duration) -> String {

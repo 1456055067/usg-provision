@@ -46,6 +46,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use usgp_crypto::LegacySha1Hasher;
 use usgp_crypto::digest::legacy_sha1;
 
+use super::tree::TreeSpec;
 use super::xpress_enc;
 use crate::wim::header::{
     CHUNK_SIZE, Compression, FLAG_COMPRESS_XPRESS, FLAG_COMPRESSION, FLAG_RP_FIX, HEADER_LEN, MAGIC,
@@ -112,6 +113,8 @@ pub struct WimBuilder {
     identical_metadata: bool,
     reuse_metadata: bool,
     move_first_metadata: bool,
+    raw_chunks: bool,
+    trees: Vec<(usize, TreeSpec)>,
     guid: [u8; 16],
 }
 
@@ -135,6 +138,8 @@ impl WimBuilder {
             identical_metadata: false,
             reuse_metadata: false,
             move_first_metadata: false,
+            raw_chunks: false,
+            trees: Vec::new(),
             guid: *b"usgp-test-guid-1",
         }
     }
@@ -160,6 +165,33 @@ impl WimBuilder {
     pub fn image_spec(mut self, spec: ImageSpec) -> Self {
         self.images.push(spec);
         self
+    }
+
+    /// Adds an image whose metadata is the directory tree `tree`, encoded
+    /// as our DISM samples lay it out (OBS-024 to OBS-036), with every
+    /// content blob of the tree stored as a file resource.
+    #[must_use]
+    pub fn tree_image(mut self, name: &str, description: &str, tree: TreeSpec) -> Self {
+        self.trees.push((self.images.len(), tree.clone()));
+        self.images.push(ImageSpec {
+            name: name.to_owned(),
+            description: Some(description.to_owned()),
+            files: tree.contents(),
+        });
+        self
+    }
+
+    /// Inside compressed file resources, stores each full 32768-byte chunk
+    /// that does not shrink as its plain bytes, as DISM does (OBS-046),
+    /// instead of storing the whole resource raw. Metadata is unaffected.
+    #[must_use]
+    pub fn raw_chunks(mut self, on: bool) -> Self {
+        self.raw_chunks = on;
+        self
+    }
+
+    fn tree(&self, i: usize) -> Option<&TreeSpec> {
+        self.trees.iter().find(|(k, _)| *k == i).map(|(_, t)| t)
     }
 
     /// Sets the header's boot index (the boot metadata header then points
@@ -308,7 +340,7 @@ impl WimBuilder {
                     e.ref_count = e.ref_count.saturating_add(1);
                     continue;
                 }
-                let (bytes, compressed) = self.encode(data);
+                let (bytes, compressed) = self.encode_file(data);
                 let reshdr = write_resource(w, &mut pos, &bytes, data.len(), compressed, 0)?;
                 by_hash.insert(sha1, files.len());
                 files.push(entry(reshdr, sha1));
@@ -341,7 +373,10 @@ impl WimBuilder {
             }
 
             // This image's metadata, right after its new files.
-            let blob = metadata_blob(if self.identical_metadata { 1 } else { index }, &hashes);
+            let blob = match self.tree(i) {
+                Some(t) => t.encode().bytes,
+                None => metadata_blob(if self.identical_metadata { 1 } else { index }, &hashes),
+            };
             let mut sha1 = legacy_sha1(&blob).0;
             if self.bad_metadata_hash == Some(index)
                 && let Some(b) = sha1.first_mut()
@@ -438,6 +473,15 @@ impl WimBuilder {
         })
     }
 
+    /// Stored bytes of a file resource and whether they are compressed.
+    fn encode_file(&self, data: &[u8]) -> (Vec<u8>, bool) {
+        if self.raw_chunks && self.compression == Compression::Xpress {
+            return compress_resource_raw_chunks(data)
+                .map_or_else(|| (data.to_vec(), false), |b| (b, true));
+        }
+        self.encode(data)
+    }
+
     /// Stored bytes of a resource and whether they are compressed.
     fn encode(&self, data: &[u8]) -> (Vec<u8>, bool) {
         if self.compression == Compression::None {
@@ -448,7 +492,7 @@ impl WimBuilder {
 
     fn xml_document(&self, xml_offset: u64) -> String {
         let mut s = format!("<WIM><TOTALBYTES>{xml_offset}</TOTALBYTES>");
-        for (index, img) in (1u32..).zip(self.images.iter()) {
+        for ((i, img), index) in self.images.iter().enumerate().zip(1u32..) {
             let total: usize = img.files.iter().map(Vec::len).sum();
             let total = u64::try_from(total)
                 .unwrap_or(u64::MAX)
@@ -461,8 +505,13 @@ impl WimBuilder {
                 .files
                 .len()
                 .saturating_add(usize::from(index == 1 && self.zero_file.is_some()));
+            // OBS-048 counts for tree images.
+            let (dirs, count) = match self.tree(i) {
+                Some(t) => t.counts(),
+                None => (1, u64::try_from(count).unwrap_or(u64::MAX)),
+            };
             s.push_str(&format!(
-                "<IMAGE INDEX=\"{index}\"><DIRCOUNT>1</DIRCOUNT>\
+                "<IMAGE INDEX=\"{index}\"><DIRCOUNT>{dirs}</DIRCOUNT>\
                  <FILECOUNT>{count}</FILECOUNT><TOTALBYTES>{total}</TOTALBYTES>\
                  <HARDLINKBYTES>0</HARDLINKBYTES>\
                  <CREATIONTIME><HIGHPART>{TIME_HIGH}</HIGHPART><LOWPART>{TIME_LOW}</LOWPART></CREATIONTIME>\
@@ -604,6 +653,42 @@ pub fn compress_resource(data: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         body.extend_from_slice(&c);
+        if i < last {
+            let end = u64::try_from(body.len()).ok()?;
+            if width == 8 {
+                table.extend_from_slice(&end.to_le_bytes());
+            } else {
+                table.extend_from_slice(&u32::try_from(end).ok()?.to_le_bytes());
+            }
+        }
+    }
+    table.extend_from_slice(&body);
+    (table.len() < data.len()).then_some(table)
+}
+
+/// Like [`compress_resource`], but a chunk that does not shrink is stored
+/// as its plain bytes inside the compressed resource, full (OBS-046) or a
+/// short final chunk (OBS-057).
+#[must_use]
+pub fn compress_resource_raw_chunks(data: &[u8]) -> Option<Vec<u8>> {
+    let original = u64::try_from(data.len()).ok()?;
+    if original == 0 {
+        return None;
+    }
+    let chunk = usize::try_from(CHUNK_SIZE).ok()?;
+    let width = chunk_entry_width(original);
+    let mut table = Vec::new();
+    let mut body = Vec::new();
+    let pieces: Vec<&[u8]> = data.chunks(chunk).collect();
+    let last = pieces.len().checked_sub(1)?;
+    for (i, piece) in pieces.iter().enumerate() {
+        let c = xpress_enc::compress(piece);
+        if c.len() < piece.len() {
+            body.extend_from_slice(&c);
+        } else {
+            // OBS-046 (full chunks), OBS-057 (a short final chunk).
+            body.extend_from_slice(piece);
+        }
         if i < last {
             let end = u64::try_from(body.len()).ok()?;
             if width == 8 {

@@ -21,16 +21,26 @@ use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use usgp_api::{Api, ApiConfig, CheckReport, ContentChecker, ContentKeys, TlsAcceptorHandle};
+use usgp_api::{
+    Api, ApiConfig, CheckReport, ContentChecker, ContentKeys, ProvisioningKeys, TlsAcceptorHandle,
+};
 use usgp_audit::memory::ManualClock;
 use usgp_audit::{Actor, AuditChain, AuditDraft, AuditRecord, Interface, Outcome};
 use usgp_crypto::test_pki::{LeafSpec, TestCert, TestPki};
-use usgp_crypto::tls::{ClientTls, ServerTls, TlsMinVersion};
-use usgp_crypto::{SigningKey, VerifyingKey};
+use usgp_crypto::tls::{
+    ClientTls, DeviceServerTls, DeviceServerTlsSettings, ServerTls, TlsMinVersion,
+};
+use usgp_crypto::{HmacKey, SigningKey, VerifyingKey};
+use usgp_db::BootService;
 use usgp_db::{MemoryStore, Operator, OperatorRole, OperatorStatus, RepoTx, Store};
 use usgp_image::facts::{FileFact, FileFacts};
 use usgp_image::{Compression, EditionInfo, Progress, WimError, WimSummary};
-use usgp_proto::{ContentId, ContentKind, ContentState, DisplayName, OperatorId, UnixMicros};
+use usgp_proto::disk::{Bus, DiskDescriptorParts, ExistingPartitionV1, PartitionKind};
+use usgp_proto::ops::{BootServiceStatus, IpCidr, SubnetList};
+use usgp_proto::{
+    AgentNonce, BootServiceId, ContentId, ContentKind, ContentState, DiskDescriptorV1, DiskText,
+    DiskToken, DisplayName, OperatorId, PartitionLabel, UnixMicros,
+};
 
 /// Fake content checker.
 #[derive(Debug)]
@@ -201,12 +211,22 @@ pub struct Harness {
     pub clock: Arc<ManualClock>,
     /// The API's TLS acceptor (CRL reload tests).
     pub tls: Arc<TlsAcceptorHandle>,
+    /// The device listener (M3), server authentication only.
+    pub device_addr: SocketAddr,
+    /// The plan key's public half (what the agent pins).
+    pub plan_pub: VerifyingKey,
+    /// The boot-policy key's public half (what the relay pins).
+    pub policy_pub: VerifyingKey,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    device_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(s) = self.shutdown.take() {
+            let _ = s.send(());
+        }
+        if let Some(s) = self.device_shutdown.take() {
             let _ = s.send(());
         }
         let _ = make_writable(&self.dir);
@@ -342,14 +362,26 @@ impl Harness {
         let content_pub = content_key.verifying_key().clone();
         let keys = ContentKeys::new(content_key, vec![content_pub.clone()]).unwrap();
         let mut config = ApiConfig::new(dir.join("content"));
+        config.device.enabled = true;
         (opts.config)(&mut config);
         let fake = Arc::new(FakeChecker::default());
+        let plan_key = SigningKey::generate().unwrap();
+        let policy_key = SigningKey::generate().unwrap();
+        let plan_pub = plan_key.verifying_key().clone();
+        let policy_pub = policy_key.verifying_key().clone();
+        let provisioning = ProvisioningKeys::new(
+            plan_key,
+            policy_key,
+            HmacKey::from_key_file(&HmacKey::generate_key_bytes().unwrap()).unwrap(),
+        )
+        .unwrap();
         let checker: Arc<dyn ContentChecker> = match opts.checker {
             Some(c) => c,
             None => Arc::clone(&fake) as Arc<dyn ContentChecker>,
         };
         let api = Api::builder(store.clone(), config, chain, keys)
             .checker(checker)
+            .provisioning_keys(provisioning)
             .build()
             .unwrap();
 
@@ -373,6 +405,25 @@ impl Harness {
             .await
             .unwrap();
         });
+        let device_tls = Arc::new(
+            DeviceServerTls::new(&DeviceServerTlsSettings {
+                cert_chain_pem: pki.server.chain_pem(),
+                private_key_pem: pki.server.key_pem().unwrap(),
+                min_version: TlsMinVersion::Tls12,
+            })
+            .unwrap(),
+        );
+        let device_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let device_addr = device_listener.local_addr().unwrap();
+        let (dtx_s, drx_s) = tokio::sync::oneshot::channel::<()>();
+        let device_api = api.clone();
+        tokio::spawn(async move {
+            usgp_api::serve_device(device_api, device_listener, device_tls, async {
+                let _ = drx_s.await;
+            })
+            .await
+            .unwrap();
+        });
         Self {
             pki,
             store,
@@ -388,7 +439,11 @@ impl Harness {
             fake,
             clock,
             tls: tls_handle,
+            device_addr,
+            plan_pub,
+            policy_pub,
             shutdown: Some(tx_s),
+            device_shutdown: Some(dtx_s),
         }
     }
 
@@ -760,4 +815,315 @@ impl Harness {
         tx.rollback().await;
         format!("{content:?}\n{editions:?}\n{uploads:?}\n{packages:?}")
     }
+
+    // --------------------------------------------------------------- M3
+
+    /// A harness for device tests: per-source caps raised so one test
+    /// can open several sessions from 127.0.0.1, and refusal records not
+    /// capped (tests count them).
+    pub async fn m3() -> Self {
+        Self::with(Opts {
+            config: Box::new(|c| {
+                c.unauth_records_per_source_per_min = 10_000;
+                c.unauth_records_global_per_min = 100_000;
+                c.device.max_pending_sessions_per_ip = 64;
+                c.device.session_opens_per_ip_per_min = 1000;
+                c.device.code_attempts_per_ip_per_min = 1000;
+            }),
+            ..Opts::default()
+        })
+        .await
+    }
+
+    /// A client certificate from the test PKI (for a relay).
+    pub fn relay_cert(&self, name: &str) -> TestCert {
+        self.pki
+            .intermediate
+            .issue(&LeafSpec::client(name))
+            .unwrap()
+    }
+
+    /// Enrols a boot service bound to `cert`, as the server's
+    /// administrative command does (audited).
+    pub async fn enrol_boot_service(
+        &self,
+        cert: &TestCert,
+        name: &str,
+        subnets: &[&str],
+        status: BootServiceStatus,
+    ) -> BootServiceId {
+        let b = BootService {
+            id: BootServiceId::from_random_bytes(rand16()),
+            name: DisplayName::new(name).unwrap(),
+            cert_sha256: cert.peer_certificate().unwrap().sha256,
+            cert_not_after: UnixMicros::new(4_000_000_000_000_000).unwrap(),
+            served_subnets: SubnetList::new(
+                subnets.iter().map(|s| IpCidr::parse(s).unwrap()).collect(),
+            )
+            .unwrap(),
+            status,
+            created_at: UnixMicros::new(1).unwrap(),
+            created_by: "uid:0".to_owned(),
+        };
+        let mut tx = self.store.begin().await.unwrap();
+        tx.insert_boot_service(&b).await.unwrap();
+        let d = AuditDraft::new(
+            "boot_service.enrolled",
+            Outcome::Success,
+            Actor::local_user(0, None),
+            Interface::ServerCli,
+        )
+        .target("boot_service", &b.id.to_string());
+        self.api.chain().append(&mut tx, &d).await.unwrap();
+        tx.commit().await.unwrap();
+        b.id
+    }
+
+    /// Sets the packages of a boot service (reads the ETag first).
+    pub async fn assign(&self, bs: BootServiceId, packages: &[&str]) -> Resp {
+        let r = self
+            .get(Who::Admin, &format!("/v1/boot-services/{bs}"))
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let etag = r.header("etag").unwrap();
+        self.req(
+            Who::Admin,
+            "PUT",
+            &format!("/v1/boot-services/{bs}/packages"),
+            &[("if-match", &etag)],
+            Some(serde_json::to_vec(&serde_json::json!({ "package_ids": packages })).unwrap()),
+        )
+        .await
+    }
+
+    /// One request on the device listener (no client certificate).
+    pub async fn dev_raw(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<Vec<u8>>,
+    ) -> Resp {
+        self.req_at(self.device_addr, None, method, path, headers, body)
+            .await
+    }
+
+    /// A device request with the session token (if any) and a JSON body.
+    pub async fn dev(
+        &self,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Resp {
+        let auth = token.map(|t| format!("Bearer {t}"));
+        let mut headers = Vec::new();
+        if let Some(a) = &auth {
+            headers.push(("authorization", a.as_str()));
+        }
+        self.dev_raw(
+            method,
+            path,
+            &headers,
+            body.map(|b| serde_json::to_vec(&b).unwrap()),
+        )
+        .await
+    }
+
+    /// Opens a device session (UEFI, x64) with `macs`.
+    pub async fn open_session(&self, macs: &[&str]) -> Opened {
+        let r = self
+            .dev("POST", "/v1/device/sessions", None, Some(hello(macs)))
+            .await;
+        assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+        let j = r.json();
+        Opened {
+            id: j["session_id"].as_str().unwrap().to_owned(),
+            token: j["token"].as_str().unwrap().to_owned(),
+            display_code: j["display_code"].as_str().unwrap().to_owned(),
+        }
+    }
+
+    /// Issues a code; returns (id, code).
+    pub async fn issue_code(&self) -> (String, String) {
+        let r = self
+            .post_json(Who::Admin, "/v1/auth-codes", serde_json::json!({}))
+            .await;
+        assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+        let j = r.json();
+        (
+            j["id"].as_str().unwrap().to_owned(),
+            j["code"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    /// Submits a code.
+    pub async fn submit_code(&self, token: &str, code: &str) -> Resp {
+        self.dev(
+            "POST",
+            "/v1/device/session/code",
+            Some(token),
+            Some(serde_json::json!({ "code": code })),
+        )
+        .await
+    }
+
+    /// A boot service on 127.0.0.0/8 offering a Ready package, and a
+    /// session from 127.0.0.1 authorised by a code, with the package and
+    /// a 1 TB disk chosen.
+    pub async fn ready_device(&self, tag: &str, macs: &[&str]) -> ReadyDevice {
+        let relay = self.relay_cert(&format!("relay {tag}"));
+        let bs = self
+            .enrol_boot_service(
+                &relay,
+                &format!("Relay {tag}"),
+                &["127.0.0.0/8"],
+                BootServiceStatus::Active,
+            )
+            .await;
+        let (pkg, _, _) = self.ready_package(tag).await;
+        let r = self.assign(bs, &[&pkg]).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let s = self.chosen_session(&pkg, macs).await;
+        ReadyDevice {
+            relay,
+            bs,
+            pkg,
+            session: s.0,
+            disk: s.1,
+        }
+    }
+
+    /// A session authorised by a code with `pkg` and a 1 TB disk chosen.
+    pub async fn chosen_session(&self, pkg: &str, macs: &[&str]) -> (Opened, DiskDescriptorV1) {
+        let s = self.open_session(macs).await;
+        let (_, code) = self.issue_code().await;
+        let r = self.submit_code(&s.token, &code).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let r = self
+            .dev(
+                "POST",
+                "/v1/device/session/package",
+                Some(&s.token),
+                Some(serde_json::json!({ "package_id": pkg, "revision": 1 })),
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let d = disk(1_000_204_886_016, false, Bus::Nvme);
+        let r = self.choose_disk(&s.token, &d).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        (s, d)
+    }
+
+    /// Chooses a disk.
+    pub async fn choose_disk(&self, token: &str, d: &DiskDescriptorV1) -> Resp {
+        self.dev(
+            "POST",
+            "/v1/device/session/disk",
+            Some(token),
+            Some(serde_json::json!({ "disk": d })),
+        )
+        .await
+    }
+
+    /// Confirms the wipe.
+    pub async fn confirm(
+        &self,
+        token: &str,
+        pkg: &str,
+        d: &DiskDescriptorV1,
+        nonce: &AgentNonce,
+    ) -> Resp {
+        self.dev(
+            "POST",
+            "/v1/device/session/confirm",
+            Some(token),
+            Some(serde_json::json!({
+                "package_id": pkg, "revision": 1, "disk_token": d.disk_token(),
+                "confirm": "wipe-disk", "agent_nonce": nonce,
+            })),
+        )
+        .await
+    }
+
+    /// A progress report.
+    pub async fn report(&self, token: &str, job: &str, body: serde_json::Value) -> Resp {
+        self.dev(
+            "POST",
+            &format!("/v1/device/jobs/{job}/progress"),
+            Some(token),
+            Some(body),
+        )
+        .await
+    }
+
+    /// Every audit record as text (for "no secret" checks).
+    pub fn all_record_text(&self) -> String {
+        self.records()
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// An opened device session.
+#[derive(Debug, Clone)]
+pub struct Opened {
+    pub id: String,
+    pub token: String,
+    pub display_code: String,
+}
+
+/// A device ready to confirm.
+pub struct ReadyDevice {
+    pub relay: TestCert,
+    pub bs: BootServiceId,
+    pub pkg: String,
+    pub session: Opened,
+    pub disk: DiskDescriptorV1,
+}
+
+/// 16 random bytes.
+pub fn rand16() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    usgp_crypto::fill_random(&mut b).unwrap();
+    b
+}
+
+/// A device hello (UEFI, x64).
+pub fn hello(macs: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "schema": 1, "agent_version": "0.3.0", "firmware": "uefi", "arch": "x64",
+        "secure_boot": "on", "memory_bytes": 8_589_934_592u64, "macs": macs,
+    })
+}
+
+/// A disk descriptor with one existing partition.
+pub fn disk(size: u64, removable: bool, bus: Bus) -> DiskDescriptorV1 {
+    DiskDescriptorV1::new(DiskDescriptorParts {
+        disk_token: DiskToken::from_random_bytes(rand16()),
+        bus,
+        model: DiskText::sanitized("Example NVMe 1TB"),
+        serial: DiskText::sanitized("SN-0001"),
+        size_bytes: size,
+        logical_sector: 512,
+        physical_sector: 4096,
+        removable,
+        partitions: vec![ExistingPartitionV1 {
+            index: 1,
+            kind: PartitionKind::Basic,
+            start_bytes: 1_048_576,
+            size_bytes: 1_048_576,
+            label: PartitionLabel::sanitized("Data"),
+        }],
+    })
+    .unwrap()
+}
+
+/// A fresh agent nonce.
+pub fn nonce() -> AgentNonce {
+    let mut b = [0u8; 32];
+    usgp_crypto::fill_random(&mut b).unwrap();
+    AgentNonce::from_random_bytes(b)
 }

@@ -12,11 +12,21 @@ mod common;
 #[cfg(test)]
 mod authz_matrix;
 #[cfg(test)]
+mod boot_policy;
+#[cfg(test)]
+mod codes;
+#[cfg(test)]
 mod content_verify;
 #[cfg(test)]
 mod declarations;
 #[cfg(test)]
+mod device_routes_table;
+#[cfg(test)]
+mod device_session;
+#[cfg(test)]
 mod hardening;
+#[cfg(test)]
+mod jobs;
 #[cfg(test)]
 mod limits;
 #[cfg(test)]

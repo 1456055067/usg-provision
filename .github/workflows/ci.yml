@@ -137,9 +137,10 @@ jobs:
           cargo build --workspace --bins --locked
           # Run the artifacts directly (not via cargo run) so a missing
           # runtime library fails here.
-          for b in usgp-preboot-agent usgp-cli; do
-            "target/debug/$b"
-          done
+          # The agent needs a configuration to run; --self-test is its
+          # FIPS-check-only mode (exit 0 only with FIPS active).
+          target/debug/usgp-preboot-agent --self-test
+          target/debug/usgp-cli
           # The relay's and the server's FIPS-check-only mode; with no
           # arguments each prints usage and exits 2, which must not be
           # mistaken for a pass.
@@ -353,7 +354,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -LiteralPath $exe -Destination $stage
           foreach ($d in $dlls) { Copy-Item -LiteralPath $d.FullName -Destination $stage }
-          $msg = & (Join-Path $stage 'usgp-preboot-agent.exe') 2>&1
+          $msg = & (Join-Path $stage 'usgp-preboot-agent.exe') --self-test 2>&1
           $code = $LASTEXITCODE
           Note "agent FIPS start-up check: exit $code $msg"
           if ($code -ne 0) { Fail "agent FIPS start-up check exited $code" }

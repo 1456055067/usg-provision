@@ -15,6 +15,21 @@
 //!   not operator input, so only its length is bounded; anything that
 //!   displays it must escape control characters.
 //!
+//! M3 (plan section 3.1, 3.4, 3.5):
+//!
+//! - [`AgentVersion`]: 1 to 64 bytes of printable ASCII.
+//! - [`DiskText`]: a disk model or serial number as the device reports
+//!   it; 0 to 64 characters of printable ASCII. The agent builds it with
+//!   [`DiskText::sanitized`], which replaces any other character with `?`.
+//! - [`PartitionLabel`]: 1 to 32 Unicode scalar values, no control
+//!   characters ([`PartitionLabel::sanitized`] on the agent).
+//! - [`ItemName`]: a file name or role in progress and failure reports;
+//!   1 to 255 Unicode scalar values, no control characters.
+//! - [`Note`]: an operator note on a code or refusal; 1 to 200 Unicode
+//!   scalar values, no control characters.
+//!
+//! "Printable ASCII" means U+0020 to U+007E.
+//!
 //! "Control character" means a character in the Unicode general category
 //! Cc (`char::is_control`): U+0000 to U+001F and U+007F to U+009F.
 //!
@@ -28,11 +43,17 @@
 // - SPEC: specs/os-images.md#REQ-IMG-022 (refusal reason names the problem)
 // - SPEC: specs/os-images.md#REQ-IMG-033 (file names with spaces)
 // - SPEC: specs/os-images.md#REQ-IMG-041 (edition chosen by index)
+// - SPEC: specs/disk.md#REQ-DISK-001 (model shown, bounded and printable),
+//   #REQ-DISK-016 (only descriptive text, never file content)
+// - SPEC: specs/progress.md#REQ-JOB-003, #REQ-JOB-005 item 2 (file names
+//   or roles in progress and errors)
 
 use std::fmt;
 
 use crate::limits::{
-    MAX_DESCRIPTION_CHARS, MAX_DISPLAY_NAME_CHARS, MAX_FILE_NAME_BYTES, MAX_WIM_TEXT_CHARS,
+    MAX_AGENT_VERSION_BYTES, MAX_DESCRIPTION_CHARS, MAX_DISK_TEXT_CHARS, MAX_DISPLAY_NAME_CHARS,
+    MAX_FILE_NAME_BYTES, MAX_ITEM_NAME_CHARS, MAX_NOTE_CHARS, MAX_PARTITION_LABEL_CHARS,
+    MAX_WIM_TEXT_CHARS,
 };
 
 /// Why a name was rejected. The text is never echoed.
@@ -112,6 +133,28 @@ fn check_file_name(s: &str) -> Result<(), NameError> {
     }
     if s == "." || s == ".." {
         return Err(NameError::Reserved);
+    }
+    Ok(())
+}
+
+const fn is_printable_ascii(c: char) -> bool {
+    matches!(c, ' '..='~')
+}
+
+fn check_ascii(s: &str, min: usize, max: usize) -> Result<(), NameError> {
+    if min > 0 && s.is_empty() {
+        return Err(NameError::Empty);
+    }
+    if let Some(position) = s.chars().position(|c| !is_printable_ascii(c)) {
+        return Err(NameError::InvalidCharacter { position });
+    }
+    // All ASCII now, so bytes and characters agree.
+    if s.len() > max {
+        return Err(NameError::TooLong {
+            len: s.len(),
+            max,
+            unit: "characters",
+        });
     }
     Ok(())
 }
@@ -253,6 +296,75 @@ text_type!(
     |s| check_len(s, MAX_WIM_TEXT_CHARS),
     "WIM edition text (up to 1024 characters)"
 );
+
+text_type!(
+    /// The pre-boot agent's version: 1 to 64 bytes of printable ASCII.
+    AgentVersion,
+    |s| check_ascii(s, 1, MAX_AGENT_VERSION_BYTES),
+    "an agent version (1-64 printable ASCII characters)"
+);
+
+text_type!(
+    /// A disk's model or serial number as the device reports it: 0 to 64
+    /// characters of printable ASCII (plan section 3.1).
+    DiskText,
+    |s| check_ascii(s, 0, MAX_DISK_TEXT_CHARS),
+    "disk text (up to 64 printable ASCII characters)"
+);
+
+text_type!(
+    /// A partition label: 1 to 32 Unicode scalar values, no control
+    /// characters (plan section 3.1).
+    PartitionLabel,
+    |s| check_chars(s, 1, MAX_PARTITION_LABEL_CHARS),
+    "a partition label (1-32 characters, no control characters)"
+);
+
+text_type!(
+    /// A file name or role in a progress or failure report: 1 to 255
+    /// Unicode scalar values, no control characters.
+    ItemName,
+    |s| check_chars(s, 1, MAX_ITEM_NAME_CHARS),
+    "an item name (1-255 characters, no control characters)"
+);
+
+text_type!(
+    /// An operator note on an issued code or a refused session: 1 to 200
+    /// Unicode scalar values, no control characters (plan section 3.8).
+    Note,
+    |s| check_chars(s, 1, MAX_NOTE_CHARS),
+    "a note (1-200 characters, no control characters)"
+);
+
+impl DiskText {
+    /// Builds disk text from what a device reports: each character that
+    /// is not printable ASCII becomes `?`, and only the first 64
+    /// characters are kept (plan section 3.1: "others replaced").
+    #[must_use]
+    pub fn sanitized(raw: &str) -> Self {
+        Self(
+            raw.chars()
+                .map(|c| if is_printable_ascii(c) { c } else { '?' })
+                .take(MAX_DISK_TEXT_CHARS)
+                .collect(),
+        )
+    }
+}
+
+impl PartitionLabel {
+    /// Builds a label from what a device reports: control characters
+    /// become `?`, and only the first 32 characters are kept. An empty
+    /// label is `None`.
+    #[must_use]
+    pub fn sanitized(raw: &str) -> Option<Self> {
+        let s: String = raw
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .take(MAX_PARTITION_LABEL_CHARS)
+            .collect();
+        if s.is_empty() { None } else { Some(Self(s)) }
+    }
+}
 
 /// A 1-based edition (image) index within a WIM file
 /// (`specs/standards/wim.md` §7; REQ-IMG-041). Zero is never an edition.
@@ -425,6 +537,47 @@ mod tests {
             WimText::new("x".repeat(1025)),
             Err(NameError::TooLong { len: 1025, .. })
         ));
+    }
+
+    #[test]
+    fn m3_text_types() {
+        assert!(AgentVersion::new("0.3.0+abc").is_ok());
+        assert_eq!(AgentVersion::new(""), Err(NameError::Empty));
+        assert!(AgentVersion::new("x".repeat(64)).is_ok());
+        assert!(matches!(
+            AgentVersion::new("x".repeat(65)),
+            Err(NameError::TooLong { len: 65, .. })
+        ));
+        assert_eq!(
+            AgentVersion::new("1.0\u{e9}"),
+            Err(NameError::InvalidCharacter { position: 3 })
+        );
+        assert!(DiskText::new("").is_ok());
+        assert!(DiskText::new("Samsung SSD 990 PRO 2TB").is_ok());
+        assert!(DiskText::new("a\tb").is_err());
+        assert!(DiskText::new("x".repeat(65)).is_err());
+        assert!(PartitionLabel::new("Basic data partition").is_ok());
+        assert!(PartitionLabel::new("é".repeat(32)).is_ok());
+        assert!(PartitionLabel::new("é".repeat(33)).is_err());
+        assert!(PartitionLabel::new("").is_err());
+        assert!(ItemName::new("install image.wim").is_ok());
+        assert!(ItemName::new("a\nb").is_err());
+        assert!(Note::new("x".repeat(200)).is_ok());
+        assert!(Note::new("x".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn sanitizers_replace_and_bound() {
+        let d = DiskText::sanitized("Disk\u{0}\u{e9}\u{7f}X");
+        assert_eq!(d.as_str(), "Disk???X");
+        assert!(DiskText::new(d.as_str()).is_ok());
+        let long = DiskText::sanitized(&"é".repeat(100));
+        assert_eq!(long.as_str(), "?".repeat(64));
+        assert_eq!(PartitionLabel::sanitized(""), None);
+        let l = PartitionLabel::sanitized(&format!("Rec\u{1}{}", "é".repeat(40))).unwrap();
+        assert_eq!(l.as_str().chars().count(), 32);
+        assert!(l.as_str().starts_with("Rec?é"));
+        assert!(PartitionLabel::new(l.as_str()).is_ok());
     }
 
     #[test]

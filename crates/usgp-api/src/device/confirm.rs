@@ -1,0 +1,295 @@
+//! `POST /v1/device/session/confirm`: the separate wipe confirmation and
+//! the signed job plan (plan M3 sections 1.1 step 7, 3.1 and 3.2).
+//!
+//! In **one transaction** the server:
+//!
+//! 1. re-checks the session (authorised, not expired), that the request
+//!    repeats the chosen package and disk, and that the package is still
+//!    offered and the disk still large enough;
+//! 2. writes `job.created` and `disk.wipe.authorised` (target `job`, the
+//!    new job id, outcome success: the WU-7 wipe-guard contract);
+//! 3. builds the plan payload, which carries that record's sequence
+//!    number and hash, and stores the job with the payload's SHA-256;
+//! 4. moves the session to `confirmed`.
+//!
+//! Only after the commit is the payload signed and returned, with
+//! `job.plan.issued`. If any audit write fails, the transaction is dropped:
+//! no job, no plan, the session stays authorised, and the answer is 503
+//! `audit_unavailable` (acceptance criterion 3). A wipe never starts
+//! without a durable `disk.wipe.authorised`, since the agent builds its
+//! wipe authorisation only from a verified plan that names the record.
+//!
+//! The plan carries no secret (REQ-TGT-015).
+
+// COMPLIANCE MAPPING:
+// - NIST 800-53: AU-2, AU-3, AU-12, AU-10 (basis) - the wipe authorisation
+//   is recorded before the plan exists; the plan names the record.
+// - NIST 800-53: AU-5 - an audit failure refuses the confirmation.
+// - NIST 800-53: SI-7(6), SC-13 - plan signed with the plan key (ECDSA
+//   P-384, FIPS module), bound to the agent's nonce.
+// - NIST 800-53: SC-23 - plan bound to session, job, nonce, MACs and disk.
+// - NIST 800-53: CM-3 - the destructive change is authorised explicitly,
+//   separately from the disk choice.
+// - SPEC: specs/targeting.md#REQ-TGT-006, #REQ-TGT-011, #REQ-TGT-015;
+//   specs/disk.md#REQ-DISK-006, #REQ-DISK-015; specs/progress.md
+//   #REQ-JOB-009 (previous job), #REQ-JOB-012
+// - Decision 0018 items 7 and 10
+
+use hyper::body::Incoming;
+use hyper::{Request, Response, StatusCode};
+use usgp_audit::Detail;
+use usgp_db::{ChosenPackage, DbError, NewJob, RepoTx, Store};
+use usgp_proto::device::{ConfirmV1, ConfirmedV1, SessionState};
+use usgp_proto::job_plan::{
+    LayoutPolicyV1, PlanDeviceV1, PlanImageV1, PlanPackageV1, PlanStepV1, PlanWipeV1,
+    RetryPolicyV1, SCHEMA_V1, WipeScope,
+};
+use usgp_proto::{JobId, JobPlanV1, PayloadType, PlanDiskV1, Step, codes};
+
+use super::auth::{DeviceCtx, require};
+use super::handlers::lock_live;
+use super::offer::offered;
+use crate::body::ApiBody;
+use crate::context::Api;
+use crate::error::ApiError;
+use crate::handlers::auth_codes::{keys_unavailable, random};
+use crate::handlers::sessions::macs_text;
+use crate::handlers::{json_response, parse_json, read_body};
+use crate::manifest::envelope;
+
+/// The event the wipe guard requires (WU-7 contract).
+pub const WIPE_AUTHORISED: &str = "disk.wipe.authorised";
+
+fn mismatch(what: &str) -> ApiError {
+    ApiError::conflict(
+        codes::WRONG_STATE,
+        format!("the confirmation does not match the chosen {what}; choose again"),
+    )
+}
+
+/// The step list with the configured timeouts.
+fn steps(j: &crate::device::JobSettings) -> Vec<PlanStepV1> {
+    let t = [
+        j.timeout_verify_s,
+        j.timeout_disk_s,
+        j.timeout_apply_s,
+        j.timeout_boot_s,
+        j.timeout_report_s,
+    ];
+    Step::ALL
+        .iter()
+        .zip(t)
+        .map(|(s, timeout_s)| PlanStepV1 {
+            step: *s,
+            kind: s.kind(),
+            timeout_s,
+        })
+        .collect()
+}
+
+/// `POST /v1/device/session/confirm`.
+pub(crate) async fn confirm<S: Store + 'static>(
+    api: &Api<S>,
+    ctx: &DeviceCtx,
+    req: Request<Incoming>,
+) -> Result<Response<ApiBody>, ApiError> {
+    let s = ctx.session()?;
+    require(s, &[SessionState::Authorised])?;
+    let keys = api.provisioning_keys().ok_or_else(keys_unavailable)?;
+    let c = &api.config().device;
+    let body = read_body(req, c.max_json_bytes).await?;
+    let confirm = parse_json!(ConfirmV1, &body, c.max_json_bytes)?;
+    let at = api.now()?;
+    let job_id = JobId::from_random_bytes(random::<16>()?);
+
+    let mut tx = api.store().begin().await?;
+    let cur = lock_live(api, &mut tx, s.id, &[SessionState::Authorised]).await?;
+    let (Some(chosen), Some(disk)) = (cur.chosen_package, cur.chosen_disk.clone()) else {
+        return Err(ApiError::conflict(
+            codes::WRONG_STATE,
+            "choose a package and a disk before confirming the wipe",
+        ));
+    };
+    if (confirm.package_id, confirm.revision) != (chosen.id, chosen.revision) {
+        return Err(mismatch("package"));
+    }
+    if confirm.disk_token != disk.disk_token() {
+        return Err(mismatch("disk"));
+    }
+    let Some(bs) = cur.boot_service_id else {
+        return Err(ApiError::conflict(
+            codes::WRONG_STATE,
+            "the device has no boot service",
+        ));
+    };
+    let offers = offered(api, &mut tx, &cur).await?.unwrap_or_default();
+    let Some(o) = offers
+        .into_iter()
+        .find(|o| o.view.package_id == chosen.id && o.view.revision == chosen.revision)
+    else {
+        return Err(ApiError::unprocessable(
+            codes::PACKAGE_NOT_OFFERED,
+            "the chosen package is no longer offered to this device",
+        ));
+    };
+    if disk.size_bytes() < o.view.required_disk_bytes {
+        return Err(ApiError::unprocessable(
+            codes::DISK_TOO_SMALL,
+            "the chosen disk is smaller than the package needs",
+        ));
+    }
+    let previous = tx.previous_failed_job(&cur.macs).await?;
+    let disk_detail = || {
+        Detail::new()
+            .with("session_id", &cur.id.to_string())
+            .with("disk_token", &disk.disk_token().to_string())
+            .with("bus", disk.bus().as_str())
+            .with("model", disk.model().as_str())
+            .with("serial", disk.serial().as_str())
+            .with("size_bytes", &disk.size_bytes())
+            .with("existing_partitions", &disk.partitions().len())
+            .with("package_id", &chosen.id.to_string())
+            .with("revision", &chosen.revision)
+            .with("macs", &macs_text(&cur))
+    };
+
+    // 1. job.created, 2. disk.wipe.authorised: both before the job row.
+    let created = ctx
+        .ok("job.created")
+        .target("job", &job_id.to_string())
+        .detail(disk_detail().with(
+            "previous_job_id",
+            &previous.map_or_else(|| "none".to_owned(), |p| p.to_string()),
+        ));
+    let r_created = api.append(&mut tx, &created).await?;
+    let wipe = ctx
+        .ok(WIPE_AUTHORISED)
+        .target("job", &job_id.to_string())
+        .initiated_by(r_created.seq)
+        .detail(disk_detail().with("scope", WipeScope::TablesAndVolumeHeads1Mib.as_str()));
+    let r_wipe = api.append(&mut tx, &wipe).await?;
+
+    // 3. The plan payload names the wipe record.
+    let plan_key_id = keys.plan_key_id();
+    let j = &c.jobs;
+    let plan = JobPlanV1 {
+        schema: SCHEMA_V1,
+        job_id,
+        session_id: cur.id,
+        boot_service_id: bs,
+        issued_at_us: at,
+        key_id: plan_key_id.0,
+        agent_nonce: confirm.agent_nonce,
+        device: PlanDeviceV1 {
+            macs: cur.macs.clone(),
+        },
+        package: PlanPackageV1 {
+            id: chosen.id,
+            revision: chosen.revision,
+            manifest_sha256: o.package_manifest_sha256,
+        },
+        image: PlanImageV1 {
+            content_sha256: o.image.sha256,
+            size: o.image.size,
+            content_manifest_sha256: usgp_crypto::sha256(&o.stored_content_manifest.payload),
+            edition_index: o.edition_index,
+            edition_name: o.edition_name.clone(),
+            total_bytes: o.total_bytes,
+        },
+        disk: PlanDiskV1::from(&disk),
+        layout_policy: LayoutPolicyV1::STANDARD,
+        wipe: PlanWipeV1 {
+            audit_seq: r_wipe.seq,
+            record_hash: r_wipe.record_hash,
+            scope: WipeScope::TablesAndVolumeHeads1Mib,
+        },
+        steps: steps(j),
+        retry: RetryPolicyV1 {
+            attempts: j.retry_attempts,
+            base_ms: j.retry_base_ms,
+            max_ms: j.retry_max_ms,
+        },
+        stall_timeout_s: j.stall_timeout_s,
+        report_interval_s: j.report_interval_s,
+    };
+    let payload = plan.to_payload().map_err(ApiError::internal_error)?;
+    let plan_sha256 = usgp_crypto::sha256(&payload);
+    let new = NewJob {
+        id: job_id,
+        session_id: cur.id,
+        boot_service_id: bs,
+        package: ChosenPackage {
+            id: chosen.id,
+            revision: chosen.revision,
+        },
+        image_content_id: o.image.id,
+        edition_index: o.edition_index,
+        disk: disk.clone(),
+        macs: cur.macs.clone(),
+        previous_job_id: previous,
+        wipe_audit_seq: r_wipe.seq,
+        wipe_record_hash: r_wipe.record_hash,
+        plan_sha256,
+        plan_key_id,
+        bytes_total: None,
+        started_at: at,
+    };
+    match tx.insert_job(&new).await {
+        Ok(()) => {}
+        Err(DbError::Conflict { .. }) => {
+            return Err(ApiError::conflict(
+                codes::JOB_STARTED,
+                "a job already exists for this session",
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    // 4. The session is confirmed: no cancel from here (REQ-TGT-011).
+    match tx
+        .set_device_session_state(
+            cur.id,
+            &[SessionState::Authorised],
+            SessionState::Confirmed,
+            None,
+            at,
+        )
+        .await
+    {
+        Ok(()) => {}
+        Err(DbError::Conflict { .. }) => {
+            return Err(ApiError::conflict(
+                codes::WRONG_STATE,
+                "the session can no longer be confirmed",
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    // The wipe guard checks the record at commit: a job without its
+    // durable `disk.wipe.authorised` cannot commit.
+    api.commit(tx, &[r_created, r_wipe.clone()]).await?;
+
+    // After the commit: sign and return the plan.
+    let signed = keys.sign_plan(payload).map_err(ApiError::internal_error)?;
+    let plan_env = envelope(PayloadType::JobPlanV1, &signed).map_err(ApiError::internal_error)?;
+    let content_env = envelope(PayloadType::ContentManifestV1, &o.stored_content_manifest)
+        .map_err(ApiError::internal_error)?;
+    let issued = ctx
+        .ok("job.plan.issued")
+        .target("job", &job_id.to_string())
+        .initiated_by(r_wipe.seq)
+        .detail(
+            Detail::new()
+                .with("plan_sha256", &plan_sha256)
+                .with("key_id", &plan_key_id)
+                .with("wipe_audit_seq", &r_wipe.seq),
+        );
+    // If the issue cannot be recorded the plan is withheld (fail closed):
+    // the job is reported lost later and nothing is written to the disk.
+    api.record(&issued).await?;
+    let out = ConfirmedV1 {
+        job_id,
+        plan: plan_env,
+        content_manifest: content_env,
+    };
+    json_response!(StatusCode::CREATED, &out)
+}

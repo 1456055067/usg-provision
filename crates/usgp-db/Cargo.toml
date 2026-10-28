@@ -18,6 +18,9 @@ usgp-common.workspace = true
 tokio-postgres.workspace = true
 deadpool-postgres.workspace = true
 uuid.workspace = true
+# M3 (plan WU-7): JSON columns (disk descriptor, layout, failure).
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

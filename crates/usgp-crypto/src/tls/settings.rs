@@ -87,6 +87,31 @@ impl fmt::Debug for ServerTlsSettings {
     }
 }
 
+/// Inputs for [`crate::tls::DeviceServerTls`] (the device listener).
+///
+/// There is deliberately no client trust anchor or CRL field: the device
+/// listener requests no client certificate (decision 0020), and this type
+/// cannot be passed to the operator constructor
+/// [`crate::tls::ServerTls::new`].
+pub struct DeviceServerTlsSettings {
+    /// Server certificate chain, PEM, end entity first.
+    pub cert_chain_pem: Vec<u8>,
+    /// Server private key, PKCS#8 `PRIVATE KEY` PEM.
+    pub private_key_pem: Zeroizing<Vec<u8>>,
+    /// Lowest accepted TLS version.
+    pub min_version: TlsMinVersion,
+}
+
+impl fmt::Debug for DeviceServerTlsSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceServerTlsSettings")
+            .field("cert_chain_pem_len", &self.cert_chain_pem.len())
+            .field("private_key_pem", &"<redacted>")
+            .field("min_version", &self.min_version)
+            .finish()
+    }
+}
+
 /// Inputs for [`crate::tls::ClientTls`].
 pub struct ClientTlsSettings {
     /// Trust anchors for the server certificate, PEM. Required.
@@ -157,7 +182,14 @@ mod tests {
             min_version: TlsMinVersion::Tls13,
             alpn: ClientAlpn::Http11,
         };
-        for text in [format!("{s:?}"), format!("{c:?}")] {
+        let d = DeviceServerTlsSettings {
+            cert_chain_pem: vec![],
+            private_key_pem: Zeroizing::new(
+                b"-----BEGIN PRIVATE KEY-----\nSECRETSECRET\n".to_vec(),
+            ),
+            min_version: TlsMinVersion::Tls12,
+        };
+        for text in [format!("{s:?}"), format!("{c:?}"), format!("{d:?}")] {
             assert!(!text.contains("SECRET"), "{text}");
             assert!(!text.contains("BEGIN"), "{text}");
             assert!(text.contains("<redacted>"), "{text}");

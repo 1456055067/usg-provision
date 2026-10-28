@@ -1,0 +1,95 @@
+# Plan M2 section 3.5 example configuration plus the M3 section 3.9
+# additions, every key written out (the device listener enabled).
+# Parsed by tests/config_m3.rs (no file is opened: the paths need not exist).
+schema_version = 1
+node_name = "ctl-01"
+
+[api]
+listen = "127.0.0.1:8443"
+max_connections = 64
+header_timeout_s = 10
+idle_timeout_s = 120
+max_json_bytes = 65536
+
+[tls]
+cert_chain = "/etc/usgp-server/tls/server.pem"
+private_key = "/etc/usgp-server/tls/server.key"
+min_version = "1.2"
+client_trust_anchors = "/etc/usgp-server/tls/operator-cas.pem"
+client_crls = ["/etc/usgp-server/tls/crl/agency.crl"]
+crl_reload_s = 300
+acceptable_policy_oids = []
+
+[database]
+host = "db.internal"
+port = 5432
+dbname = "usgp"
+user = "usgp_app"
+server_ca = "/etc/usgp-server/db/ca.pem"
+server_name = "db.internal"
+client_cert = "/etc/usgp-server/db/client.pem"
+client_key = "/etc/usgp-server/db/client.key"
+pool_size = 8
+connect_timeout_s = 10
+
+[content]
+root = "/var/lib/usgp-server/content"
+max_upload_bytes = 34359738368
+max_open_uploads = 4
+max_open_uploads_per_operator = 2
+upload_idle_timeout_s = 300
+upload_session_ttl_s = 86400
+check_concurrency = 1
+check_stall_timeout_s = 600
+
+[signing]
+content_key = "/etc/usgp-server/keys/content.p8"
+audit_key = "/etc/usgp-server/keys/audit.p8"
+plan_key = "/etc/usgp-server/keys/plan.p8"
+boot_policy_key = "/etc/usgp-server/keys/boot-policy.p8"
+
+[audit]
+checkpoint_every_records = 100
+checkpoint_every_s = 60
+unauth_records_per_source_per_min = 10
+
+[wim]
+
+[log]
+level = "info"
+
+[device_api]
+enabled = true
+listen = "192.0.2.10:8444"
+cert_chain = "/etc/usgp-server/tls/device.pem"
+private_key = "/etc/usgp-server/tls/device.key"
+min_version = "1.2"
+max_connections = 256
+header_timeout_s = 10
+idle_timeout_s = 120
+max_json_bytes = 65536
+pending_session_ttl_s = 3600
+max_pending_sessions = 64
+max_pending_sessions_per_ip = 4
+session_opens_per_ip_per_min = 10
+code_attempts_per_session = 5
+code_attempts_per_ip_per_min = 10
+poll_ms = 2000
+progress_min_interval_ms = 2000
+
+[codes]
+hmac_key = "/etc/usgp-server/keys/code-hmac.key"
+default_ttl_s = 900
+max_ttl_s = 3600
+
+[jobs]
+lost_after_s = 900
+retry_attempts = 5
+retry_base_ms = 2000
+retry_max_ms = 60000
+stall_timeout_s = 1800
+timeout_verify_s = 21600
+timeout_disk_s = 1800
+timeout_apply_s = 21600
+timeout_boot_s = 1800
+timeout_report_s = 600

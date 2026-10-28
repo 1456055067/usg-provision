@@ -128,6 +128,7 @@ mod tls {
             );
             assert!(s.header("host").unwrap().starts_with("127.0.0.1:"));
             assert_eq!(s.method, "GET");
+            assert_eq!(s.query, None);
         }
     }
 

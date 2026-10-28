@@ -15,6 +15,10 @@ pub mod check;
 pub mod header;
 pub mod integrity;
 pub mod lookup;
+pub mod metadata;
+pub mod names;
+pub mod remote;
+pub mod reparse;
 pub mod reshdr;
 pub(crate) mod resource;
 pub(crate) mod source;
@@ -22,5 +26,6 @@ pub mod xml;
 
 pub use check::{EditionInfo, WimSummary, check_pe, check_wim};
 pub use header::Compression;
+pub use metadata::{ImageTree, MetadataError, MetadataLimits, parse_metadata};
 pub use source::{NoProgress, Progress};
 pub use xml::{WimXmlImage, XmlLeaf};

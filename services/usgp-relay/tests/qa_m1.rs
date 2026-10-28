@@ -193,7 +193,17 @@ mod qa {
         c: &Arc<ContentStore>,
         net: &Arc<MemNet>,
     ) -> Arc<TftpListener<MemFactory>> {
-        let cfg = config(s);
+        tftp_listener_with(s, c, net, |_| {})
+    }
+
+    fn tftp_listener_with(
+        s: &Scratch,
+        c: &Arc<ContentStore>,
+        net: &Arc<MemNet>,
+        tweak: impl FnOnce(&mut usgp_relay::config::RelayConfig),
+    ) -> Arc<TftpListener<MemFactory>> {
+        let mut cfg = config(s);
+        tweak(&mut cfg);
         let shared = TftpShared::new(
             &cfg.limits,
             Arc::new(Mutex::new(Counters::default())),
@@ -819,8 +829,10 @@ mod qa {
                 1,
                 "not_published",
             ),
+            // M3: names match case-insensitively, so the M1 upper-case case
+            // is now served; a near miss is still refused.
             (
-                rrq(b"USGP-TEST-PAYLOAD.EFI", b"octet", &[]),
+                rrq(b"USGP-TEST-PAYLOAD.EFX", b"octet", &[]),
                 1,
                 "not_published",
             ),
@@ -887,7 +899,8 @@ mod qa {
         assert!(cap.named("relay.state.changed").is_empty());
     }
 
-    /// REQ-BOOT-035 at the relay with negotiation: a file needing 65536
+    /// REQ-BOOT-035 at the relay with negotiation: with `block_wrap =
+    /// "off"` (M1 behaviour; the M3 default wraps), a file needing 65536
     /// blocks at the 512 default, requested with tsize, gets ERROR 3 as
     /// the very first packet (no OACK, no DATA), is audited, and does not
     /// mark content missing.
@@ -899,7 +912,9 @@ mod qa {
         s.publish(&[(PROGRAM, &data)]);
         let c_store = content(&config(&s)).await;
         let net = MemNet::new();
-        let listener = tftp_listener(&s, &c_store, &net);
+        let listener = tftp_listener_with(&s, &c_store, &net, |cfg| {
+            cfg.tftp.block_wrap = usgp_tftp::BlockWrap::Off;
+        });
         cap.clear();
         let c = net.bind(client_ip(80));
         listener.handle_request(

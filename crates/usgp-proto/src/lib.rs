@@ -8,6 +8,11 @@
 //!   ([`status`]), reason codes ([`error_code`]), the signed envelope
 //!   ([`envelope`]), and the content and package manifests
 //!   ([`content_manifest`], [`package_manifest`]).
+//! - M3 (plan WU-2): the device session protocol ([`device`]), disk
+//!   descriptors and layout reports ([`disk`]), the signed job plan
+//!   ([`job_plan`]), job states and progress reports ([`progress`]), the
+//!   signed boot-policy list ([`boot_policy`]), and the operator API
+//!   additions ([`ops`]).
 //!
 //! This crate does no cryptography and no I/O. See docs/ARCHITECTURE.md.
 
@@ -21,19 +26,28 @@ mod macros;
 pub mod api;
 pub mod boot_file_name;
 pub mod boot_manifest;
+pub mod boot_policy;
 pub mod content_manifest;
+pub mod device;
+pub mod disk;
 pub mod envelope;
 pub mod error_code;
 pub mod facts;
 pub mod ids;
+pub mod job_plan;
 pub mod limits;
 pub mod names;
+pub mod ops;
 pub mod package_manifest;
+pub mod progress;
 pub mod status;
 
 pub use boot_file_name::{BootFileName, BootFileNameError};
 pub use boot_manifest::{BootManifest, DigestName, ManifestEntry, ManifestError};
+pub use boot_policy::{BootPolicyError, BootPolicyV1, BootStopEntryV1};
 pub use content_manifest::{ContentManifestV1, ManifestEdition, WimSummaryV1};
+pub use device::{AgentNonce, AuthCode, DisplayCode, MacAddress, MacList, SessionToken};
+pub use disk::{DiskDescriptorV1, DiskGuid, DiskToken, LayoutReportV1, PlanDiskV1};
 pub use envelope::{
     EnvelopeError, PayloadType, SignatureAlg, SignatureV1, SignatureVerifier, SignedEnvelopeV1,
     VerifiedPayload, signing_input,
@@ -43,15 +57,24 @@ pub use facts::{
     Architecture, Edition, EditionFacts, Fact, FactSource, KitVersion, KitVersionError, Release,
     SupportState,
 };
-pub use ids::{ContentId, IdError, OperatorId, PackageId, UnixMicros, UploadId};
+pub use ids::{
+    AuthCodeId, BootServiceId, BootStopId, ContentId, IdError, JobId, OperatorId, PackageId,
+    SessionId, UnixMicros, UploadId,
+};
+pub use job_plan::{JobPlanV1, PlanError, PlanExpectation, VerifiedJobPlan};
 pub use names::{
-    Description, DisplayName, EditionIndex, EditionIndexError, FileName, NameError, WimText,
+    AgentVersion, Description, DiskText, DisplayName, EditionIndex, EditionIndexError, FileName,
+    ItemName, NameError, Note, PartitionLabel, WimText,
 };
 pub use package_manifest::{PackageImageV1, PackageManifestV1, PackagePeV1};
+pub use progress::{
+    FailureCategory, FailureV1, JobState, ProgressAckV1, ProgressEvent, ProgressV1, Step, StepKind,
+    StepState,
+};
 pub use status::{ContentKind, ContentState, PackageStatus, UploadState, WimCompression};
 
-/// Errors from building, parsing or opening a signed manifest (content or
-/// package).
+/// Errors from building, parsing or opening a signed payload (content or
+/// package manifest, job plan, boot-policy list).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SignedManifestError {

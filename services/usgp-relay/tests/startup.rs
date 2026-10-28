@@ -306,6 +306,74 @@ mod startup {
         assert!(text(&out.stdout).contains("suppression entries: 1"));
     }
 
+    /// M3: with `[server_feed]`, `--check-config` loads the feed
+    /// material (no network) and reports the boot-policy state; a
+    /// world-readable relay key refuses (exit 78). A `[pe_kit]` is listed
+    /// with the files.
+    #[test]
+    fn check_config_with_feed_and_kit() {
+        use usgp_crypto::test_pki::TestPki;
+
+        let s = Scratch::new("cc-feed");
+        let files: Vec<(&str, Vec<u8>)> =
+            ["bootmgfw.efi", "Boot/BCD", "Boot/boot.sdi", "Boot/boot.wim"]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (*n, bytes(100 + i, 7)))
+                .collect();
+        let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+        s.publish(&refs);
+        let mut manifest = std::fs::read_to_string(s.manifest_path()).unwrap();
+        manifest.push_str(&format!(
+            "\n[pe_kit]\nboot_program = \"bootmgfw.efi\"\nbcd = \"Boot/BCD\"\n\
+             sdi = \"Boot/boot.sdi\"\nwim = \"Boot/boot.wim\"\npe_content_sha256 = \"{}\"\n",
+            usgp_crypto::sha256(&files[3].1).to_hex()
+        ));
+        std::fs::write(s.manifest_path(), manifest).unwrap();
+
+        let pki = TestPki::generate().unwrap();
+        let key = usgp_crypto::SigningKey::generate().unwrap();
+        let dir = s.dir.join("feed");
+        std::fs::create_dir_all(&dir).unwrap();
+        set_mode(&dir, 0o755);
+        let put = |n: &str, b: &[u8], m: u32| {
+            std::fs::write(dir.join(n), b).unwrap();
+            set_mode(&dir.join(n), m);
+        };
+        put("ca.pem", pki.root.cert_pem().unwrap().as_bytes(), 0o644);
+        put("relay.pem", &pki.client.chain_pem(), 0o644);
+        put("relay.key", &pki.client.key_pem().unwrap(), 0o600);
+        put(
+            "policy.pem",
+            key.verifying_key().to_spki_pem().unwrap().as_bytes(),
+            0o644,
+        );
+        let extra = format!(
+            "[server_feed]\nenabled = true\nurl = \"https://127.0.0.1:9\"\n\
+             server_name = \"localhost\"\n\
+             trust_anchors = \"{d}/ca.pem\"\nclient_cert = \"{d}/relay.pem\"\n\
+             client_key = \"{d}/relay.key\"\nboot_policy_key_pub = \"{d}/policy.pem\"\n\
+             boot_service_id = \"6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b\"\n",
+            d = dir.display()
+        );
+        let p = write_config_toml(&s, &extra);
+        let text_p = std::fs::read_to_string(&p)
+            .unwrap()
+            .replace(PROGRAM, "bootmgfw.efi");
+        std::fs::write(&p, text_p).unwrap();
+        set_mode(&p, 0o644);
+        let out = relay_path(&["--check-config"], &p);
+        let stdout = text(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{stdout} {}", text(&out.stderr));
+        assert!(stdout.contains("boot policy: awaiting"), "{stdout}");
+        assert!(stdout.contains("file [pe_kit]: verified"), "{stdout}");
+
+        set_mode(&dir.join("relay.key"), 0o644);
+        let out = relay_path(&["--check-config"], &p);
+        assert_eq!(out.status.code(), Some(78), "{}", text(&out.stderr));
+        assert!(text(&out.stderr).contains("readable by others"));
+    }
+
     #[test]
     fn run_with_invalid_config_audits_field() {
         let s = Scratch::new("run-invalid");

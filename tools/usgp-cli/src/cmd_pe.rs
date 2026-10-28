@@ -115,7 +115,8 @@ pub fn list<T: Transport>(api: &mut ApiClient<T>, out: &mut dyn Write) -> Result
     Ok(())
 }
 
-fn get<T: Transport>(
+/// GET one PE kit and check the server answered for that id.
+pub(crate) fn get<T: Transport>(
     api: &mut ApiClient<T>,
     id: ContentId,
 ) -> Result<(PeView, Option<String>), CmdError> {
@@ -181,7 +182,7 @@ pub fn delete<T: Transport>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::client::Method;
     use crate::client::fake::{FakeTransport, Scripted};

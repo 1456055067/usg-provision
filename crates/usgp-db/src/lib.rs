@@ -16,6 +16,13 @@
 //!   production.
 //! - [`model`]: row types.
 //!
+//! M3 (plan WU-7, migration 0004): boot services and their package
+//! assignments, operator codes (stored only as HMAC), device sessions,
+//! jobs and job steps, boot stops and boot-policy generations. A job
+//! commits only with the `disk.wipe.authorised` audit record it names
+//! (the wipe guard, REQ-DISK-006); used codes and finished jobs cannot be
+//! changed back (triggers).
+//!
 //! The audit tables are append-only for the application role: privileges
 //! (migration 0002) and triggers (migration 0001) refuse UPDATE, DELETE
 //! and TRUNCATE; the hash chain in `usgp-audit` detects what a privileged
@@ -27,7 +34,10 @@
 // - NIST 800-53: AC-6 (application role), CM-3 (migrations), SI-10
 // - SPEC: specs/operator-access.md#REQ-AUD-005, #REQ-AUD-006;
 //   specs/os-images.md#REQ-IMG-020
-// - Decisions 0008, 0012, 0013, 0015
+// - SPEC: specs/disk.md#REQ-DISK-006; specs/targeting.md#REQ-TGT-013,
+//   #REQ-TGT-014; specs/progress.md#REQ-JOB-012;
+//   specs/boot-network.md#REQ-BOOT-067
+// - Decisions 0008, 0012, 0013, 0015, 0016, 0018, 0020, 0021
 
 // POAM: `postgres-protocol` links SCRAM-SHA-256/MD5 password code built on
 // non-FIPS RustCrypto primitives. It is unreachable because no password is
@@ -50,9 +60,10 @@ pub use error::{ConnectFailure, DbError};
 pub use memory::{MemoryStore, MemoryTx};
 pub use migrate::{MigrateReport, MigrationError, SCHEMA_VERSION};
 pub use model::{
-    Content, Edition, EditionDeclaration, NewContent, NewEdition, Operator, OperatorRole,
-    OperatorStatus, Package, PackageRef, PeDeclaration, ReadyContent, Reason, StoredManifest,
-    Upload, WimFacts,
+    AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
+    DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
+    NewDeviceSession, NewEdition, NewJob, Operator, OperatorRole, OperatorStatus, Package,
+    PackageRef, PeDeclaration, ReadyContent, Reason, SessionAuth, StoredManifest, Upload, WimFacts,
 };
 pub use pool::{PgStore, PgTx};
 pub use repo::{RepoTx, Store};

@@ -58,6 +58,8 @@ impl Route {
 pub struct Seen {
     pub method: String,
     pub path: String,
+    /// The query string, if any (routes match on the path alone).
+    pub query: Option<String>,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     /// Hex SHA-256 of the client certificate, if one was presented.
@@ -92,6 +94,7 @@ async fn handle(
     log.lock().unwrap().push(Seen {
         method: method.clone(),
         path: path.clone(),
+        query: parts.uri.query().map(str::to_owned),
         headers: parts
             .headers
             .iter()

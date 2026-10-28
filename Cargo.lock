@@ -1392,6 +1392,7 @@ dependencies = [
  "usgp-db",
  "usgp-image",
  "usgp-proto",
+ "zeroize",
 ]
 
 [[package]]
@@ -1462,6 +1463,8 @@ name = "usgp-db"
 version = "0.0.0"
 dependencies = [
  "deadpool-postgres",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -1477,7 +1480,10 @@ dependencies = [
 name = "usgp-deploy"
 version = "0.0.0"
 dependencies = [
+ "serde_json",
+ "thiserror",
  "usgp-common",
+ "usgp-crypto",
  "usgp-disk",
  "usgp-image",
  "usgp-proto",
@@ -1495,6 +1501,7 @@ dependencies = [
 name = "usgp-disk"
 version = "0.0.0"
 dependencies = [
+ "thiserror",
  "usgp-common",
 ]
 
@@ -1519,10 +1526,22 @@ dependencies = [
 name = "usgp-preboot-agent"
 version = "0.0.0"
 dependencies = [
+ "httparse",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "usgp-api",
+ "usgp-audit",
  "usgp-common",
  "usgp-crypto",
+ "usgp-db",
  "usgp-deploy",
+ "usgp-disk",
+ "usgp-image",
  "usgp-proto",
+ "usgp-winapi",
+ "zeroize",
 ]
 
 [[package]]
@@ -1536,12 +1555,16 @@ dependencies = [
  "toml",
  "usgp-common",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "usgp-relay"
 version = "0.0.0"
 dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "serde",
  "socket2",
@@ -1555,6 +1578,7 @@ dependencies = [
  "usgp-httpboot",
  "usgp-proto",
  "usgp-tftp",
+ "zeroize",
 ]
 
 [[package]]
@@ -1564,6 +1588,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "toml",
@@ -1589,6 +1614,8 @@ dependencies = [
 name = "usgp-winapi"
 version = "0.0.0"
 dependencies = [
+ "usgp-crypto",
+ "usgp-image",
  "windows-sys 0.61.2",
 ]
 

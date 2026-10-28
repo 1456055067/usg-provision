@@ -53,6 +53,11 @@ pub enum CryptoError {
     #[error("signature verification failed")]
     SignatureInvalid,
 
+    /// An HMAC tag did not verify, or a stored tag has the wrong length.
+    /// No detail is given on purpose.
+    #[error("message authentication code verification failed")]
+    MacInvalid,
+
     /// A signed-message payload type is not acceptable.
     #[error("invalid payload type: {reason}")]
     PayloadType {

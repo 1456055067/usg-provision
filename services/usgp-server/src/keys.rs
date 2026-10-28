@@ -1,8 +1,14 @@
-//! Signing keys: generation (`usgp-server keygen`) and loading (plan M2
-//! section 5.2).
+//! Signing keys and the code HMAC key: generation (`usgp-server keygen`)
+//! and loading (plan M2 section 5.2; M3 sections 3.9 and 5).
 //!
-//! - Keys are ECDSA P-384, generated inside the FIPS module
+//! - Signing keys (content, audit, and in M3 plan and boot-policy) are
+//!   ECDSA P-384, generated inside the FIPS module
 //!   ([`SigningKey::generate`]).
+//! - The code HMAC key (`--purpose code-hmac`) is exactly 32 raw bytes
+//!   from the module's DRBG ([`HmacKey::generate_key_bytes`]), written to
+//!   one file with no encoding and no newline; it has no public half and
+//!   no key id. It is loaded with the same private-key rules and must be
+//!   exactly 32 bytes ([`HmacKey::from_key_file`]).
 //! - The private key is written as PKCS#8 PEM to a **new** file (`O_CREAT
 //!   | O_EXCL`, so an existing file or a symbolic link at that path is
 //!   refused), mode 0600, owned by the invoking administrator. The public
@@ -38,8 +44,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use usgp_common::config::{ConfigError, TrustPolicy};
+use usgp_crypto::hmac::HMAC_KEY_FILE_LEN;
 use usgp_crypto::pem::{MAX_KEY_PEM_BYTES, MAX_PUBLIC_KEY_PEM_BYTES};
-use usgp_crypto::{CryptoError, KeyId, SigningKey, VerifyingKey};
+use usgp_crypto::{CryptoError, HmacKey, KeyId, SigningKey, VerifyingKey};
+use zeroize::Zeroizing;
 
 use crate::cli::KeyPurpose;
 use crate::files::{PrivateKeyFileError, read_private_key};
@@ -132,6 +140,30 @@ pub fn load_verifying_key(
     })
 }
 
+/// Loads the code HMAC key: a trusted file under the private-key mode
+/// rule, exactly 32 raw bytes (a longer file is refused before it is
+/// read in full). The bytes are wiped once the key is built.
+///
+/// # Errors
+///
+/// [`KeyLoadError`].
+pub fn load_hmac_key(
+    key: &str,
+    path: &Path,
+    policy: &TrustPolicy,
+) -> Result<HmacKey, KeyLoadError> {
+    let bytes = read_private_key(path, wide(HMAC_KEY_FILE_LEN), policy).map_err(|source| {
+        KeyLoadError::KeyFile {
+            key: key.to_owned(),
+            source,
+        }
+    })?;
+    HmacKey::from_key_file(&bytes).map_err(|source| KeyLoadError::Key {
+        key: key.to_owned(),
+        source,
+    })
+}
+
 fn wide(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
@@ -142,6 +174,10 @@ pub enum KeygenError {
     /// Generation or encoding in the module failed.
     #[error("key generation failed: {0}")]
     Crypto(#[from] CryptoError),
+    /// `--out-pub` was missing for a signing key, or given for the code
+    /// HMAC key (which has no public half).
+    #[error("--out-pub is required for a signing key and refused for code-hmac")]
+    PublicFile,
     /// An output file could not be created (it exists, is a link, or the
     /// directory is not writable) or written.
     #[error("cannot write {}: {kind}", path.display())]
@@ -158,17 +194,51 @@ pub enum KeygenError {
 pub struct Generated {
     /// Purpose label.
     pub purpose: KeyPurpose,
-    /// Key id (SHA-256 of the SPKI DER).
-    pub key_id: KeyId,
+    /// Key id (SHA-256 of the SPKI DER); `None` for the code HMAC key,
+    /// which has no public half.
+    pub key_id: Option<KeyId>,
 }
 
-/// Generates a key and writes both files. Neither file may exist; if any
-/// step fails, files this call created are removed.
+/// Generates a key and writes its files. For a signing purpose `out_pub`
+/// is required (PKCS#8 private key 0600, SPKI public key 0644); for
+/// `code-hmac` it must be `None` (32 raw bytes, 0600). No file may exist;
+/// if any step fails, files this call created are removed.
 ///
 /// # Errors
 ///
 /// [`KeygenError`].
 pub fn keygen(
+    purpose: KeyPurpose,
+    out_key: &Path,
+    out_pub: Option<&Path>,
+) -> Result<Generated, KeygenError> {
+    match (purpose.is_signing(), out_pub) {
+        (true, Some(p)) => keygen_signing(purpose, out_key, p),
+        (false, None) => keygen_hmac(purpose, out_key),
+        // The parser refuses this already; the library refuses it too, so
+        // it never writes a half-formed key pair.
+        _ => Err(KeygenError::PublicFile),
+    }
+}
+
+/// The code HMAC key: 32 DRBG bytes, one file, mode 0600.
+fn keygen_hmac(purpose: KeyPurpose, out_key: &Path) -> Result<Generated, KeygenError> {
+    let bytes: Zeroizing<Vec<u8>> = HmacKey::generate_key_bytes()?;
+    // Prove the bytes load as the server will load them.
+    HmacKey::from_key_file(&bytes)?;
+    let mut f = create_new(out_key, 0o600)?;
+    if let Err(e) = write_all(&mut f, out_key, &bytes) {
+        drop(f);
+        let _ = std::fs::remove_file(out_key);
+        return Err(e);
+    }
+    Ok(Generated {
+        purpose,
+        key_id: None,
+    })
+}
+
+fn keygen_signing(
     purpose: KeyPurpose,
     out_key: &Path,
     out_pub: &Path,
@@ -198,7 +268,7 @@ pub fn keygen(
     }
     Ok(Generated {
         purpose,
-        key_id: key.key_id(),
+        key_id: Some(key.key_id()),
     })
 }
 
@@ -211,18 +281,19 @@ pub fn generated_draft(g: &Generated, uid: Option<u32>) -> usgp_audit::AuditDraf
     let actor = uid.map_or_else(usgp_audit::Actor::system, |u| {
         usgp_audit::Actor::local_user(u, None)
     });
+    let mut detail = usgp_audit::Detail::new().with("purpose", g.purpose.as_str());
     let mut d = usgp_audit::AuditDraft::new(
         "key.generated",
         usgp_audit::Outcome::Success,
         actor,
         usgp_audit::Interface::ServerCli,
-    )
-    .target("signing_key", &g.key_id.to_string())
-    .detail(
-        usgp_audit::Detail::new()
-            .with("purpose", g.purpose.as_str())
-            .with("key_id", &g.key_id),
     );
+    if let Some(id) = &g.key_id {
+        detail = detail.with("key_id", id);
+        d = d.target("signing_key", &id.to_string());
+    }
+    // The code HMAC key has no id; nothing about its value is recorded.
+    let mut d = d.detail(detail);
     if let Some(u) = uid {
         d = d.source(&format!("uid:{u}"));
     }
@@ -245,6 +316,7 @@ pub fn generation_failed_draft(
     let mut detail = usgp_audit::Detail::new().with("purpose", purpose.as_str());
     let reason = match err {
         KeygenError::Crypto(_) => "crypto_failure",
+        KeygenError::PublicFile => "usage",
         KeygenError::Write { path, kind } => {
             let name = path
                 .file_name()
@@ -306,7 +378,7 @@ mod tests {
         let key = SigningKey::generate().unwrap();
         let g = Generated {
             purpose: KeyPurpose::Audit,
-            key_id: key.key_id(),
+            key_id: Some(key.key_id()),
         };
         let d = generated_draft(&g, Some(1234));
         assert_eq!(d.event(), "key.generated");
@@ -319,6 +391,51 @@ mod tests {
         assert!(text.contains("audit"), "{text}");
         assert!(text.contains(&key.key_id().to_string()), "{text}");
         assert!(text.contains("node-a"), "{text}");
+    }
+
+    /// The code HMAC key: 32 raw bytes, mode 0600, loadable, no public
+    /// file; a second run refuses to overwrite it; a wrong-length or
+    /// newline-terminated file is refused on load; the event names no
+    /// key id.
+    #[cfg(unix)]
+    #[test]
+    fn code_hmac_keygen_and_load() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("usgp-keys-hmac-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let out = dir.join("code-hmac.key");
+        let g = keygen(KeyPurpose::CodeHmac, &out, None).unwrap();
+        assert_eq!(g.key_id, None);
+        let meta = std::fs::metadata(&out).unwrap();
+        assert_eq!(meta.len(), 32);
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(matches!(
+            keygen(KeyPurpose::CodeHmac, &out, None),
+            Err(KeygenError::Write {
+                kind: std::io::ErrorKind::AlreadyExists,
+                ..
+            })
+        ));
+        // Wrong combinations never write anything.
+        let other = dir.join("other.key");
+        assert!(keygen(KeyPurpose::CodeHmac, &other, Some(&dir.join("p"))).is_err());
+        assert!(keygen(KeyPurpose::Plan, &other, None).is_err());
+        assert!(!other.exists());
+        let bytes = Zeroizing::new(std::fs::read(&out).unwrap());
+        HmacKey::from_key_file(&bytes).unwrap();
+        let mut nl = bytes.to_vec();
+        nl.push(b'\n');
+        assert!(HmacKey::from_key_file(&Zeroizing::new(nl)).is_err());
+        let d = generated_draft(&g, Some(5));
+        d.validate().unwrap();
+        let chain = usgp_audit::AuditChain::new("node-c").unwrap();
+        let text = format!("{:?}", usgp_audit::mirror::unpersisted_fields(&chain, &d));
+        assert!(text.contains("code-hmac"), "{text}");
+        assert!(!text.contains("key_id"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// NIST-016: a failed keygen yields `key.generation.failed` with the

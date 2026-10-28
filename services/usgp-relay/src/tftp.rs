@@ -5,9 +5,16 @@
 //!   other than RRQ/WRQ, is dropped silently, as is any request whose
 //!   source is not a unicast host address with a non-zero port.
 //! - A WRQ gets ERROR 2 before any file access (REQ-BOOT-040).
-//! - An RRQ name is matched byte for byte against the manifest. An
-//!   unpublished name gets ERROR 1 without any file access
-//!   (REQ-BOOT-033/041).
+//! - An RRQ name is normalised (`\` to `/`, one leading separator
+//!   dropped, the published-name allow-list) and matched ASCII
+//!   case-insensitively against the manifest (M3; Microsoft's boot manager
+//!   asks for `\Boot\BCD`-style names). A name that cannot be published
+//!   or is not published gets ERROR 1 without any file access
+//!   (REQ-BOOT-033/041). Only the matched manifest name is used after that.
+//! - Transfers use RFC 7440 `windowsize` up to `tftp.max_window_size` and
+//!   let the block number wrap after 65535 as `tftp.block_wrap` says
+//!   (DEC-0018 item 2; REQ-BOOT-035/064). A window is sent in one burst;
+//!   only its last block arms the retransmit timer.
 //! - A published file is read and verified on every request (SI-7); a
 //!   failure gets ERROR 1.
 //! - Each transfer runs on its own new-TID socket in its own task, so a
@@ -45,8 +52,9 @@
 // - NIST 800-53: SI-11 (Error Handling) - fixed, generic ERROR texts.
 // - NIST 800-53: AU-2 / AU-12 - transfer start/end and refusals are events.
 // - SPEC: specs/boot-network.md#REQ-BOOT-030..035, #REQ-BOOT-040..042,
-//   #REQ-BOOT-044
+//   #REQ-BOOT-044, #REQ-BOOT-063, #REQ-BOOT-064
 // - RFC 1350 §4 - new TID per transfer, ERROR 5 for foreign TIDs
+// - RFC 7440 §4 - windowsize; RFC 2348 - blksize
 
 // POAM: SC-8 (Transmission Confidentiality and Integrity) - TFTP is
 // cleartext and unauthenticated by the standard; the boot program can be
@@ -69,13 +77,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use usgp_common::event::AuditEvent;
+use usgp_proto::BootFileName;
 use usgp_tftp::{
     Admission, ErrorCode, Mode, Outcome as TransferOutcome, Packet, Phase, ReadTransfer,
-    ServerConfig, Step, admit_read, encode_error, foreign_tid_error, parse,
+    ServerConfig, Step, WindowConfig, admit_read_with, encode_error, foreign_tid_error, parse,
 };
 
 use crate::config::{InterfaceConfig, Limits};
-use crate::content::{ContentError, ContentStore};
+use crate::content::{ContentError, ContentStore, Unresolved};
 use crate::events::{self, COMPONENT, Outcome};
 use crate::limits::{BucketSpec, BucketTable, Counters, TokenBucket};
 use crate::lock;
@@ -161,6 +170,8 @@ struct Slots {
 pub struct ListenerConfig {
     /// The `usgp_tftp` transfer settings.
     pub server: ServerConfig,
+    /// Window and block-number wraparound (`usgp_tftp::admit_read_with`).
+    pub window: WindowConfig,
     /// Longest time a transfer waits for its first ACK before it is
     /// dropped and its pending slot released (relay side; SC-5).
     pub handshake_timeout: Duration,
@@ -318,6 +329,7 @@ pub struct TftpListener<F: SocketFactory> {
     iface: InterfaceConfig,
     content: Arc<ContentStore>,
     cfg: ServerConfig,
+    window: WindowConfig,
     handshake_timeout: Duration,
     factory: Arc<F>,
     shared: Arc<TftpShared>,
@@ -351,6 +363,7 @@ impl<F: SocketFactory> TftpListener<F> {
             iface,
             content,
             cfg: cfg.server,
+            window: cfg.window,
             handshake_timeout: cfg.handshake_timeout,
             factory: Arc::new(factory),
             shared,
@@ -397,16 +410,21 @@ impl<F: SocketFactory> TftpListener<F> {
             );
         }
         let name = String::from_utf8_lossy(req.filename).into_owned();
-        if !self.content.is_published(req.filename) {
-            return self.refuse(
-                src,
-                ErrorCode::FileNotFound,
-                MSG_NOT_FOUND,
-                "not_published",
-                Some(name),
-                t,
-            );
-        }
+        let published = match self.content.resolve(req.filename) {
+            Ok(p) => p.clone(),
+            // A name that can never be published (`Unresolved::Refused`)
+            // and a valid but unpublished name get the same answer.
+            Err(Unresolved::Refused(_) | Unresolved::NotPublished) => {
+                return self.refuse(
+                    src,
+                    ErrorCode::FileNotFound,
+                    MSG_NOT_FOUND,
+                    "not_published",
+                    Some(name),
+                    t,
+                );
+            }
+        };
         if req.mode_kind() != Mode::Octet {
             return self.refuse(
                 src,
@@ -433,7 +451,7 @@ impl<F: SocketFactory> TftpListener<F> {
         let deadline = t.checked_add(self.handshake_timeout);
         let me = Arc::clone(self);
         let request = buf.to_vec();
-        tokio::spawn(async move { me.serve(src, request, slot, deadline).await });
+        tokio::spawn(async move { me.serve(src, request, published, slot, deadline).await });
         Disposition::Started
     }
 
@@ -497,17 +515,20 @@ impl<F: SocketFactory> TftpListener<F> {
         self: Arc<Self>,
         client: SocketAddr,
         request: Vec<u8>,
+        published: BootFileName,
         mut slot: SlotGuard,
         deadline: Option<Instant>,
     ) {
         let Ok(Packet::Rrq(req)) = parse(&request) else {
             return;
         };
-        let name = String::from_utf8_lossy(req.filename).into_owned();
+        // From here on only the matched manifest name is used.
+        let file = published.as_bytes();
+        let name = published.as_str().to_owned();
         let verified = match deadline {
             Some(d) => {
                 let at = tokio::time::Instant::from_std(d);
-                match tokio::time::timeout_at(at, self.content.get_verified(req.filename)).await {
+                match tokio::time::timeout_at(at, self.content.get_verified(file)).await {
                     Ok(r) => r,
                     Err(_) => {
                         // Verification did not finish within the slot's
@@ -524,7 +545,7 @@ impl<F: SocketFactory> TftpListener<F> {
                         let t = now();
                         let reserved = d.checked_sub(self.handshake_timeout).unwrap_or(d);
                         let _ = self.content.report_verify_slow(
-                            req.filename,
+                            file,
                             t.saturating_duration_since(reserved),
                             self.handshake_timeout,
                             t,
@@ -533,7 +554,7 @@ impl<F: SocketFactory> TftpListener<F> {
                     }
                 }
             }
-            None => self.content.get_verified(req.filename).await,
+            None => self.content.get_verified(file).await,
         };
         let data = match verified {
             Ok(d) => d,
@@ -557,25 +578,26 @@ impl<F: SocketFactory> TftpListener<F> {
             }
         };
         let started = now();
-        let (mut transfer, first) = match admit_read(&req, &data, &self.cfg, started) {
-            Admission::Accept { transfer, first } => (transfer, first),
-            Admission::Refuse { error, reason } => {
-                drop(slot);
-                if self.shared.allow_error(now()) {
-                    let code = match reason {
-                        usgp_tftp::RefuseReason::UnsupportedMode => ErrorCode::IllegalOperation,
-                        _ => ErrorCode::DiskFull,
-                    };
-                    self.emit_refused(client, code, reason.label(), Some(name));
-                    self.send_once(client, &error).await;
+        let (mut transfer, first) =
+            match admit_read_with(&req, &data, &self.cfg, &self.window, started) {
+                Admission::Accept { transfer, first } => (transfer, first),
+                Admission::Refuse { error, reason } => {
+                    drop(slot);
+                    if self.shared.allow_error(now()) {
+                        let code = match reason {
+                            usgp_tftp::RefuseReason::UnsupportedMode => ErrorCode::IllegalOperation,
+                            _ => ErrorCode::DiskFull,
+                        };
+                        self.emit_refused(client, code, reason.label(), Some(name));
+                        self.send_once(client, &error).await;
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
         let sha256 = self
             .content
             .manifest()
-            .get(req.filename)
+            .get(file)
             .map_or_else(String::new, |e| e.sha256.to_hex());
         let socket = match self.factory.open_tid() {
             Ok(s) => s,
@@ -596,15 +618,24 @@ impl<F: SocketFactory> TftpListener<F> {
             }
         };
         let local = socket.local_addr().ok();
-        let start_detail = [
+        let mut start_detail = vec![
             ("file", name.clone()),
             ("sha256", sha256.clone()),
             ("size", transfer.file_len().to_string()),
             ("blksize", transfer.block_size().to_string()),
+            ("windowsize", transfer.window_size().to_string()),
+            ("block_wrap", transfer.block_wrap().label().to_owned()),
             ("tsize", opt_u64(transfer.tsize())),
             ("oack", transfer.sent_oack().to_string()),
             ("verified_sha256", "true".to_owned()),
         ];
+        if req.filename != file {
+            // The name as the client wrote it (backslashes, case).
+            start_detail.push((
+                "requested_name",
+                String::from_utf8_lossy(req.filename).into_owned(),
+            ));
+        }
         events::emit(AuditEvent {
             interface: Some(&self.iface.name),
             local_addr: local,
@@ -635,6 +666,26 @@ impl<F: SocketFactory> TftpListener<F> {
         // The pending slot is held at most until this deadline, set when
         // the slot was reserved (SC-5).
         loop {
+            // RFC 7440: the rest of the current window goes out at once,
+            // without waiting for the socket or the timer.
+            if transfer.pending_sends() {
+                match transfer.on_timeout(data, now()) {
+                    Step::Send(p) => {
+                        if socket.send_to(&p, client).await.is_err() {
+                            lock(&self.shared.drops).bump("send_failed");
+                        }
+                        continue;
+                    }
+                    Step::Wait => {}
+                    Step::Abort { error, outcome } => {
+                        if socket.send_to(&error, client).await.is_err() {
+                            lock(&self.shared.drops).bump("send_failed");
+                        }
+                        return End::Transfer(outcome);
+                    }
+                    Step::Done(o) => return End::Transfer(o),
+                }
+            }
             let mut deadline = transfer.deadline();
             if transfer.phase() == Phase::Handshake
                 && let Some(h) = handshake_deadline
@@ -705,10 +756,14 @@ impl<F: SocketFactory> TftpListener<F> {
             ("sha256", sha256.to_owned()),
             ("size", transfer.file_len().to_string()),
             ("blksize", transfer.block_size().to_string()),
+            ("windowsize", transfer.window_size().to_string()),
+            ("block_wrap", transfer.block_wrap().label().to_owned()),
+            ("wraps", transfer.wraps().to_string()),
             ("tsize", opt_u64(transfer.tsize())),
             ("retries", transfer.retransmits().to_string()),
             ("duration_ms", duration_ms(elapsed)),
             ("last_block", transfer.current_block().to_string()),
+            ("last_index", transfer.current_index().to_string()),
         ];
         let (event, outcome) = match end {
             End::Transfer(TransferOutcome::Completed) => (events::TFTP_COMPLETED, Outcome::Success),

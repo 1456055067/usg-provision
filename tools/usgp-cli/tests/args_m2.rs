@@ -98,6 +98,7 @@ mod tls {
         let del = seen.get(1).unwrap();
         assert_eq!(del.method, "DELETE");
         assert_eq!(del.path, format!("/v1/packages/{PKG}"));
+        assert_eq!(del.query, None);
         assert!(del.body.is_empty());
         assert_eq!(del.header("if-match"), Some("\"r3\""));
         assert_eq!(

@@ -60,10 +60,15 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "admin_role",
         sql: include_str!("../migrations/0003_admin_role.sql"),
     },
+    Migration {
+        version: 4,
+        name: "device_sessions_jobs",
+        sql: include_str!("../migrations/0004_device_sessions_jobs.sql"),
+    },
 ];
 
 /// The schema version this build requires.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Advisory-lock key serialising migration runs ("usgpmigr" as ASCII).
 pub const MIGRATION_LOCK_KEY: i64 = 0x7573_6770_6d69_6772;
@@ -298,16 +303,17 @@ mod tests {
     fn fresh_database_applies_everything_in_order() {
         let p = pending(&[], MIGRATIONS).unwrap();
         let v: Vec<_> = p.iter().map(|m| m.version).collect();
-        assert_eq!(v, [1, 2, 3]);
+        assert_eq!(v, [1, 2, 3, 4]);
     }
 
     #[test]
     fn up_to_date_has_nothing_pending() {
-        assert!(pending(&applied(3), MIGRATIONS).unwrap().is_empty());
-        let p = pending(&applied(2), MIGRATIONS).unwrap();
+        assert!(pending(&applied(4), MIGRATIONS).unwrap().is_empty());
+        let p = pending(&applied(3), MIGRATIONS).unwrap();
         assert_eq!(p.len(), 1);
+        assert_eq!(p.first().unwrap().version, 4);
         let p = pending(&applied(1), MIGRATIONS).unwrap();
-        assert_eq!(p.len(), 2);
+        assert_eq!(p.len(), 3);
     }
 
     #[test]
@@ -322,11 +328,18 @@ mod tests {
 
     #[test]
     fn unknown_and_gap_refused() {
-        let mut a = applied(3);
-        a.push((4, Sha256Digest([0; 32])));
+        let mut a = applied(4);
+        a.push((5, Sha256Digest([0; 32])));
         assert!(matches!(
             pending(&a, MIGRATIONS),
-            Err(MigrationError::UnknownApplied { version: 4 })
+            Err(MigrationError::UnknownApplied { version: 5 })
+        ));
+        // An altered 0004 is refused like any other.
+        let mut a = applied(4);
+        a.get_mut(3).unwrap().1 = Sha256Digest([9; 32]);
+        assert!(matches!(
+            pending(&a, MIGRATIONS),
+            Err(MigrationError::ChecksumMismatch { version: 4 })
         ));
         let a = vec![(2, mig(1).checksum())];
         assert!(matches!(
@@ -445,5 +458,126 @@ mod tests {
         let m = *mig(0);
         assert_eq!(m.checksum(), usgp_crypto::sha256(m.sql.as_bytes()));
         assert_ne!(m.checksum(), mig(1).checksum());
+    }
+
+    #[test]
+    fn check_constraints_0004_match_proto_value_sets() {
+        use usgp_proto::device::{DeviceArch, FirmwareKind, SecureBootState, SessionState};
+        use usgp_proto::ops::{AuthMethod, BootServiceStatus};
+        use usgp_proto::{FailureCategory, JobState, StepState};
+        let sql = mig(3).sql;
+        let expect = [
+            in_list("status", BootServiceStatus::ALL, BootServiceStatus::as_str),
+            in_list("firmware", FirmwareKind::ALL, FirmwareKind::as_str),
+            in_list("arch", DeviceArch::ALL, DeviceArch::as_str),
+            in_list("secure_boot", SecureBootState::ALL, SecureBootState::as_str),
+            in_list("state", SessionState::ALL, SessionState::as_str),
+            in_list("auth_method", AuthMethod::ALL, AuthMethod::as_str),
+            in_list("state", JobState::ALL, JobState::as_str),
+            in_list(
+                "failure_category",
+                FailureCategory::ALL,
+                FailureCategory::as_str,
+            ),
+            in_list("state", StepState::ALL, StepState::as_str),
+        ];
+        for e in expect {
+            assert!(sql.contains(&e), "0004 lacks `{e}`");
+        }
+        // The final and live session sets used by the guard and the index.
+        let finals: Vec<SessionState> = SessionState::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.is_final())
+            .collect();
+        assert!(sql.contains(&format!(
+            "OLD.{}",
+            in_list("state", &finals, SessionState::as_str)
+        )));
+        let finished: Vec<JobState> = JobState::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.is_final())
+            .collect();
+        assert!(sql.contains(&format!(
+            "OLD.{}",
+            in_list("state", &finished, JobState::as_str)
+        )));
+    }
+
+    /// Statements of a migration with `--` comments removed, upper case,
+    /// whitespace collapsed.
+    fn statements(m: &Migration) -> Vec<String> {
+        let text: String = m
+            .sql
+            .lines()
+            .map(|l| l.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        text.split(';')
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|s| s.to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Plan section 3.8 and decision 0016: exactly these grants, no DELETE
+    /// except on assignments, nothing on the new tables for the
+    /// administrative role except boot services, and no role DDL.
+    #[test]
+    fn migration_0004_grants_are_least_privilege() {
+        let st = statements(mig(3));
+        let grants: Vec<&String> = st.iter().filter(|s| s.starts_with("GRANT")).collect();
+        let expect = [
+            "GRANT SELECT ON BOOT_SERVICE TO USGP_APP",
+            "GRANT SELECT, INSERT, DELETE ON BOOT_SERVICE_PACKAGE TO USGP_APP",
+            "GRANT SELECT, INSERT, UPDATE ON DEVICE_SESSION, AUTH_CODE, JOB, JOB_STEP, BOOT_STOP, \
+             BOOT_POLICY_GENERATION TO USGP_APP",
+            "GRANT EXECUTE ON FUNCTION USGP_MACS_VALID(BYTEA[]), USGP_AUTH_CODE_GUARD(), \
+             USGP_DEVICE_SESSION_GUARD(), USGP_JOB_GUARD(), USGP_JOB_WIPE_AUTHORISED(), \
+             USGP_JOB_STEP_GUARD(), USGP_BOOT_STOP_GUARD(), USGP_BOOT_POLICY_GENERATION_GUARD() \
+             TO USGP_APP",
+            "GRANT SELECT, INSERT, UPDATE ON BOOT_SERVICE TO USGP_ADMIN",
+        ];
+        assert_eq!(grants.len(), expect.len(), "{grants:#?}");
+        for e in expect {
+            assert!(grants.iter().any(|g| g.as_str() == e), "missing `{e}`");
+        }
+        for s in &st {
+            for word in [
+                "CREATE ROLE",
+                "ALTER ROLE",
+                "CREATE USER",
+                "PASSWORD",
+                "DROP ",
+                "TRUNCATE",
+            ] {
+                assert!(!s.contains(word), "0004 contains {word}: {s}");
+            }
+            assert!(!s.starts_with("ALTER DEFAULT PRIVILEGES"), "{s}");
+        }
+        // No code value column: the code is stored only as its HMAC.
+        let create = st
+            .iter()
+            .find(|s| s.starts_with("CREATE TABLE AUTH_CODE"))
+            .unwrap();
+        assert!(create.contains("CODE_HMAC BYTEA NOT NULL UNIQUE"));
+        assert!(!create.contains(" CODE TEXT") && !create.contains(" CODE BYTEA"));
+    }
+
+    /// The guards the plan requires exist and are attached.
+    #[test]
+    fn migration_0004_guards_present() {
+        let sql = mig(3).sql;
+        for t in [
+            "CREATE TRIGGER auth_code_guard\n    BEFORE UPDATE ON auth_code",
+            "CREATE TRIGGER job_guard\n    BEFORE UPDATE ON job",
+            "CREATE CONSTRAINT TRIGGER job_wipe_authorised\n    AFTER INSERT ON job\n    DEFERRABLE INITIALLY DEFERRED",
+            "FOREIGN KEY (wipe_audit_seq, wipe_record_hash) REFERENCES audit_record (seq, record_hash)\n        DEFERRABLE INITIALLY DEFERRED",
+            "wipe_audit_seq      bigint   NOT NULL UNIQUE",
+            "AND r.event = 'disk.wipe.authorised'",
+        ] {
+            assert!(sql.contains(t), "0004 lacks `{t}`");
+        }
     }
 }

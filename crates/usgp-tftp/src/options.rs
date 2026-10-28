@@ -1,17 +1,21 @@
-//! RFC 2347 option lists and negotiation of `blksize` (RFC 2348) and
-//! `tsize` (RFC 2349).
+//! RFC 2347 option lists and negotiation of `blksize` (RFC 2348), `tsize`
+//! (RFC 2349) and `windowsize` (RFC 7440).
 //!
-//! Supported: `blksize`, `tsize`. Never acknowledged: `timeout` (keeps the
-//! adaptive RTO in control; leaving it out is allowed by RFC 2349) and
-//! `windowsize` (RFC 7440 not implemented). Unknown options are ignored
-//! (RFC 2347).
+//! Supported: `blksize`, `tsize`, and `windowsize` through
+//! [`negotiate_window`] when the server's window limit is 2 or more.
+//! Never acknowledged: `timeout` (keeps the adaptive RTO in control;
+//! leaving it out is allowed by RFC 2349). [`negotiate`] is the M1
+//! lock-step negotiation and never acknowledges `windowsize`. Unknown
+//! options are ignored (RFC 2347).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-10 (Information Input Validation)
-// - SPEC: specs/boot-network.md#REQ-BOOT-031
+// - SPEC: specs/boot-network.md#REQ-BOOT-031, #REQ-BOOT-064
 // - RFC 2347 - option framing, case-insensitive names, OACK content
 // - RFC 2348 - blksize 8..=65464, server may answer with a smaller value
 // - RFC 2349 - tsize 0 on read returns the file size
+// - RFC 7440 §3 - windowsize 1..=65535, server may answer with a smaller
+//   value
 
 use crate::error::ParseError;
 use crate::packet::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, split_cstr};
@@ -106,6 +110,17 @@ pub fn parse_decimal(v: &[u8]) -> Option<u64> {
 pub const BLKSIZE: &[u8] = b"blksize";
 /// See [`BLKSIZE`].
 pub const TSIZE: &[u8] = b"tsize";
+/// See [`BLKSIZE`] (RFC 7440).
+pub const WINDOWSIZE: &[u8] = b"windowsize";
+
+/// Largest window this server ever grants. The window must stay far below
+/// half of the 16-bit block-number space so that an ACK maps to exactly one
+/// block of the window, even after the number wraps (plan §1, relay
+/// changes). Project design, not product behaviour.
+pub const MAX_WINDOW_SIZE: u16 = 64;
+
+/// Largest `windowsize` value a client may ask for (RFC 7440 §3).
+const MAX_WINDOWSIZE_OPTION: u64 = 65535;
 
 /// The negotiated result of a read request's options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,24 +131,32 @@ pub struct Negotiated {
     pub blksize_acked: bool,
     /// File size to return in the OACK, if `tsize` was accepted.
     pub tsize: Option<u64>,
+    /// Window size in use (1, lock-step, unless `windowsize` was
+    /// accepted).
+    pub window_size: u16,
+    /// Whether `windowsize` goes in the OACK.
+    pub windowsize_acked: bool,
 }
 
 impl Negotiated {
     /// Whether an OACK is needed (RFC 2347: none if no option accepted).
     #[must_use]
     pub fn needs_oack(&self) -> bool {
-        self.blksize_acked || self.tsize.is_some()
+        self.blksize_acked || self.tsize.is_some() || self.windowsize_acked
     }
 
-    /// The OACK `(name, value)` pairs, `blksize` first.
+    /// The OACK `(name, value)` pairs: `blksize`, `tsize`, `windowsize`.
     #[must_use]
     pub fn oack_pairs(&self) -> Vec<(&'static [u8], Vec<u8>)> {
-        let mut v = Vec::with_capacity(2);
+        let mut v = Vec::with_capacity(3);
         if self.blksize_acked {
             v.push((BLKSIZE, self.block_size.to_string().into_bytes()));
         }
         if let Some(t) = self.tsize {
             v.push((TSIZE, t.to_string().into_bytes()));
+        }
+        if self.windowsize_acked {
+            v.push((WINDOWSIZE, self.window_size.to_string().into_bytes()));
         }
         v
     }
@@ -146,13 +169,38 @@ impl Negotiated {
 /// - `tsize`: the value `0` is answered with `file_len`; any other value is
 ///   ignored (RFC 2349, read direction).
 /// - every other option, including `timeout` and `windowsize`, is ignored.
+///
+/// This is the M1 lock-step negotiation; [`negotiate_window`] adds
+/// `windowsize`.
 #[must_use]
 pub fn negotiate(opts: &OptionList<'_>, file_len: u64, max_block_size: u16) -> Negotiated {
+    negotiate_window(opts, file_len, max_block_size, 1)
+}
+
+/// Negotiates `blksize`, `tsize` and `windowsize` for a read of `file_len`
+/// octets.
+///
+/// `blksize` and `tsize` as in [`negotiate`]. `windowsize`: when
+/// `max_window_size` is 2 or more, a decimal value in 1..=65535 is
+/// accepted and answered with `min(value, max_window_size, 64)` (RFC 7440
+/// §3: the server's value is never larger than the client's). A value of
+/// 0, above 65535 or not decimal is ignored, so the transfer stays
+/// lock-step. With `max_window_size` 0 or 1 the option is never
+/// acknowledged (lock-step, as in M1).
+#[must_use]
+pub fn negotiate_window(
+    opts: &OptionList<'_>,
+    file_len: u64,
+    max_block_size: u16,
+    max_window_size: u16,
+) -> Negotiated {
     let cap = max_block_size.clamp(MIN_BLOCK_SIZE, MAX_BLOCK_SIZE);
     let mut out = Negotiated {
         block_size: DEFAULT_BLOCK_SIZE,
         blksize_acked: false,
         tsize: None,
+        window_size: 1,
+        windowsize_acked: false,
     };
     if let Some(v) = opts.get(BLKSIZE).and_then(parse_decimal)
         && let Ok(v) = u16::try_from(v)
@@ -163,6 +211,15 @@ pub fn negotiate(opts: &OptionList<'_>, file_len: u64, max_block_size: u16) -> N
     }
     if opts.get(TSIZE).and_then(parse_decimal) == Some(0) {
         out.tsize = Some(file_len);
+    }
+    let window_cap = max_window_size.min(MAX_WINDOW_SIZE);
+    if window_cap >= 2
+        && let Some(v) = opts.get(WINDOWSIZE).and_then(parse_decimal)
+        && (1..=MAX_WINDOWSIZE_OPTION).contains(&v)
+        && let Ok(v) = u16::try_from(v)
+    {
+        out.window_size = v.min(window_cap);
+        out.windowsize_acked = true;
     }
     out
 }
@@ -253,11 +310,58 @@ mod tests {
     }
 
     #[test]
+    fn windowsize_negotiation() {
+        let n = negotiate_window(&list(b"windowsize\x004\x00"), 1, 1468, 8);
+        assert_eq!((n.window_size, n.windowsize_acked), (4, true));
+        assert!(n.needs_oack());
+        let n = negotiate_window(&list(b"WindowSize\x0065535\x00"), 1, 1468, 8);
+        assert_eq!((n.window_size, n.windowsize_acked), (8, true));
+        let n = negotiate_window(&list(b"windowsize\x0065535\x00"), 1, 1468, 1000);
+        assert_eq!((n.window_size, n.windowsize_acked), (MAX_WINDOW_SIZE, true));
+        let n = negotiate_window(&list(b"windowsize\x001\x00"), 1, 1468, 8);
+        assert_eq!((n.window_size, n.windowsize_acked), (1, true));
+        for bad in [
+            &b"0"[..],
+            b"65536",
+            b"x",
+            b"",
+            b"-1",
+            b"99999999999999999999",
+        ] {
+            let mut area = b"windowsize\0".to_vec();
+            area.extend_from_slice(bad);
+            area.push(0);
+            let n = negotiate_window(&list(&area), 1, 1468, 8);
+            assert_eq!((n.window_size, n.windowsize_acked), (1, false), "{bad:?}");
+            assert!(!n.needs_oack(), "{bad:?}");
+        }
+        // Lock-step limit: never acknowledged.
+        for cap in [0, 1] {
+            let n = negotiate_window(&list(b"windowsize\x004\x00"), 1, 1468, cap);
+            assert_eq!((n.window_size, n.windowsize_acked), (1, false));
+        }
+    }
+
+    #[test]
     fn oack_pairs_order() {
         let n = negotiate(&list(b"tsize\x000\x00blksize\x001468\x00"), 77, 1468);
         assert_eq!(
             n.oack_pairs(),
             vec![(BLKSIZE, b"1468".to_vec()), (TSIZE, b"77".to_vec())]
+        );
+        let n = negotiate_window(
+            &list(b"windowsize\x004\x00tsize\x000\x00blksize\x001468\x00"),
+            77,
+            1468,
+            8,
+        );
+        assert_eq!(
+            n.oack_pairs(),
+            vec![
+                (BLKSIZE, b"1468".to_vec()),
+                (TSIZE, b"77".to_vec()),
+                (WINDOWSIZE, b"4".to_vec())
+            ]
         );
     }
 }

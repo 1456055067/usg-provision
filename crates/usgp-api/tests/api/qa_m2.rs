@@ -59,7 +59,12 @@ fn content_id(r: &crate::common::Resp) -> ContentId {
 /// A harness whose unauthenticated audit cap does not interfere.
 async fn uncapped() -> Harness {
     Harness::with(Opts {
-        config: Box::new(|c| c.unauth_records_per_source_per_min = 10_000),
+        config: Box::new(|c| {
+            c.unauth_records_per_source_per_min = 10_000;
+            // M3 added routes: two credential failure kinds x every route
+            // exceed the default credential cap of 60 per minute.
+            c.credential_failure_records_per_source_per_min = 10_000;
+        }),
         ..Opts::default()
     })
     .await
@@ -138,7 +143,9 @@ async fn every_route_401_audited_for_each_authn_failure() {
                 "{}",
                 rec.detail
             );
-            assert!(rec.detail.contains(path.as_str()), "{}", rec.detail);
+            // The record names the path without its query (M3 relay route).
+            let path_only = path.split('?').next().unwrap_or_default();
+            assert!(rec.detail.contains(path_only), "{}", rec.detail);
             if who != Who::Anonymous {
                 // What the product could learn of the requester (REQ-AUD-001).
                 let fp = h

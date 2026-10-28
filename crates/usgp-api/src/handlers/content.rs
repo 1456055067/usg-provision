@@ -48,7 +48,7 @@ use hyper::body::Bytes;
 use hyper::header::{self, HeaderValue};
 use hyper::{Response, StatusCode};
 use tokio::sync::mpsc;
-use usgp_audit::{Detail, Outcome};
+use usgp_audit::{AuditDraft, Detail, Outcome};
 use usgp_db::{Content, Reason, RepoTx, Store};
 use usgp_proto::PackageStatus;
 use usgp_proto::{ContentKind, ContentManifestV1, ContentState, PayloadType, codes};
@@ -134,6 +134,18 @@ impl<S: Store + 'static> Api<S> {
         c: &Content,
         what: &str,
     ) -> Result<(), ApiError> {
+        self.integrity_failed_by(&|e, o| ctx.draft(e, o), c, what)
+            .await
+    }
+
+    /// As [`Self::integrity_failed`], with records drafted by `draft`
+    /// (the device listener's chunk fetch names the device session).
+    pub(crate) async fn integrity_failed_by(
+        &self,
+        draft: &(dyn Fn(&str, Outcome) -> AuditDraft + Sync),
+        c: &Content,
+        what: &str,
+    ) -> Result<(), ApiError> {
         let mut tx = self.store().begin().await?;
         let at = self.now()?;
         let reason = Reason {
@@ -141,8 +153,7 @@ impl<S: Store + 'static> Api<S> {
             text: "the content did not match its signed manifest when used".to_owned(),
         };
         let mut recs = Vec::new();
-        let d = ctx
-            .draft("content.integrity.failed", Outcome::Failure)
+        let d = draft("content.integrity.failed", Outcome::Failure)
             .target("content", &c.id.to_string())
             .reason(codes::INTEGRITY_FAILED.as_str())
             .detail(Detail::new().with("what", what).with("sha256", &c.sha256));
@@ -160,8 +171,7 @@ impl<S: Store + 'static> Api<S> {
             .await;
         match changed {
             Ok(()) => {
-                let d = ctx
-                    .draft("content.failed", Outcome::Failure)
+                let d = draft("content.failed", Outcome::Failure)
                     .target("content", &c.id.to_string())
                     .reason(codes::INTEGRITY_FAILED_ON_USE.as_str())
                     .initiated_by(seq);
@@ -193,8 +203,7 @@ impl<S: Store + 'static> Api<S> {
                 at,
             )
             .await?;
-            let d = ctx
-                .draft("package.status.changed", Outcome::Success)
+            let d = draft("package.status.changed", Outcome::Success)
                 .target("package", &p.id.to_string())
                 .reason(code.as_str())
                 .initiated_by(seq)

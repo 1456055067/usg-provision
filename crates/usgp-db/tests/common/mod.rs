@@ -5,6 +5,7 @@
 //! Declared `pub mod common` by each test crate, so helpers one binary
 //! does not use are not dead code.
 
+pub mod m3;
 #[cfg(feature = "pg-integration")]
 pub mod pg;
 

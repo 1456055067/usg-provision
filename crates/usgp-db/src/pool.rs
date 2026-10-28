@@ -237,6 +237,37 @@ impl PgTx {
         self.note(ctx, r)
     }
 
+    /// A state-changing statement with `RETURNING`: the transaction counts
+    /// as changed (and so needs an audit record) only if a row came back.
+    /// Use only where `RETURNING` names every changed row.
+    pub(crate) async fn query_write(
+        &mut self,
+        ctx: &'static str,
+        sql: &str,
+        params: Params<'_>,
+    ) -> Result<Vec<Row>, DbError> {
+        let r = self.client()?.query(sql, params).await;
+        let rows = self.note(ctx, r)?;
+        if !rows.is_empty() {
+            self.mutated = true;
+        }
+        Ok(rows)
+    }
+
+    /// A bookkeeping update that is not a state change and is not audited
+    /// (plan section 3.1: a session's `last_seen_at`; section 3.4: a
+    /// `progress` report's byte counts, sequence number and time). Never
+    /// use it for anything an operator or a device decides.
+    pub(crate) async fn execute_bookkeeping(
+        &mut self,
+        ctx: &'static str,
+        sql: &str,
+        params: Params<'_>,
+    ) -> Result<u64, DbError> {
+        let r = self.client()?.execute(sql, params).await;
+        self.note(ctx, r)
+    }
+
     /// Marks the transaction failed (a precondition the caller cannot
     /// recover from inside it).
     pub(crate) fn poison(&mut self) {

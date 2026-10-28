@@ -19,6 +19,25 @@
 //! usgp-cli package manifest ID --out FILE
 //! ```
 //!
+//! M3 (plan WU-13):
+//!
+//! ```text
+//! usgp-cli boot-manifest create --pe-kit --root DIR --out FILE --pe ID
+//!          --boot-program NAME --bcd NAME --sdi NAME --wim NAME
+//!          [--font NAME]... [CONN] [--] [NAME...]
+//! usgp-cli code issue [--ttl SECONDS] [--note TEXT] | list | revoke ID
+//! usgp-cli session list [--state S] | show ID
+//! usgp-cli session approve --display-code CODE [ID] | refuse ID [--note TEXT]
+//! usgp-cli job list [--state S] | show ID | ack ID
+//! usgp-cli boot-service list | show ID
+//! usgp-cli boot-service set-packages ID (PACKAGE_ID... | --none) [--if-match TAG]
+//! usgp-cli boot-stop list | clear ID
+//! ```
+//!
+//! `--font` is the only option that may be repeated. With `--pe-kit`,
+//! `boot-manifest create` takes the connection options too, since it reads
+//! the PE's record from the server.
+//!
 //! Every M2 command also takes the connection options `--config FILE`,
 //! `--server URL`, `--server-ca FILE`, `--client-cert FILE`,
 //! `--client-key FILE` and `--content-key-pub FILE` (see
@@ -59,6 +78,8 @@ pub enum Command {
     Create(CreateArgs),
     /// `boot-manifest verify`.
     Verify(VerifyArgs),
+    /// `boot-manifest create --pe-kit`.
+    CreateKit(Box<KitCreateArgs>),
     /// An M2 command that talks to the server.
     Api(Box<ApiCommand>),
 }
@@ -144,6 +165,60 @@ pub enum Action {
     PackageDelete(String, bool),
     /// `package manifest ID --out FILE`.
     PackageManifest(String, PathBuf),
+    /// `code issue [--ttl S] [--note T]`.
+    CodeIssue {
+        /// Lifetime in seconds; the server default if absent.
+        ttl_s: Option<u64>,
+        /// Operator note.
+        note: Option<String>,
+    },
+    /// `code list`.
+    CodeList,
+    /// `code revoke ID`.
+    CodeRevoke(String),
+    /// `session list [--state S]`.
+    SessionList(Option<String>),
+    /// `session show ID`.
+    SessionShow(String),
+    /// `session approve --display-code CODE [ID]`.
+    SessionApprove {
+        /// The session; found by its display code among the waiting
+        /// sessions if absent.
+        id: Option<String>,
+        /// The display code read from the device's screen.
+        display_code: String,
+    },
+    /// `session refuse ID [--note T]`.
+    SessionRefuse {
+        /// The session.
+        id: String,
+        /// Operator note.
+        note: Option<String>,
+    },
+    /// `job list [--state S]`.
+    JobList(Option<String>),
+    /// `job show ID`.
+    JobShow(String),
+    /// `job ack ID`.
+    JobAck(String),
+    /// `boot-service list`.
+    BootServiceList,
+    /// `boot-service show ID`.
+    BootServiceShow(String),
+    /// `boot-service set-packages ID (PACKAGE_ID... | --none) [--if-match TAG]`.
+    BootServiceSetPackages {
+        /// The boot service.
+        id: String,
+        /// The complete new list (empty with `--none`).
+        packages: Vec<String>,
+        /// The assignment tag the operator reviewed; read just before the
+        /// change if absent.
+        if_match: Option<String>,
+    },
+    /// `boot-stop list`.
+    BootStopList,
+    /// `boot-stop clear ID`.
+    BootStopClear(String),
 }
 
 /// Arguments of `boot-manifest create`.
@@ -164,6 +239,27 @@ pub struct VerifyArgs {
     pub root: PathBuf,
     /// Manifest file to check.
     pub manifest: PathBuf,
+}
+
+/// Arguments of `boot-manifest create --pe-kit`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct KitCreateArgs {
+    /// Root, output and any further published names (may be empty).
+    pub create: CreateArgs,
+    /// `--boot-program NAME`.
+    pub boot_program: OsString,
+    /// `--bcd NAME` (the operator-built store; never generated).
+    pub bcd: OsString,
+    /// `--sdi NAME`.
+    pub sdi: OsString,
+    /// `--wim NAME`.
+    pub wim: OsString,
+    /// `--font NAME`, in order.
+    pub fonts: Vec<OsString>,
+    /// `--pe ID`: the imported PE the WIM must be.
+    pub pe: String,
+    /// Connection options.
+    pub conn: ConnArgs,
 }
 
 /// A malformed command line. The message is shown with the usage text.
@@ -192,7 +288,20 @@ where
     if is_help(&first) {
         return Ok(Command::Help);
     }
-    if first == "limits" || first == "image" || first == "pe" || first == "package" {
+    if [
+        "limits",
+        "image",
+        "pe",
+        "package",
+        "code",
+        "session",
+        "job",
+        "boot-service",
+        "boot-stop",
+    ]
+    .iter()
+    .any(|g| first == *g)
+    {
         return parse_api(&first, it.collect());
     }
     if first != "boot-manifest" {
@@ -205,7 +314,13 @@ where
         return Ok(Command::Help);
     }
     let rest: Vec<OsString> = it.collect();
-    if sub == "create" {
+    let kit = rest
+        .iter()
+        .take_while(|a| a.as_os_str() != "--")
+        .any(|a| a == "--pe-kit");
+    if sub == "create" && kit {
+        parse_create_kit(rest)
+    } else if sub == "create" {
         parse_create(rest)
     } else if sub == "verify" {
         parse_verify(rest)
@@ -298,6 +413,57 @@ fn parse_verify(rest: Vec<OsString>) -> Result<Command, UsageError> {
     }))
 }
 
+/// `boot-manifest create --pe-kit ...` (M3 plan WU-13). Shape only; names
+/// and the PE id are checked by [`crate::boot_manifest::create_kit`], so a
+/// refusal is audited.
+fn parse_create_kit(rest: Vec<OsString>) -> Result<Command, UsageError> {
+    let mut s = scan_m2(
+        rest,
+        &[
+            "--root",
+            "--out",
+            "--pe",
+            "--boot-program",
+            "--bcd",
+            "--sdi",
+            "--wim",
+        ],
+        &["--pe-kit"],
+        &["--font"],
+    )?;
+    if s.help {
+        return Ok(Command::Help);
+    }
+    let conn = s.conn()?;
+    let mut need = |opt: &str| {
+        s.values
+            .remove(opt)
+            .ok_or_else(|| UsageError(format!("{opt} is required with --pe-kit")))
+    };
+    let root = PathBuf::from(need("--root")?);
+    let out = PathBuf::from(need("--out")?);
+    let boot_program = need("--boot-program")?;
+    let bcd = need("--bcd")?;
+    let sdi = need("--sdi")?;
+    let wim = need("--wim")?;
+    let pe = s.required("--pe")?;
+    let fonts = s.multi.remove("--font").unwrap_or_default();
+    Ok(Command::CreateKit(Box::new(KitCreateArgs {
+        create: CreateArgs {
+            root,
+            out,
+            names: std::mem::take(&mut s.positional),
+        },
+        boot_program,
+        bcd,
+        sdi,
+        wim,
+        fonts,
+        pe,
+        conn,
+    })))
+}
+
 // ---------------------------------------------------------------------------
 // M2 commands (plan WU-8)
 // ---------------------------------------------------------------------------
@@ -317,16 +483,19 @@ const CONN_OPTS: &[&str] = &[
 struct Scanned {
     values: BTreeMap<&'static str, OsString>,
     flags: BTreeSet<&'static str>,
+    multi: BTreeMap<&'static str, Vec<OsString>>,
     positional: Vec<OsString>,
     help: bool,
 }
 
 /// Splits `rest` into value options (`values` plus [`CONN_OPTS`]), flag
-/// options (`flags`) and positional arguments.
+/// options (`flags`), repeatable value options (`multi`) and positional
+/// arguments.
 fn scan_m2(
     rest: Vec<OsString>,
     values: &[&'static str],
     flags: &[&'static str],
+    multi: &[&'static str],
 ) -> Result<Scanned, UsageError> {
     let mut s = Scanned::default();
     let mut it = rest.into_iter();
@@ -347,6 +516,13 @@ fn scan_m2(
             if !s.flags.insert(f) {
                 return Err(UsageError(format!("{f} given more than once")));
             }
+            continue;
+        }
+        if let Some(&m) = multi.iter().find(|m| **m == text) {
+            let Some(value) = it.next().filter(|v| !v.is_empty()) else {
+                return Err(UsageError(format!("{m} needs a value")));
+            };
+            s.multi.entry(m).or_default().push(value);
             continue;
         }
         let Some(&opt) = values.iter().chain(CONN_OPTS).find(|o| **o == text) else {
@@ -450,6 +626,16 @@ fn options(group: &str, sub: &str) -> Option<(&'static [&'static str], &'static 
         ("pe", "import") => (&["--name", "--arch", "--kit-version"], NONE),
         ("package", "create" | "edit") => (DEF, NONE),
         ("package", "clone") => (&["--name"], NONE),
+        ("code", "issue") => (&["--ttl", "--note"], NONE),
+        ("code" | "boot-service" | "boot-stop", "list")
+        | ("code", "revoke")
+        | ("session" | "job" | "boot-service", "show")
+        | ("job", "ack")
+        | ("boot-stop", "clear") => (NONE, NONE),
+        ("session" | "job", "list") => (&["--state"], NONE),
+        ("session", "approve") => (&["--display-code"], NONE),
+        ("session", "refuse") => (&["--note"], NONE),
+        ("boot-service", "set-packages") => (&["--if-match"], &["--none"]),
         _ => return None,
     })
 }
@@ -480,7 +666,7 @@ fn parse_api(group: &OsStr, rest: Vec<OsString>) -> Result<Command, UsageError> 
     let Some((values, flags)) = options(group, sub_text) else {
         return Err(UsageError(format!("unknown {group} command {sub:?}")));
     };
-    let mut s = scan_m2(rest.collect(), values, flags)?;
+    let mut s = scan_m2(rest.collect(), values, flags, &[])?;
     if s.help {
         return Ok(Command::Help);
     }
@@ -561,6 +747,79 @@ fn parse_api(group: &OsStr, rest: Vec<OsString>) -> Result<Command, UsageError> 
         ("package", "clone") => Action::PackageClone(s.id()?, s.required("--name")?),
         ("package", "delete") => Action::PackageDelete(s.id()?, yes),
         ("package", "manifest") => Action::PackageManifest(s.id()?, out(&mut s)?),
+        ("code", "issue") => {
+            s.positional(&[])?;
+            Action::CodeIssue {
+                ttl_s: s.number("--ttl")?,
+                note: s.text("--note")?,
+            }
+        }
+        ("code", "list") => {
+            s.positional(&[])?;
+            Action::CodeList
+        }
+        ("code", "revoke") => Action::CodeRevoke(s.id()?),
+        ("session", "list") => {
+            s.positional(&[])?;
+            Action::SessionList(s.text("--state")?)
+        }
+        ("session", "show") => Action::SessionShow(s.id()?),
+        ("session", "approve") => {
+            let id = match s.positional.len() {
+                0 => None,
+                _ => Some(s.id()?),
+            };
+            Action::SessionApprove {
+                id,
+                display_code: s.required("--display-code")?,
+            }
+        }
+        ("session", "refuse") => Action::SessionRefuse {
+            id: s.id()?,
+            note: s.text("--note")?,
+        },
+        ("job", "list") => {
+            s.positional(&[])?;
+            Action::JobList(s.text("--state")?)
+        }
+        ("job", "show") => Action::JobShow(s.id()?),
+        ("job", "ack") => Action::JobAck(s.id()?),
+        ("boot-service", "list") => {
+            s.positional(&[])?;
+            Action::BootServiceList
+        }
+        ("boot-service", "show") => Action::BootServiceShow(s.id()?),
+        ("boot-service", "set-packages") => {
+            let mut ids = std::mem::take(&mut s.positional).into_iter().map(|a| {
+                a.into_string()
+                    .map_err(|_| UsageError("ID is not valid UTF-8".into()))
+            });
+            let id = ids
+                .next()
+                .ok_or_else(|| UsageError("ID is required".into()))??;
+            let packages: Vec<String> = ids.collect::<Result<_, _>>()?;
+            let none = s.flags.contains("--none");
+            if none && !packages.is_empty() {
+                return Err(UsageError(
+                    "--none removes every package; do not list packages with it".into(),
+                ));
+            }
+            if !none && packages.is_empty() {
+                return Err(UsageError(
+                    "give the complete package list, or --none to remove every package".into(),
+                ));
+            }
+            Action::BootServiceSetPackages {
+                id,
+                packages,
+                if_match: s.text("--if-match")?,
+            }
+        }
+        ("boot-stop", "list") => {
+            s.positional(&[])?;
+            Action::BootStopList
+        }
+        ("boot-stop", "clear") => Action::BootStopClear(s.id()?),
         _ => return Err(UsageError(format!("unknown {group} command {sub:?}"))),
     };
     Ok(Command::Api(Box::new(ApiCommand { conn, action })))
@@ -982,5 +1241,265 @@ mod tests {
         for args in bad {
             assert!(p(args).is_err(), "{args:?} should be a usage error");
         }
+    }
+
+    #[test]
+    fn m3_commands_parse() {
+        assert_eq!(
+            api(&["code", "issue"]).action,
+            Action::CodeIssue {
+                ttl_s: None,
+                note: None
+            }
+        );
+        assert_eq!(
+            api(&["code", "issue", "--ttl", "600", "--note", "bench 4"]).action,
+            Action::CodeIssue {
+                ttl_s: Some(600),
+                note: Some("bench 4".into())
+            }
+        );
+        assert_eq!(api(&["code", "list"]).action, Action::CodeList);
+        assert_eq!(
+            api(&["code", "revoke", ID]).action,
+            Action::CodeRevoke(ID.into())
+        );
+        assert_eq!(api(&["session", "list"]).action, Action::SessionList(None));
+        assert_eq!(
+            api(&["session", "list", "--state", "authorised"]).action,
+            Action::SessionList(Some("authorised".into()))
+        );
+        assert_eq!(
+            api(&["session", "show", ID]).action,
+            Action::SessionShow(ID.into())
+        );
+        assert_eq!(
+            api(&["session", "approve", "--display-code", "ABC-123"]).action,
+            Action::SessionApprove {
+                id: None,
+                display_code: "ABC-123".into()
+            }
+        );
+        assert_eq!(
+            api(&["session", "approve", ID, "--display-code", "abc123"]).action,
+            Action::SessionApprove {
+                id: Some(ID.into()),
+                display_code: "abc123".into()
+            }
+        );
+        assert_eq!(
+            api(&["session", "refuse", ID, "--note", "not ours"]).action,
+            Action::SessionRefuse {
+                id: ID.into(),
+                note: Some("not ours".into())
+            }
+        );
+        assert_eq!(api(&["job", "list"]).action, Action::JobList(None));
+        assert_eq!(
+            api(&["job", "list", "--state", "failed"]).action,
+            Action::JobList(Some("failed".into()))
+        );
+        assert_eq!(api(&["job", "show", ID]).action, Action::JobShow(ID.into()));
+        assert_eq!(api(&["job", "ack", ID]).action, Action::JobAck(ID.into()));
+        assert_eq!(
+            api(&["boot-service", "list"]).action,
+            Action::BootServiceList
+        );
+        assert_eq!(
+            api(&["boot-service", "show", ID]).action,
+            Action::BootServiceShow(ID.into())
+        );
+        assert_eq!(
+            api(&["boot-service", "set-packages", ID, "p1", "p2"]).action,
+            Action::BootServiceSetPackages {
+                id: ID.into(),
+                packages: vec!["p1".into(), "p2".into()],
+                if_match: None
+            }
+        );
+        assert_eq!(
+            api(&[
+                "boot-service",
+                "set-packages",
+                ID,
+                "--none",
+                "--if-match",
+                "\"bsp-1\""
+            ])
+            .action,
+            Action::BootServiceSetPackages {
+                id: ID.into(),
+                packages: Vec::new(),
+                if_match: Some("\"bsp-1\"".into())
+            }
+        );
+        assert_eq!(api(&["boot-stop", "list"]).action, Action::BootStopList);
+        assert_eq!(
+            api(&["boot-stop", "clear", ID]).action,
+            Action::BootStopClear(ID.into())
+        );
+    }
+
+    #[test]
+    fn m3_usage_errors() {
+        let bad: &[&[&str]] = &[
+            &["code"],
+            &["code", "show", ID],
+            &["code", "issue", "extra"],
+            &["code", "issue", "--ttl", "ten"],
+            &["code", "issue", "--ttl", "-1"],
+            &["code", "issue", "--note"],
+            &["code", "issue", "--ttl", "1", "--ttl", "2"],
+            &["code", "revoke"],
+            &["code", "list", "--state", "x"],
+            &["session", "approve"],
+            &["session", "approve", ID],
+            &["session", "approve", ID, ID, "--display-code", "ABC-123"],
+            &["session", "refuse"],
+            &["session", "list", "extra"],
+            &[
+                "session",
+                "approve",
+                "--display-code",
+                "A",
+                "--display-code",
+                "B",
+            ],
+            &["job", "show"],
+            &["job", "ack", ID, "--yes"],
+            &["job", "retry", ID],
+            &["boot-service", "set-packages", ID],
+            &["boot-service", "set-packages"],
+            &["boot-service", "set-packages", ID, "p1", "--none"],
+            &["boot-service", "set-packages", ID, "--none", "--none"],
+            &["boot-service", "enrol"],
+            &["boot-stop", "clear"],
+            &["boot-stop", "add", ID],
+        ];
+        for args in bad {
+            assert!(p(args).is_err(), "{args:?} should be a usage error");
+        }
+    }
+
+    fn kit_args(extra: &[&str]) -> Vec<String> {
+        let base = [
+            "boot-manifest",
+            "create",
+            "--pe-kit",
+            "--root",
+            "/r",
+            "--out",
+            "/o",
+            "--pe",
+            ID,
+            "--boot-program",
+            "bootmgfw.efi",
+            "--bcd",
+            "Boot/BCD",
+            "--sdi",
+            "Boot/boot.sdi",
+            "--wim",
+            "Boot/boot.wim",
+        ];
+        base.iter().chain(extra).map(|s| (*s).to_owned()).collect()
+    }
+
+    fn pk(args: &[String]) -> Result<Command, UsageError> {
+        parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn pe_kit_create_parses() {
+        let got = pk(&kit_args(&[
+            "--font",
+            "Boot/Fonts/a.ttf",
+            "--server",
+            "https://ctl:8443",
+            "--font",
+            "Boot/Fonts/b.ttf",
+            "--",
+            "extra.bin",
+        ]));
+        let Ok(Command::CreateKit(k)) = got else {
+            panic!("{got:?}");
+        };
+        assert_eq!(k.create.root, PathBuf::from("/r"));
+        assert_eq!(k.create.out, PathBuf::from("/o"));
+        assert_eq!(k.create.names, vec![OsString::from("extra.bin")]);
+        assert_eq!(k.boot_program, "bootmgfw.efi");
+        assert_eq!(k.bcd, "Boot/BCD");
+        assert_eq!(k.sdi, "Boot/boot.sdi");
+        assert_eq!(k.wim, "Boot/boot.wim");
+        assert_eq!(
+            k.fonts,
+            vec![
+                OsString::from("Boot/Fonts/a.ttf"),
+                OsString::from("Boot/Fonts/b.ttf")
+            ]
+        );
+        assert_eq!(k.pe, ID);
+        assert_eq!(k.conn.server.as_deref(), Some("https://ctl:8443"));
+        // No NAME is needed: the kit files are published by themselves.
+        assert!(matches!(pk(&kit_args(&[])), Ok(Command::CreateKit(_))));
+        // `--pe-kit` after `--` is a name, so this is the M1 create.
+        assert!(matches!(
+            p(&[
+                "boot-manifest",
+                "create",
+                "--root",
+                "/r",
+                "--out",
+                "/o",
+                "--",
+                "--pe-kit"
+            ]),
+            Ok(Command::Create(_))
+        ));
+    }
+
+    #[test]
+    fn pe_kit_create_usage_errors() {
+        let full = kit_args(&[]);
+        // Each required option left out in turn.
+        for opt in [
+            "--root",
+            "--out",
+            "--pe",
+            "--boot-program",
+            "--bcd",
+            "--sdi",
+            "--wim",
+        ] {
+            let i = full.iter().position(|a| a == opt).unwrap();
+            let mut args = full.clone();
+            args.drain(i..i + 2);
+            assert!(pk(&args).is_err(), "without {opt}");
+        }
+        for extra in [
+            &["--font"][..],
+            &["--font", ""],
+            &["--wim", "x.wim"],
+            &["--pe-kit"],
+            &["--manifest", "/m"],
+            &["--generate-bcd"],
+        ] {
+            assert!(pk(&kit_args(extra)).is_err(), "{extra:?}");
+        }
+        // Connection options stay refused on the M1 create.
+        assert!(
+            p(&[
+                "boot-manifest",
+                "create",
+                "--root",
+                "/r",
+                "--out",
+                "/o",
+                "--server",
+                "https://ctl",
+                "a"
+            ])
+            .is_err()
+        );
+        assert_eq!(pk(&kit_args(&["--help"])), Ok(Command::Help));
     }
 }

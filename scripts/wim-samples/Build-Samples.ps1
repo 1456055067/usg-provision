@@ -31,11 +31,12 @@
       S12B copy of S04; /Delete-Image index 1, /Append-Image    S04.wim,
                                                                 tree-01
 
-    S11 (BOOT-011) and S12 (BOOT-012) ask what DISM writes, so their
-    manifest rows carry expected "observe": the consumer records the
-    parser's result and does not judge it. If DISM itself refuses the
-    second S11 step, that refusal is the observation: the row's status is
-    "dism-refused", the partial file is deleted, and the run does not fail.
+    S11 (BOOT-011) and S12 (BOOT-012) asked what DISM writes. Run
+    40599556702 answered (docs/formats/wim-observed.md OBS-018 to
+    OBS-023), so their rows now carry expected "accept". If DISM itself
+    refuses the second S11 step, the row's status is "dism-refused" and
+    the partial file is deleted; the verify job then fails, because that
+    differs from the recorded observation.
 
     Set Large (job "generate-large"; observations only, the WIM is deleted):
 
@@ -422,9 +423,10 @@ if ($Set -eq 'Standard') {
     }
     Add-ManifestRow 'S10' $s10 'xpress' 1 'accept' $(if ($ok['S10']) { 'produced' } else { 'not-produced' })
 
-    # S11 (BOOT-011): two images with identical content. Does DISM write
-    # two metadata resources with one hash, share one, or refuse? A DISM
-    # refusal of the second step is recorded as status "dism-refused".
+    # S11 (BOOT-011): two images with identical content. Run 40599556702:
+    # DISM names one metadata resource from two equal lookup entries
+    # (OBS-018). A DISM refusal of the second step is recorded as status
+    # "dism-refused" (and now fails verify).
     # $state is a hashtable so the sample blocks can set it.
     $state = @{}
 
@@ -445,7 +447,7 @@ if ($Set -eq 'Standard') {
         Save-WimInfo 'S11A' $s11a $s11aExpect
         Save-Dump $s11a
     }
-    Add-ManifestRow 'S11A' $s11a 'xpress' 2 'observe' $(if ($ok['S11A']) { $state['S11A'] } else { 'not-produced' })
+    Add-ManifestRow 'S11A' $s11a 'xpress' 2 'accept' $(if ($ok['S11A']) { $state['S11A'] } else { 'not-produced' })
 
     # S11B: S02 index 1 exported twice into one new file (the second under
     # another name, so only the metadata question differs).
@@ -477,11 +479,12 @@ if ($Set -eq 'Standard') {
     else {
         $Failures.Add('S11B: not produced because S02 failed')
     }
-    Add-ManifestRow 'S11B' $s11b 'xpress' $state['S11B-images'] 'observe' $(if ($ok['S11B']) { $state['S11B'] } else { 'not-produced' })
+    Add-ManifestRow 'S11B' $s11b 'xpress' $state['S11B-images'] 'accept' $(if ($ok['S11B']) { $state['S11B'] } else { 'not-produced' })
 
-    # S12 (BOOT-012): a multi-image file changed after capture. Does a
-    # commit or an append put metadata out of lookup order, or leave
-    # unused space? Copies of S04 (12 images).
+    # S12 (BOOT-012): a multi-image file changed after capture. Run
+    # 40599556702: a commit moves the committed image's metadata after
+    # every other resource (OBS-021); superseded data stays in the file
+    # (OBS-020, OBS-022). Copies of S04 (12 images).
     # S12A: mount index 1, add the tree-service files, commit.
     $s12a = Join-Path $OutDir 'S12A.wim'
     $ok['S12A'] = $false
@@ -529,8 +532,8 @@ if ($Set -eq 'Standard') {
     else {
         $Failures.Add('S12A, S12B: not produced because S04 failed')
     }
-    Add-ManifestRow 'S12A' $s12a 'xpress' 12 'observe' $(if ($ok['S12A']) { 'produced' } else { 'not-produced' })
-    Add-ManifestRow 'S12B' $s12b 'xpress' 12 'observe' $(if ($ok['S12B']) { 'produced' } else { 'not-produced' })
+    Add-ManifestRow 'S12A' $s12a 'xpress' 12 'accept' $(if ($ok['S12A']) { 'produced' } else { 'not-produced' })
+    Add-ManifestRow 'S12B' $s12b 'xpress' 12 'accept' $(if ($ok['S12B']) { 'produced' } else { 'not-produced' })
 
     # Upload cap and checksums over every sample file actually written.
     $samples = @(Get-ChildItem -LiteralPath $OutDir -File | Where-Object { $_.Extension -in '.wim', '.swm', '.esd' } | Sort-Object Name)

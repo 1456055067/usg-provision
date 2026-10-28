@@ -108,14 +108,20 @@ pub enum WimError {
     MetadataOnly,
     /// Two resources (lookup entries, or a lookup entry and the lookup
     /// table, XML or integrity table) claim the same bytes of the file.
+    /// Two metadata entries next to each other in the lookup table and
+    /// equal in all 50 bytes are one resource used by two images
+    /// (OBS-018), not an overlap; a third equal entry is.
     ResourceOverlap,
     /// Two file (non-metadata) lookup entries carry the same hash. Two
     /// images with identical metadata are accepted (BOOT-011).
     DuplicateResource,
-    /// The metadata entries, in lookup-table order, are not in increasing
-    /// file-offset order, so which image each belongs to is not settled
-    /// (OPEN-WIM-6). A serviced multi-image file may be written this way
-    /// (BOOT-012); exporting each image to a new file is the remedy.
+    /// The metadata entries, in lookup-table order, are not in one of the
+    /// observed layouts: rising file offsets, one entry repeated directly
+    /// after its twin (OBS-018), or the first entry moved by a commit to
+    /// after every other lookup entry, ending where the lookup table
+    /// starts and before the XML and integrity table (OBS-021). Other
+    /// serviced layouts are unobserved (OPEN-WIM-6, BOOT-012); exporting
+    /// each image to a new file is the remedy.
     MetadataOrderNotSupported,
     /// A compressed chunk could not be decoded.
     Decode(CodecError),

@@ -275,6 +275,131 @@ mod check {
         }
     }
 
+    fn same_tree(name: &str) -> ImageSpec {
+        ImageSpec {
+            name: name.to_owned(),
+            description: None,
+            files: vec![
+                pseudorandom(5000, 7),
+                b"same tree, captured twice\n".repeat(2000),
+            ],
+        }
+    }
+
+    fn bytes_read(b: &[u8], limits: &WimLimits) -> (Result<WimSummary, WimError>, u64) {
+        let mut total = 0u64;
+        let mut count = |n: u64| {
+            total += n;
+            ControlFlow::Continue(())
+        };
+        let r = check_wim(
+            &mut Cursor::new(b),
+            u64::try_from(b.len()).unwrap(),
+            limits,
+            usgp_crypto::provider(),
+            &mut count,
+        );
+        (r, total)
+    }
+
+    #[test]
+    fn reused_metadata_entry_accepted() {
+        // OBS-018 (S11A, S11B): two images name one metadata resource
+        // through adjacent lookup entries equal in all 50 bytes. Accepted;
+        // the resource is read, decoded and counted once (SEC-003). With 8
+        // images the builder writes 4 such pairs (4 distinct resources,
+        // 8 entries).
+        for c in [Compression::None, Compression::Xpress] {
+            for images in [2usize, 8] {
+                let mut w = WimBuilder::new(c).reuse_metadata(true);
+                let names: Vec<String> = (1..=images).map(|k| format!("img-{k}")).collect();
+                for n in &names {
+                    w = w.image_spec(same_tree(n));
+                }
+                let (b, info) = w.build().unwrap();
+                let pairs: Vec<_> = info.metadata.chunks(2).collect();
+                assert!(pairs.iter().all(|p| p[0] == p[1]), "{c:?}");
+                assert!(pairs.windows(2).all(|w| w[0][0].offset < w[1][0].offset));
+                let (r, read) = bytes_read(&b, &WimLimits::DEFAULT);
+                let s = r.unwrap();
+                assert_eq!(s.image_count, u32::try_from(images).unwrap());
+                let got: Vec<_> = s.editions.iter().map(|e| e.name.clone()).collect();
+                assert_eq!(got, names, "{c:?}");
+                // Every byte at most once (a shared range is not re-read
+                // per image), plus the header.
+                let len = u64::try_from(b.len()).unwrap();
+                assert!(read <= len + 208, "{c:?} {images}: read {read} of {len}");
+                // The budget counts each shared range once: a total that
+                // fits every distinct resource plus half of the smallest,
+                // but not a count per image, is enough.
+                let distinct: u64 = pairs.iter().map(|p| p[0].original_size).sum();
+                let smallest = pairs.iter().map(|p| p[0].original_size).min().unwrap();
+                let tight = WimLimits {
+                    max_metadata_total_bytes: distinct + smallest / 2,
+                    ..WimLimits::DEFAULT
+                };
+                assert!(distinct + smallest / 2 < 2 * distinct);
+                assert!(bytes_read(&b, &tight).0.is_ok(), "{c:?} {images}");
+            }
+        }
+    }
+
+    #[test]
+    fn reused_metadata_with_integrity_and_boot_index() {
+        let (b, _) = WimBuilder::new(Compression::Xpress)
+            .reuse_metadata(true)
+            .image_spec(same_tree("one"))
+            .image_spec(same_tree("two"))
+            .integrity(true)
+            .boot_index(2)
+            .build()
+            .unwrap();
+        let s = run(&b).unwrap();
+        assert!(s.has_integrity_table);
+        assert_eq!(check_pe(&s), Ok(2));
+    }
+
+    #[test]
+    fn moved_first_metadata_accepted_and_names_index_1() {
+        // OBS-021 (S12A): entry 1's metadata written after every other
+        // resource; the superseded copy stays in the file, unnamed
+        // (OBS-022). Lookup order names the index.
+        for c in [Compression::None, Compression::Xpress] {
+            for images in [2usize, 3, 12] {
+                let mut w = WimBuilder::new(c).move_first_metadata(true);
+                for k in 1..=images {
+                    w = w.image(&format!("img-{k}"), "d");
+                }
+                let (b, info) = w.build().unwrap();
+                let moved = info.metadata[0];
+                assert!(info.metadata[1..].iter().all(|m| m.offset < moved.offset));
+                assert!(info.files.iter().all(|f| f.offset < moved.offset));
+                assert_eq!(moved.offset + moved.stored_size, info.lookup.offset);
+                let s = run(&b).unwrap();
+                assert_eq!(s.editions[0].name, "img-1", "{c:?}");
+
+                // The stale copy is never read for the check ...
+                let stale = info.stale[0];
+                let mut d = b.clone();
+                let at = usize::try_from(stale.offset).unwrap();
+                d[at..at + usize::try_from(stale.stored_size).unwrap()].fill(0x5a);
+                assert!(run(&d).is_ok(), "{c:?} {images}: stale copy was read");
+                // ... while the moved copy is image 1's.
+                let mut d = b.clone();
+                let at = usize::try_from(moved.offset + moved.stored_size / 2).unwrap();
+                d[at] ^= 0xff;
+                let e = run(&d).unwrap_err();
+                assert!(
+                    matches!(
+                        e,
+                        WimError::MetadataHashMismatch { index: 1 } | WimError::Decode(_)
+                    ),
+                    "{c:?} {images}: {e:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn version_alone_is_not_refused() {
         // OBS-003: OPEN-WIM-2 stays open; the value is recorded only.

@@ -8,7 +8,9 @@
 //! lookup table's locations and hashes are held for the whole-table checks
 //! (bounded by `max_lookup_bytes`), every other structure is streamed
 //! through fixed buffers. Work is bounded too: no two resources may share
-//! bytes, so each is read at most once, and decoded metadata is capped by
+//! bytes, except metadata entries equal in all 50 bytes (one resource used
+//! by several images, OBS-018), which are read, decoded and counted once;
+//! so each range is read at most once, and decoded metadata is capped by
 //! `max_metadata_total_bytes` and [`METADATA_EXPANSION_LIMIT`] times the
 //! file length (SEC-003).
 
@@ -52,6 +54,11 @@ pub struct EditionInfo {
 }
 
 /// The result of a successful check.
+///
+/// Two images may name one metadata resource (OBS-018). Work done per
+/// image later (M3 apply) must be keyed by distinct resource
+/// ([`LookupScan::distinct_metadata`](super::lookup::LookupScan::distinct_metadata))
+/// or bounded per resource, never repeated per image (SEC-002).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WimSummary {
     /// Number of images.
@@ -170,8 +177,9 @@ pub fn check_wim<R: Read + Seek>(
     }
 
     // 3. Lookup table, streamed, then checked as a whole against itself
-    // and the header's own resources (no shared bytes, no repeated hash,
-    // metadata in offset order).
+    // and the header's own resources (no shared bytes except a reused
+    // metadata entry, no repeated file hash, metadata in one of the
+    // observed orders).
     let mut header_resources = vec![h.lookup, h.xml];
     if has_integrity {
         header_resources.push(h.integrity);
@@ -194,7 +202,7 @@ pub fn check_wim<R: Read + Seek>(
 
     // 5. Counts: header, XML and metadata entries agree; indexes 1..=n.
     let xml_count = u32::try_from(xml.images.len()).unwrap_or(u32::MAX);
-    let meta_count = u32::try_from(scan.metadata.len()).unwrap_or(u32::MAX);
+    let meta_count = u32::try_from(scan.image_metadata().len()).unwrap_or(u32::MAX);
     if xml_count != h.image_count || meta_count != h.image_count {
         return Err(WimError::ImageCountMismatch {
             header: h.image_count,
@@ -231,7 +239,7 @@ pub fn check_wim<R: Read + Seek>(
             }
         })?;
         let located = scan
-            .metadata
+            .image_metadata()
             .get(k)
             .is_some_and(|e| e.reshdr.is_metadata() && same_location(&e.reshdr, &h.boot_metadata));
         if !located {
@@ -242,8 +250,13 @@ pub fn check_wim<R: Read + Seek>(
     }
 
     // 5b. Metadata work budget, before anything is decoded (SEC-003).
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SC-5 (Denial of Service Protection) - a metadata
+    //   resource used by several images (OBS-018) is counted once here
+    //   and decoded once in step 7, so reuse cannot multiply the work;
+    //   the budget is the sum over distinct ranges.
     let mut metadata_total: u64 = 0;
-    for entry in &scan.metadata {
+    for (_, entry) in scan.distinct_metadata() {
         if entry.reshdr.original_size > limits.max_metadata_bytes {
             return Err(WimError::LimitExceeded { what: "metadata" });
         }
@@ -273,17 +286,26 @@ pub fn check_wim<R: Read + Seek>(
         raw_sized_file_chunks = raw_sized_file_chunks.saturating_add(raw);
     }
 
-    // 7. Metadata resources: decode and SHA-1.
-    // FORMAT: OBS-009 (partly settled) - the k-th lookup entry with the
-    // metadata flag, in lookup-table order, is image index k. In S04
-    // lookup, offset and index order coincide, so whether lookup order or
-    // offset order rules is still open (OPEN-WIM-6); files where they
-    // differ were refused by the lookup scan (BOOT-003).
+    // 7. Metadata resources: decode and SHA-1, each distinct resource once.
+    // FORMAT: OBS-009, OBS-021 - the k-th lookup entry with the metadata
+    // flag, in lookup-table order, is image index k. In S04 lookup, offset
+    // and index order coincide; in S12A they differ and lookup order names
+    // the index (OBS-021; wim.md §5 "Commit" [observed] note, §13
+    // OPEN-WIM-6, partly settled). Orders other than those observed were
+    // refused by the lookup scan (BOOT-003). An entry repeating the one
+    // before it (OBS-018) names the same bytes and hash, which the earlier
+    // entry's check already covered.
+    // M3: OPEN-WIM-6 rests on one serviced sample (S12A). Applying an
+    // image by index must cross-check the decoded image against that
+    // index's XML facts (name, file and directory counts, TOTALBYTES)
+    // and refuse on a mismatch, rather than trust lookup position alone
+    // (SEC-003). Per-image work must also go through
+    // `distinct_metadata` or be bounded per resource (SEC-002).
     let mut decoder = match compression {
         Compression::Xpress => Some(XpressDecoder::new()),
         Compression::None => None,
     };
-    for (index, entry) in (1u32..).zip(scan.metadata.iter()) {
+    for (index, entry) in scan.distinct_metadata() {
         let mut hasher = crypto.legacy_sha1_hasher();
         let mut sink = |piece: &[u8]| {
             hasher.update(piece);

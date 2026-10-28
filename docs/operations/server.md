@@ -9,19 +9,26 @@ written to a tamper-evident audit chain in PostgreSQL.
 
 **M2 evidence status (read first).** The server's behaviour is tested
 in-process on the in-memory store, on a macOS development host, which is
-functional evidence only (POAM-2). The following have **not run** and are
-**NOT RUN** until CI runs them on a commit (POAM-34):
+functional evidence only (POAM-2). The first CI runs on commit d72b761
+(the M2 commit plus CI fixes) on Linux gave the following results; see
+[ATO_EVIDENCE.md](../compliance/ATO_EVIDENCE.md):
 
-- every PostgreSQL path: migrations, role grants, triggers,
-  certificate-only database login, the end-to-end flow on PostgreSQL and
-  `audit verify` against PostgreSQL (`pg-integration`);
-- the 10.5 GiB upload with the 256 MiB memory bound (`large-upload`);
-- the Linux check of our own DISM-made sample WIMs (`wim-samples`
-  `verify`); local runs against a copy of sample run R1 are functional
-  evidence only;
-- 600 s fuzzing of the WIM and XPRESS parsers (`fuzz-smoke`);
-- the manual procedure MT-1 with licensed Windows 11 Enterprise media
-  (POAM-33).
+- **PASS:** the 10.5 GiB upload on PostgreSQL with the 256 MiB memory
+  bound (`large-upload`, CI run 40601242085). The server's peak resident
+  memory was 51 MiB, and `audit verify` reported the chain intact.
+- **PASS:** 600 s fuzzing of the WIM and XPRESS parsers (`fuzz-smoke`,
+  CI run 40601242085). These runs were built without ASan (POAM-37).
+- **PASS:** the Linux check of our own DISM-made sample WIMs
+  (`wim-samples` `verify`, runs 40601244164 and 40601244679). This
+  checked the committed WIM rules, before the S11/S12 change described
+  under [WIM acceptance rules](#wim-acceptance-rules-and-reason-codes).
+- **Not fully passed:** the PostgreSQL tests (`pg-integration`, CI runs
+  40601242085 and 40601244276). `audit_pg` passed, and `migrate_pg`
+  passed 8 of 9 tests. `newer_schema_refused` failed because the test
+  was stale; its fix has not yet run. `repo_pg` (role grants) and
+  `e2e_pg` (the end-to-end flow on PostgreSQL) are **NOT RUN** (POAM-34).
+- **NOT RUN:** the manual procedure MT-1 with licensed Windows 11
+  Enterprise media (POAM-33).
 
 The example configuration and the service unit in this guide are
 **examples: not shipped and not tested**. Every default below is
@@ -886,9 +893,9 @@ are in decision 0017); they are not Microsoft text.
 | `wim_split_not_supported` | Split part (`.swm`) | Merge the set into one `.wim` first |
 | `wim_resource_only_not_supported` | Resource-only WIM | Not supported |
 | `wim_metadata_only_not_supported` | Metadata-only WIM | Not supported |
-| `wim_resource_overlap` | Two resources occupy the same bytes, including two metadata entries on one range (*project rule*) | File is damaged; re-create |
+| `wim_resource_overlap` | Two resources occupy the same bytes (*project rule*). One exception is accepted: two adjacent lookup entries that are equal in all 50 bytes are one shared metadata resource, read and verified once. This is the layout DISM writes for two identical images (OBS-018). Still refused: a third equal entry, a repeat that is not directly after its twin, and any other sharing (other size, hash, flags or count, a partial overlap, or a metadata entry on a file range) | File is damaged or of an unobserved layout; re-create, or export each image to a new file |
 | `wim_duplicate_resource` | Two **file** resources have the same hash (*project rule*; metadata entries are not subject to it) | Re-create the file with DISM |
-| `wim_metadata_order_not_supported` | Image metadata is not stored in lookup-table order (*project rule*, derived, unconfirmed; can follow servicing a multi-image file) | Export each image to a new file and upload that file |
+| `wim_metadata_order_not_supported` | Image metadata is not stored in rising offset order in the lookup table (*project rule*). One serviced layout is accepted: the first metadata entry (index 1) lies after every other entry and ends exactly where the lookup table starts. This is what DISM writes after a commit of index 1 (OBS-021), and lookup order still gives the index there, from one sample. Still refused: any other order, including a moved entry that is not the first, and a moved entry together with a shared one | Export each image to a new file and upload that file |
 | `wim_decode_failed` | Compressed data is invalid | File is damaged; re-copy |
 | `wim_read_error` | The stored file could not be read | Storage fault on the server; check the host |
 | `wim_check_stalled` | The check made no progress for `check_stall_timeout_s` | Retry; check server load and storage |
@@ -934,9 +941,10 @@ WIM metadata at most 32 times the file size; one chunk buffer per
 download (8 MiB chunks, each verified before it is sent); 16
 `--trusted-key` options; checkpoint slack as in
 [Verifying the chain](#verifying-the-chain). The server's resident memory
-during a 10.5 GiB upload is designed to stay under 256 MiB; that bound is
-asserted only by the CI `large-upload` job, which has **not run**
-(POAM-34).
+during a 10.5 GiB upload is designed to stay under 256 MiB. That bound is
+asserted only by the CI `large-upload` job. It passed in CI run
+40601242085 on commit d72b761, with a peak of 51 MiB (synthetic content).
+Real media (MT-1) is NOT RUN.
 
 ## Network controls
 
@@ -958,18 +966,20 @@ asserted only by the CI `large-upload` job, which has **not run**
 ## Known gaps
 
 See [POAM.md](../compliance/POAM.md): POAM-4 and POAM-5 (server half
-pending CI evidence), POAM-14, and POAM-18 to POAM-36. In short: keys in
+pending CI evidence), POAM-14, and POAM-18 to POAM-37. In short: keys in
 files with no HSM; no RFC 5280 policy-tree processing; CRL files only;
 clients do not check server-certificate revocation; CLI software keys
 only; operator-declared facts; non-FIPS password code linked but
 unreachable; audit truncation and unsigned-tail residual; raw-chunk
 refusal; pre-authentication slots; credential refusal budget; CRL number
 high-water mark not persisted; owner-key and local-admin guard limits;
-key buffer reallocation; WIM sample observation results; MT-1 and CI
-evidence NOT RUN; OPEN-PE-LIC with counsel; no restore event.
+key buffer reallocation; serviced WIM layouts with few observations;
+`repo_pg`, `e2e_pg` and MT-1 NOT RUN; Linux fuzzing without ASan;
+OPEN-PE-LIC with counsel; no restore event.
 
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-27 | First M2 CI evidence (commit d72b761) and the S11/S12 WIM rules. Rewrote the evidence status: `large-upload`, `fuzz-smoke` and the `wim-samples` `verify` job PASS; `pg-integration` not fully passed (`repo_pg` and `e2e_pg` NOT RUN); MT-1 NOT RUN. Updated the 256 MiB note under Limits. `wim_resource_overlap` and `wim_metadata_order_not_supported` now describe the S11/S12 rules (OBS-018, OBS-021), matching the working tree, which is not yet committed. Known gaps now go up to POAM-37. |
 | 2026-10-27 | First version for milestone M2 (WU-11): deployment with three certificate-only database roles, key modes and the `serve` admin-key refusal, command line and exit codes, full configuration reference including round-1 and round-2 keys, example configuration and example service unit (not shipped, not tested; REL-M2-P6-003), TLS and CRL refresh with rollback refusal, audit chain, checkpoints, heartbeat, SIEM forwarding and `audit verify` (`--max-unsigned-records` default 251, `--max-checkpoint-age`), time synchronisation, backup and restore with the audit-chain procedure (NIST-012), forward-only migrations with restore from backup as rollback (REL-M2-P6-004), WIM reason codes with remedies, API reason codes, limits, network controls and NOT RUN caveats. |

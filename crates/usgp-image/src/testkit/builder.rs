@@ -11,6 +11,11 @@
 //!   stored raw with flag 0x04 clear, also in XPRESS files (OBS-010);
 //! - per image, its new file resources then its metadata resource, so
 //!   metadata offsets rise with the image index (as in S04, OBS-009);
+//! - optionally, the two serviced layouts DISM wrote in run R2: one
+//!   metadata resource named by two equal adjacent entries (S11A,
+//!   S11B; OBS-018), or image 1's metadata written again after every
+//!   other resource with the old copy left in place (S12A; OBS-021,
+//!   OBS-022);
 //! - then the lookup table directly after the last metadata, with the
 //!   metadata entries first (OBS-009), the XML directly after the lookup
 //!   table with the element order DISM uses (OBS-014), and the integrity
@@ -84,6 +89,9 @@ pub struct BuildInfo {
     pub metadata: Vec<ResourceHeader>,
     /// File resources in file order.
     pub files: Vec<ResourceHeader>,
+    /// Metadata written but named by no entry (the superseded copy left
+    /// by [`WimBuilder::move_first_metadata`]).
+    pub stale: Vec<ResourceHeader>,
 }
 
 /// Builder for test WIM files.
@@ -102,6 +110,8 @@ pub struct WimBuilder {
     zero_file: Option<u64>,
     bad_metadata_hash: Option<u32>,
     identical_metadata: bool,
+    reuse_metadata: bool,
+    move_first_metadata: bool,
     guid: [u8; 16],
 }
 
@@ -123,6 +133,8 @@ impl WimBuilder {
             zero_file: None,
             bad_metadata_hash: None,
             identical_metadata: false,
+            reuse_metadata: false,
+            move_first_metadata: false,
             guid: *b"usgp-test-guid-1",
         }
     }
@@ -230,11 +242,33 @@ impl WimBuilder {
 
     /// Writes every image's metadata content as image 1's would be. With
     /// identical files, images then have identical metadata (same bytes,
-    /// same SHA-1), each written at its own range (BOOT-011, sample S11;
-    /// what DISM writes here is unobserved).
+    /// same SHA-1), each written at its own range (BOOT-011; DISM wrote
+    /// one shared range instead in S11, see [`Self::reuse_metadata`]).
     #[must_use]
     pub fn identical_metadata(mut self, on: bool) -> Self {
         self.identical_metadata = on;
+        self
+    }
+
+    /// Pairs images: image 2k names image 2k - 1's metadata with the same
+    /// 50-byte lookup entry, directly after it, and no new metadata is
+    /// written for it, as DISM did for the two images of S11A and S11B
+    /// (OBS-018; only pairs were observed, so a resource is never named
+    /// three times). Meant for images with identical files.
+    #[must_use]
+    pub fn reuse_metadata(mut self, on: bool) -> Self {
+        self.reuse_metadata = on;
+        self
+    }
+
+    /// After every other resource, writes image 1's metadata again and
+    /// points lookup entry 1 at the new copy, leaving the old copy in
+    /// place and unnamed, as DISM did when committing index 1 of S12A
+    /// (OBS-021, OBS-022). The old copy is reported in
+    /// [`BuildInfo::stale`].
+    #[must_use]
+    pub fn move_first_metadata(mut self, on: bool) -> Self {
+        self.move_first_metadata = on;
         self
     }
 
@@ -264,6 +298,7 @@ impl WimBuilder {
         let mut files: Vec<LookupEntry> = Vec::new();
         let mut by_hash: HashMap<[u8; 20], usize> = HashMap::new();
         let mut metadata: Vec<LookupEntry> = Vec::new();
+        let mut first_blob: Option<(Vec<u8>, usize, bool)> = None;
         for ((i, img), index) in self.images.iter().enumerate().zip(1u32..) {
             let mut hashes = Vec::new();
             for data in img.files.iter().filter(|d| !d.is_empty()) {
@@ -296,6 +331,15 @@ impl WimBuilder {
                 files.push(entry(reshdr, sha1));
             }
 
+            // OBS-018: one resource, named again by an equal entry.
+            if self.reuse_metadata
+                && !i.is_multiple_of(2)
+                && let Some(previous) = metadata.last().copied()
+            {
+                metadata.push(previous);
+                continue;
+            }
+
             // This image's metadata, right after its new files.
             let blob = metadata_blob(if self.identical_metadata { 1 } else { index }, &hashes);
             let mut sha1 = legacy_sha1(&blob).0;
@@ -314,6 +358,20 @@ impl WimBuilder {
                 RESHDR_FLAG_METADATA,
             )?;
             metadata.push(entry(reshdr, sha1));
+            if i == 0 {
+                first_blob = Some((bytes, blob.len(), compressed));
+            }
+        }
+
+        // OBS-021: image 1's metadata written again after everything else.
+        let mut stale = Vec::new();
+        if self.move_first_metadata
+            && let (Some((bytes, len, compressed)), Some(first)) =
+                (first_blob, metadata.first_mut())
+        {
+            stale.push(first.reshdr);
+            first.reshdr =
+                write_resource(w, &mut pos, &bytes, len, compressed, RESHDR_FLAG_METADATA)?;
         }
 
         // Lookup table: metadata entries first (OBS-009).
@@ -376,6 +434,7 @@ impl WimBuilder {
             integrity,
             metadata: metadata.iter().map(|e| e.reshdr).collect(),
             files: files.iter().map(|e| e.reshdr).collect(),
+            stale,
         })
     }
 

@@ -2,8 +2,8 @@
 #
 # generate        Windows: build samples S01-S07, S09, S10, S11A/B and S12A/B
 #                 from our own generated content with Microsoft's DISM
-#                 (S11/S12 are `observe` rows; DISM refusing their second
-#                 step is the observation, status `dism-refused`), dump their
+#                 (S11/S12 are `accept` rows since run 40599556702, OBS-018
+#                 to OBS-023; `dism-refused` on them now fails verify), dump their
 #                 structure, scan for the clean-room name, upload the
 #                 artifact "wim-samples" (14-day retention, never committed).
 # generate-large  Windows, manual runs only: S08 (one 4.5 GiB file) for the
@@ -287,8 +287,9 @@ jobs:
           set -uo pipefail
           log="$RUNNER_TEMP/dism-samples.log"
           status=0
-          # --show-output: the observe rows' results (S11, S12) and any
-          # dism-refused rows are printed by passing tests; they are
+          # --show-output: the observe rows' results, the recorded S11/S12
+          # rows (printed when an older manifest still says observe) and
+          # any dism-refused rows are printed by passing tests; they are
           # evidence for the OBS records, so they go to the summary.
           cargo test -p usgp-image --features dism-samples --locked -- --show-output 2>&1 | tee "$log" || status=$?
           line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk '$1 == "Running" && $2 == "tests/dism_samples.rs" { f = 1; next } f && /^test result:/ { print; exit }')"
@@ -299,7 +300,7 @@ jobs:
           # job summary and one ::notice:: per line.
           obs="$RUNNER_TEMP/wim-observations/observations.txt"
           mkdir -p "$(dirname "$obs")"
-          { grep -E '^observe |: DISM refused the sample step' "$log" || true; } | sort -u > "$obs"
+          { grep -E '^(observe|recorded) |: DISM refused the sample step' "$log" || true; } | sort -u > "$obs"
           {
             echo '### wim-samples verify'
             echo '```text'

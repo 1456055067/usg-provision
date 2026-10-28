@@ -172,16 +172,47 @@ pub fn check_entry(
 }
 
 /// Metadata entries in lookup order, with the file's resource count.
+///
+/// The metadata entries are private: one resource may be named by two
+/// images (OBS-018), so per-resource work (reading, decoding, hashing,
+/// budgeting) must go through [`LookupScan::distinct_metadata`];
+/// [`LookupScan::image_metadata`] is for per-image lookups only (SEC-002).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupScan {
     /// Entries with the metadata flag, in lookup-table order. The k-th
-    /// (0-based) belongs to image index k + 1 (OBS-009).
-    pub metadata: Vec<LookupEntry>,
+    /// (0-based) belongs to image index k + 1 (OBS-009, OBS-021).
+    metadata: Vec<LookupEntry>,
+    /// Per entry of `metadata`: true if it repeats the lookup entry
+    /// directly before it (OBS-018) and so names no new resource.
+    repeats: Vec<bool>,
     /// Number of entries in the table.
     pub entries: u64,
     /// Compressed file (non-metadata) resources, sorted by offset, for the
     /// chunk-table pass (REQ-IMG-037 bullet 2; BOOT-007).
     pub compressed_files: Vec<ResourceHeader>,
+}
+
+impl LookupScan {
+    /// The metadata entry of every image, in index order (entry k - 1 is
+    /// image index k). Two images may name one resource (OBS-018): use
+    /// this to find an image's entry, never to drive per-resource work.
+    #[must_use]
+    pub fn image_metadata(&self) -> &[LookupEntry] {
+        &self.metadata
+    }
+
+    /// Each metadata resource once, with the image index of its first
+    /// use: an entry that repeats the lookup entry directly before it
+    /// (OBS-018) names the same bytes with the same hash, so it is
+    /// skipped. The whole-table checks have already refused any other
+    /// sharing, so these resources' ranges are disjoint and reading each
+    /// once reads at most the file length (SEC-003).
+    pub fn distinct_metadata(&self) -> impl Iterator<Item = (u32, &LookupEntry)> {
+        (1u32..)
+            .zip(self.metadata.iter().zip(&self.repeats))
+            .filter(|(_, (_, repeat))| !**repeat)
+            .map(|(index, (e, _))| (index, e))
+    }
 }
 
 /// Most header resources added to the overlap check (lookup table, XML,
@@ -204,6 +235,12 @@ struct Collector {
     ranges: Vec<ResourceHeader>,
     /// The hash of every file (non-metadata) entry (BOOT-011).
     hashes: Vec<[u8; 20]>,
+    /// Highest end offset of every entry except the first metadata entry
+    /// (for the serviced-file order rule, OBS-021).
+    end_of_others: u64,
+    /// The lookup entry visited last, and whether it was itself a repeat
+    /// (OBS-018 reuse rule).
+    previous: Option<(LookupEntry, bool)>,
 }
 
 impl Collector {
@@ -222,11 +259,14 @@ impl Collector {
         Ok(Self {
             scan: LookupScan {
                 metadata: Vec::new(),
+                repeats: Vec::new(),
                 entries: 0,
                 compressed_files: Vec::new(),
             },
             ranges,
             hashes,
+            end_of_others: 0,
+            previous: None,
         })
     }
 
@@ -240,13 +280,38 @@ impl Collector {
         let e = LookupEntry::parse(raw).ok_or(WimError::TooShort)?;
         check_entry(&e, compression, file_len)?;
         self.scan.entries = self.scan.entries.saturating_add(1);
+        let first_metadata = e.reshdr.is_metadata() && self.scan.metadata.is_empty();
+        if !first_metadata {
+            let end = e.reshdr.offset.saturating_add(e.reshdr.stored_size);
+            self.end_of_others = self.end_of_others.max(end);
+        }
         if e.reshdr.is_metadata() {
             let n = u32::try_from(self.scan.metadata.len()).unwrap_or(u32::MAX);
             if n >= max_images {
                 return Err(WimError::LimitExceeded { what: "images" });
             }
+            // FORMAT: OBS-018 - in S11A and S11B (two images with
+            // identical metadata, by append and by export) DISM wrote two
+            // metadata entries next to each other in the lookup table,
+            // equal in all 50 bytes (offset, sizes, flags, part, count,
+            // SHA-1): one resource used by two images (wim.md §5, §13
+            // S11). Only an entry equal to the lookup entry directly
+            // before it, which is not itself a repeat, is taken as a
+            // reuse: exactly two equal adjacent entries, as observed. Its
+            // range is recorded once, so the overlap rule below does not
+            // see it twice. Any other entry naming the same bytes (other
+            // size, hash, flags or count, a file entry between the two,
+            // or a third equal entry) keeps its own range and is refused
+            // as an overlap.
+            let repeat = matches!(self.previous, Some((p, false)) if p == e);
+            self.previous = Some((e, repeat));
             self.scan.metadata.push(e);
+            self.scan.repeats.push(repeat);
+            if repeat {
+                return Ok(());
+            }
         } else {
+            self.previous = Some((e, false));
             self.hashes.push(e.sha1);
         }
         self.ranges.push(e.reshdr);
@@ -255,31 +320,38 @@ impl Collector {
 
     /// The whole-table checks, in this order: repeated hash among file
     /// resources, overlapping ranges (including `extra`, the header's own
-    /// resources), metadata order.
+    /// resources), metadata order. `extra`, when not empty, starts with
+    /// the lookup table itself.
     ///
     /// Allocates nothing that can abort: `ranges` was reserved with room
     /// for `extra`, and the compressed-file list is reserved fallibly.
     // COMPLIANCE MAPPING:
     // - NIST 800-53: SC-5 (Denial of Service Protection), SI-10 - with no
-    //   two resources sharing bytes, every resource range is read at most
-    //   once, so the check's reads stay within the file length (SEC-003,
-    //   BOOT-001).
+    //   two resources sharing bytes (a reused metadata entry is one
+    //   resource, read once through `distinct_metadata`), every resource
+    //   range is read at most once, so the check's reads stay within the
+    //   file length (SEC-003, BOOT-001).
+    // - SPEC: specs/standards/wim.md §5, §13 S11 and S12
     // - SPEC: specs/os-images.md#REQ-IMG-037 (bounded time and memory)
     fn finish(mut self, extra: &[ResourceHeader]) -> Result<LookupScan, WimError> {
         // FORMAT: OBS-008 - DISM stores identical file content once, so
         // two file entries with one hash do not occur in DISM files;
         // refused. Metadata entries are left out (BOOT-011): two images
-        // may have identical metadata (unobserved, sample S11), each is
-        // mapped to its index by position, not by hash, and the overlap
-        // check below still bounds the work to one read per range.
+        // may have identical metadata, each is mapped to its index by
+        // position, not by hash, and the overlap check below still
+        // bounds the work to one read per range (OBS-018: DISM then
+        // writes one range, named by two equal entries).
         self.hashes.sort_unstable();
         if self.hashes.windows(2).any(|w| w.first() == w.get(1)) {
             return Err(WimError::DuplicateResource);
         }
         drop(self.hashes);
 
-        // FORMAT: OBS-008 - resources follow each other with no gap and
-        // no sharing in every R1 file. Empty ranges share no byte.
+        // FORMAT: OBS-008 - no two resources share bytes in any R1 file;
+        // OBS-018 - the one sharing seen since (S11) is a reused metadata
+        // entry, whose range `visit` recorded once. Gaps are allowed:
+        // DISM leaves superseded lookup tables, XML and metadata in place
+        // (OBS-020, OBS-022). Empty ranges share no byte.
         let mut ranges = self.ranges;
         // No-op when `extra` fits the room reserved in `new` (always, from
         // `scan` and `parse_table`); otherwise a refusal, never an abort.
@@ -294,23 +366,50 @@ impl Collector {
             end_so_far = r.offset.saturating_add(r.stored_size);
         }
 
-        // FORMAT: derived, unconfirmed - OBS-009 saw metadata offsets rise
-        // with lookup order in S04, where lookup, offset and index order
-        // agree. Whether lookup or offset order names the index is still
-        // OPEN-WIM-6, so a file where they differ is refused (BOOT-003).
-        // M3 must not apply an image by index before this is settled.
-        // A serviced multi-image file (mount and commit, or delete then
-        // append) may break this order (BOOT-012, sample S12); the
+        // Metadata order (wim.md §5, §13 S11 and S12; OPEN-WIM-6).
+        // FORMAT: OBS-009, OBS-023 - in S04 and S12B metadata offsets rise
+        // with lookup order. FORMAT: OBS-018 - in S11A and S11B two
+        // adjacent entries are equal (one reused resource).
+        // FORMAT: OBS-021 - in S12A (S04 with index 1 mounted, changed
+        // and committed) the first metadata entry names a new resource
+        // written after every other resource of the table and ending
+        // where the lookup table starts (so before the XML too); the
+        // others keep rising offsets, and lookup order (not offset
+        // order) names the index (wim.md §5 "Commit", §13 OPEN-WIM-6).
+        // Only these three shapes are accepted: the first entry may lie
+        // after every other entry's range and end exactly at the lookup
+        // table, before every other header resource (then no reuse is
+        // accepted in the same table, a combination not observed);
+        // otherwise offsets rise strictly, or an entry repeats the one
+        // before it. Any other order is refused (BOOT-003, BOOT-012); the
         // operator remedy is to export each image to a new file.
-        if self
-            .scan
-            .metadata
-            .windows(2)
-            .any(|w| match (w.first(), w.get(1)) {
-                (Some(a), Some(b)) => a.reshdr.offset >= b.reshdr.offset,
-                _ => false,
-            })
-        {
+        // `parse_table` has no header resources; `check_wim` always
+        // passes them.
+        let m = &self.scan.metadata;
+        let first_relocated = match (m.first(), m.get(1)) {
+            (Some(a), Some(b)) => {
+                let end = a.reshdr.offset.saturating_add(a.reshdr.stored_size);
+                let before_header = extra.first().is_none_or(|lookup| lookup.offset == end)
+                    && extra
+                        .iter()
+                        .filter(|r| r.stored_size != 0)
+                        .all(|r| end <= r.offset);
+                a.reshdr.offset > b.reshdr.offset
+                    && a.reshdr.offset >= self.end_of_others
+                    && before_header
+            }
+            _ => false,
+        };
+        let skip = usize::from(first_relocated);
+        let rest = m.get(skip..).unwrap_or(&[]);
+        let rest_repeats = self.scan.repeats.get(skip..).unwrap_or(&[]);
+        let in_order = rest
+            .iter()
+            .zip(rest.iter().skip(1).zip(rest_repeats.iter().skip(1)))
+            .all(|(a, (b, b_repeat))| {
+                a.reshdr.offset < b.reshdr.offset || (!first_relocated && *b_repeat)
+            });
+        if !in_order {
             return Err(WimError::MetadataOrderNotSupported);
         }
 
@@ -327,15 +426,19 @@ impl Collector {
 
 /// Parses and checks a whole in-memory lookup table (for fuzzing and
 /// tests; [`scan`] streams the same checks and also checks the entries
-/// against the header's own resources).
+/// against the header's own resources). Without those resources the
+/// OBS-021 bounds on a moved first entry (ending at the lookup table,
+/// before the XML and integrity table) are not checked, so use
+/// [`crate::check_wim`] to check a file (finding BOOT-009).
 ///
 /// # Errors
 ///
 /// As [`check_entry`]; [`WimError::Malformed`] if the length is not a
 /// multiple of 50; [`WimError::LimitExceeded`] if there are more than
 /// `max_images` metadata entries; then [`WimError::DuplicateResource`],
-/// [`WimError::ResourceOverlap`] and
-/// [`WimError::MetadataOrderNotSupported`] from the whole-table checks.
+/// [`WimError::ResourceOverlap`] (a reused metadata entry, OBS-018, is not
+/// an overlap) and [`WimError::MetadataOrderNotSupported`] (orders other
+/// than those of OBS-009, OBS-018 and OBS-021) from the whole-table checks.
 pub fn parse_table(
     table: &[u8],
     compression: Compression,
@@ -478,12 +581,178 @@ mod tests {
             parse_table(&t, Compression::None, 1000, 4),
             Err(WimError::DuplicateResource)
         );
-        // Same hash and same range: the overlap rule refuses it.
-        let t = table(&[entry_at(208, m, 1), entry_at(208, m, 1)]);
+        // Two file entries with one hash and one range: refused (the
+        // reuse rule of OBS-018 is for metadata only).
+        let t = table(&[entry_at(208, 0, 2), entry_at(208, 0, 2)]);
         assert_eq!(
             parse_table(&t, Compression::None, 1000, 4),
+            Err(WimError::DuplicateResource)
+        );
+    }
+
+    fn with(e: [u8; ENTRY_LEN], f: impl FnOnce(&mut LookupEntry)) -> [u8; ENTRY_LEN] {
+        let mut x = LookupEntry::parse(&e).unwrap();
+        f(&mut x);
+        x.to_bytes()
+    }
+
+    fn scan_of(entries: &[[u8; ENTRY_LEN]]) -> Result<LookupScan, WimError> {
+        parse_table(&table(entries), Compression::None, 1000, 8)
+    }
+
+    #[test]
+    fn reused_metadata_entry_accepted_once() {
+        // OBS-018 (S11A, S11B): two adjacent lookup entries equal in all
+        // 50 bytes are one resource used twice; it is listed once.
+        let m = RESHDR_FLAG_METADATA;
+        let a = entry_at(208, m, 1);
+        let s = scan_of(&[a, a, entry_at(218, 0, 2)]).unwrap();
+        assert_eq!(s.image_metadata().len(), 2);
+        assert_eq!(s.repeats, [false, true]);
+        let d: Vec<u32> = s.distinct_metadata().map(|(i, _)| i).collect();
+        assert_eq!(d, [1]);
+        // Distinct entries keep their own indexes; two pairs are fine.
+        let b = entry_at(218, m, 3);
+        let s = scan_of(&[a, a, b, b, entry_at(228, 0, 2)]).unwrap();
+        let d: Vec<u32> = s.distinct_metadata().map(|(i, _)| i).collect();
+        assert_eq!(d, [1, 3]);
+        // Only one repeat (BOOT-001): a third equal entry is an overlap.
+        for uses in [3usize, 4] {
+            let mut t = vec![a; uses];
+            t.push(entry_at(218, 0, 2));
+            assert_eq!(scan_of(&t), Err(WimError::ResourceOverlap), "{uses}");
+        }
+    }
+
+    #[test]
+    fn shared_metadata_range_must_match_in_every_field() {
+        // Anything short of an exact repeat is an overlap (OBS-018 is the
+        // only sharing observed).
+        let m = RESHDR_FLAG_METADATA;
+        let a = entry_at(208, m, 1);
+        let variants = [
+            with(a, |e| e.sha1 = [9; 20]),
+            with(a, |e| {
+                e.reshdr.stored_size = 11;
+                e.reshdr.original_size = 11;
+            }),
+            with(a, |e| {
+                e.reshdr.stored_size = 9;
+                e.reshdr.original_size = 9;
+            }),
+            with(a, |e| e.ref_count = 2),
+            // Partial overlap: starts inside the first range.
+            with(a, |e| e.reshdr.offset = 213),
+        ];
+        for b in variants {
+            assert_eq!(
+                scan_of(&[a, b, entry_at(300, 0, 2)]),
+                Err(WimError::ResourceOverlap),
+                "{:?}",
+                LookupEntry::parse(&b)
+            );
+        }
+        // A repeat that is not adjacent to its twin keeps its own range:
+        // another metadata entry, or a file entry, between them
+        // (BOOT-004, SEC-001).
+        assert_eq!(
+            scan_of(&[a, entry_at(218, m, 3), a]),
             Err(WimError::ResourceOverlap)
         );
+        assert_eq!(
+            scan_of(&[a, entry_at(218, 0, 3), a]),
+            Err(WimError::ResourceOverlap)
+        );
+        // A metadata entry repeating a file entry's range.
+        assert_eq!(
+            scan_of(&[entry_at(218, 0, 2), entry_at(218, m, 2)]),
+            Err(WimError::ResourceOverlap)
+        );
+    }
+
+    #[test]
+    fn serviced_order_only_in_observed_shape() {
+        // OBS-021 (S12A): the first metadata entry names a resource after
+        // every other entry's range; the rest rise. Accepted.
+        let m = RESHDR_FLAG_METADATA;
+        let f = entry_at(228, 0, 9);
+        let s = scan_of(&[
+            entry_at(300, m, 1),
+            entry_at(208, m, 2),
+            entry_at(218, m, 3),
+            f,
+        ])
+        .unwrap();
+        let offsets: Vec<u64> = s.metadata.iter().map(|e| e.reshdr.offset).collect();
+        assert_eq!(offsets, [300, 208, 218]);
+        // Directly after the last other range is enough.
+        assert!(
+            scan_of(&[
+                entry_at(238, m, 1),
+                entry_at(208, m, 2),
+                entry_at(218, m, 3),
+                f
+            ])
+            .is_ok()
+        );
+        let refused = [
+            // A file resource lies after the moved entry.
+            vec![
+                entry_at(300, m, 1),
+                entry_at(208, m, 2),
+                entry_at(310, 0, 9),
+            ],
+            // The moved entry ends before another metadata range ends.
+            vec![
+                entry_at(220, m, 1),
+                entry_at(208, m, 2),
+                entry_at(232, m, 3),
+            ],
+            // Not the first entry that moved.
+            vec![
+                entry_at(208, m, 1),
+                entry_at(300, m, 2),
+                entry_at(218, m, 3),
+                f,
+            ],
+            // Two entries out of order.
+            vec![
+                entry_at(300, m, 1),
+                entry_at(218, m, 2),
+                entry_at(208, m, 3),
+                f,
+            ],
+            // Reverse order of three (with two, a reversed pair is the
+            // OBS-021 shape and is accepted).
+            vec![
+                entry_at(228, m, 1),
+                entry_at(218, m, 2),
+                entry_at(208, m, 3),
+            ],
+            // Moved first entry combined with a reused entry (unobserved).
+            vec![
+                entry_at(300, m, 1),
+                entry_at(208, m, 2),
+                entry_at(208, m, 2),
+                f,
+            ],
+            // Reused first entry then a lower offset.
+            vec![
+                entry_at(300, m, 1),
+                entry_at(300, m, 1),
+                entry_at(208, m, 2),
+            ],
+        ];
+        for t in refused {
+            assert_eq!(
+                scan_of(&t),
+                Err(WimError::MetadataOrderNotSupported),
+                "{:?}",
+                t.iter()
+                    .map(|e| LookupEntry::parse(e).unwrap().reshdr.offset)
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -527,5 +796,54 @@ mod tests {
                 what: "lookup table size"
             })
         );
+    }
+
+    fn finish_with_header(
+        entries: &[[u8; ENTRY_LEN]],
+        header: &[ResourceHeader],
+    ) -> Result<LookupScan, WimError> {
+        let mut c = Collector::new(u64::try_from(entries.len()).unwrap()).unwrap();
+        for e in entries {
+            c.visit(e, Compression::None, 1000, 8).unwrap();
+        }
+        c.finish(header)
+    }
+
+    #[test]
+    fn moved_entry_must_end_at_the_lookup_table() {
+        // OBS-021 (BOOT-003): the moved first entry ends where the lookup
+        // table starts, before the XML and integrity table.
+        let m = RESHDR_FLAG_METADATA;
+        let t = [
+            entry_at(300, m, 1),
+            entry_at(208, m, 2),
+            entry_at(218, m, 3),
+        ];
+        let rh = |offset: u64, size: u64| ResourceHeader {
+            stored_size: size,
+            flags: m,
+            offset,
+            original_size: size,
+        };
+        // Lookup at 310, XML at 460, integrity at 500: accepted.
+        assert!(finish_with_header(&t, &[rh(310, 150), rh(460, 20), rh(500, 20)]).is_ok());
+        // A gap between the moved entry and the lookup table.
+        assert_eq!(
+            finish_with_header(&t, &[rh(320, 150), rh(470, 20)]),
+            Err(WimError::MetadataOrderNotSupported)
+        );
+        // Moved entry after the lookup table and XML.
+        assert_eq!(
+            finish_with_header(&t, &[rh(228, 50), rh(278, 22)]),
+            Err(WimError::MetadataOrderNotSupported)
+        );
+        // Lookup directly after it, but the XML lies before it.
+        assert_eq!(
+            finish_with_header(&t, &[rh(310, 150), rh(228, 20)]),
+            Err(WimError::MetadataOrderNotSupported)
+        );
+        // Rising order needs none of this.
+        let t = [entry_at(208, m, 1), entry_at(218, m, 2)];
+        assert!(finish_with_header(&t, &[rh(600, 100), rh(228, 20)]).is_ok());
     }
 }

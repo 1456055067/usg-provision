@@ -26,6 +26,8 @@ summaries as [observed] notes, kept apart from Microsoft text; those
 notes were audited in re-verify round 1 (2026-10-27). M2 fix round 2
 (2026-10-27) cites DEC-0017 (accepted 2026-10-27) for
 the two WIM header rules and adds the [MS-XCA] refill rule to topic 20.
+After DISM sample run R2 (2026-10-27), OBS-018 to OBS-023 were added
+to the topic 9 summary as [observed] notes (audited 2026-10-27).
 
 Priority is for a **Windows client (10/11 Enterprise) first** release.
 For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64
@@ -305,7 +307,13 @@ decide.
    OBS-001 to OBS-017, which settle OPEN-WIM-1 and parts of others for
    run R1, and two header rules marked [project rule] that cite DEC-0017
    (accepted 2026-10-27); these notes were audited
-   2026-10-27). Codecs are topic 20.
+   2026-10-27. After run R2, OBS-018 to OBS-023 added [observed] notes
+   on files changed after capture: shared metadata for identical
+   images, unreliable reference counts, unnamed stale ranges (which
+   contradict the earlier "no gap" note), and lookup order giving the
+   image index when offset order differs; OPEN-WIM-6 is narrowed and
+   samples S12C, S12D, S11C and S11D are still needed; these R2 notes
+   were audited 2026-10-27). Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.
 11. Windows PE: building from the Windows ADK, adding drivers, startup

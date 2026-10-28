@@ -7,10 +7,14 @@
 //! is a test **failure**, never a skip. Any `not-produced` row, missing
 //! file or SHA-256 mismatch fails.
 //!
-//! Rows with expected `observe` (S11, S12: BOOT-011, BOOT-012) record
-//! the parser's result without judging it, because what DISM writes there
-//! is unobserved; a row with status `dism-refused` (DISM itself refused
-//! the step, which is the observation) has no file and is printed.
+//! Rows with expected `observe` record the parser's result without
+//! judging it. S11A, S11B, S12A and S12B (BOOT-011, BOOT-012) were
+//! `observe` until run 40599556702 was recorded (OBS-018 to OBS-023);
+//! they are now judged by [`RECORDED`] even in an artifact whose manifest
+//! still says `observe`, and `serviced_layouts_match_observations` checks
+//! the recorded layout facts byte by byte. A row with status
+//! `dism-refused` (DISM itself refused the step) has no file and is
+//! printed; on a recorded row it fails, as it contradicts the record.
 //!
 //! The samples are never committed (OPEN-PE-LIC); they exist only as a
 //! workflow artifact.
@@ -39,6 +43,22 @@ mod dism {
     use usgp_image::{Compression, NoProgress, WimError, WimLimits, WimSummary, check_wim};
 
     const ENV: &str = "USGP_WIM_SAMPLES";
+
+    /// Samples that were `observe` rows, with the outcome recorded from
+    /// run 40599556702 and the record that states it.
+    const RECORDED: &[(&str, &str, &str)] = &[
+        ("S11A", "accept", "OBS-018"),
+        ("S11B", "accept", "OBS-018"),
+        ("S12A", "accept", "OBS-021"),
+        ("S12B", "accept", "OBS-023"),
+    ];
+
+    fn recorded(id: &str) -> Option<(&'static str, &'static str)> {
+        RECORDED
+            .iter()
+            .find(|(r, _, _)| *r == id)
+            .map(|(_, token, obs)| (*token, *obs))
+    }
 
     fn samples_dir() -> PathBuf {
         let dir = std::env::var_os(ENV).unwrap_or_else(|| {
@@ -115,6 +135,10 @@ mod dism {
             // README: an observation sample whose DISM step DISM refused.
             if status == "dism-refused" {
                 assert_eq!(expected, "observe", "{id}: dism-refused on a judged row");
+                assert!(
+                    recorded(&id).is_none(),
+                    "{id}: DISM refused a step it completed in the recorded run"
+                );
                 println!("{id} {file}: DISM refused the sample step (see commands.log)");
                 continue;
             }
@@ -129,6 +153,43 @@ mod dism {
                 expected,
             });
         }
+        out
+    }
+
+    /// The images DISM's own `/Get-WimInfo` listed in `<id>.wiminfo.txt`
+    /// (first listing; for rows whose names DISM chose, such as S11B).
+    fn wiminfo_editions(dir: &Path, id: &str) -> Vec<(u32, String, String)> {
+        let path = dir.join(format!("{id}.wiminfo.txt"));
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let mut out: Vec<(u32, String, String)> = Vec::new();
+        let mut cur: Option<(u32, Option<String>, Option<String>)> = None;
+        let mut flush = |c: Option<(u32, Option<String>, Option<String>)>| {
+            if let Some((i, Some(n), Some(d))) = c
+                && !out.iter().any(|(k, _, _)| *k == i)
+            {
+                out.push((i, n, d));
+            }
+        };
+        for line in text.lines() {
+            let field = |key: &str| {
+                line.split_once(':')
+                    .filter(|(k, _)| k.trim() == key)
+                    .map(|(_, v)| v.trim().to_owned())
+            };
+            if let Some(v) = field("Index") {
+                flush(cur.take());
+                cur = Some((v.parse().unwrap(), None, None));
+            } else if let Some(c) = cur.as_mut() {
+                if c.1.is_none() {
+                    c.1 = field("Name");
+                } else if c.2.is_none() {
+                    c.2 = field("Description");
+                }
+            }
+        }
+        flush(cur);
+        out.sort();
         out
     }
 
@@ -218,7 +279,21 @@ mod dism {
         for row in &rows {
             let path = dir.join(&row.file);
             let result = check(&path);
-            match expected_reason(&row.expected) {
+            let token = match (row.expected.as_str(), recorded(&row.id)) {
+                ("observe", Some((token, obs))) => {
+                    println!(
+                        "recorded {} ({}): manifest says observe; judged as {token} ({obs})",
+                        row.id, row.file
+                    );
+                    token
+                }
+                (e, Some((token, obs))) => {
+                    assert_eq!(e, token, "{}: manifest differs from {obs}", row.id);
+                    token
+                }
+                (e, None) => e,
+            };
+            match expected_reason(token) {
                 Expect::Observe => match &result {
                     Ok(s) => println!(
                         "observe {} ({}): accepted, {} images, compression {}",
@@ -246,15 +321,20 @@ mod dism {
                         other => panic!("{}: accept with compression {other}", row.id),
                     };
                     assert_eq!(s.compression, want, "{} compression", row.id);
-                    let rows = editions
-                        .get(&row.id)
-                        .unwrap_or_else(|| panic!("{}: no editions.tsv rows", row.id));
+                    // S11B's names are DISM's choice (Build-Samples
+                    // records no expectation): compare with DISM's own
+                    // report instead.
+                    let rows = match editions.get(&row.id) {
+                        Some(r) => r.clone(),
+                        None if row.id == "S11B" => wiminfo_editions(&dir, &row.id),
+                        None => panic!("{}: no editions.tsv rows", row.id),
+                    };
                     let got: Vec<(u32, String, String)> = s
                         .editions
                         .iter()
                         .map(|e| (e.index, e.name.clone(), e.description.clone()))
                         .collect();
-                    let mut want = rows.clone();
+                    let mut want = rows;
                     want.sort();
                     assert_eq!(got, want, "{} editions", row.id);
                     if row.id == "S05" {
@@ -331,7 +411,7 @@ mod dism {
             .chunks(50)
             .map(|c| LookupEntry::parse(c).unwrap())
             .collect();
-        let meta_n = scan.metadata.len();
+        let meta_n = scan.image_metadata().len();
         let xml_raw = slice(b, &h.xml);
         let xml = parse_xml(&xml_raw, &WimLimits::DEFAULT).unwrap();
         let text: String = char::decode_utf16(
@@ -367,21 +447,25 @@ mod dism {
             last_structure_ends_file: ends.iter().max() == Some(&len),
             metadata_first: entries[..meta_n].iter().all(|e| e.reshdr.is_metadata())
                 && entries[meta_n..].iter().all(|e| !e.reshdr.is_metadata()),
-            metadata_flags: scan.metadata.iter().map(|e| e.reshdr.flags).collect(),
+            metadata_flags: scan
+                .image_metadata()
+                .iter()
+                .map(|e| e.reshdr.flags)
+                .collect(),
             metadata_part_and_count: scan
-                .metadata
+                .image_metadata()
                 .iter()
                 .map(|e| (e.part_number, e.ref_count))
                 .collect(),
             metadata_offsets_rise: scan
-                .metadata
+                .image_metadata()
                 .windows(2)
                 .all(|w| w[0].reshdr.offset < w[1].reshdr.offset),
             // Interleaving: each image's new file resources come right
             // before its metadata (OBS-009, S04).
             file_resource_before_each_metadata: {
                 let mut prev_end = 0u64;
-                scan.metadata.iter().all(|m| {
+                scan.image_metadata().iter().all(|m| {
                     let ok = entries[meta_n..]
                         .iter()
                         .any(|f| f.reshdr.offset >= prev_end && f.reshdr.offset < m.reshdr.offset);
@@ -390,7 +474,7 @@ mod dism {
                 })
             },
             lookup_follows_last_metadata: scan
-                .metadata
+                .image_metadata()
                 .last()
                 .is_some_and(|m| m.reshdr.offset + m.reshdr.stored_size == h.lookup.offset),
             some_file_shared_by_every_image: entries[meta_n..]
@@ -447,6 +531,220 @@ mod dism {
             let ours = layout(&ours);
             assert_eq!(ours, dism, "builder layout differs from DISM's {id}");
         }
+    }
+
+    fn metadata_entries(b: &[u8]) -> Vec<LookupEntry> {
+        let h = parse_header(b).unwrap();
+        slice(b, &h.lookup)
+            .chunks(50)
+            .map(|c| LookupEntry::parse(c).unwrap())
+            .filter(|e| e.reshdr.is_metadata())
+            .collect()
+    }
+
+    fn all_entries(b: &[u8]) -> Vec<LookupEntry> {
+        let h = parse_header(b).unwrap();
+        slice(b, &h.lookup)
+            .chunks(50)
+            .map(|c| LookupEntry::parse(c).unwrap())
+            .collect()
+    }
+
+    /// SHA-1 of every non-empty file of every tree in `trees.txt`, by
+    /// tree name (`== tree <name> ==` headers; `file <path> length=<n>
+    /// sha1=<hex>` lines).
+    fn tree_hashes(dir: &Path) -> BTreeMap<String, Vec<[u8; 20]>> {
+        let path = dir.join("trees.txt");
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let mut out: BTreeMap<String, Vec<[u8; 20]>> = BTreeMap::new();
+        let mut cur: Option<String> = None;
+        for line in text.lines() {
+            if let Some(name) = line
+                .strip_prefix("== tree ")
+                .and_then(|r| r.strip_suffix(" =="))
+            {
+                cur = Some(name.to_owned());
+                continue;
+            }
+            let Some(tree) = cur.as_ref().filter(|_| line.starts_with("file ")) else {
+                continue;
+            };
+            let words: Vec<&str> = line.split_whitespace().collect();
+            // The empty file's hash names no resource; leave it out.
+            if words.contains(&"length=0") {
+                continue;
+            }
+            let Some(hex) = words.iter().find_map(|w| w.strip_prefix("sha1=")) else {
+                continue;
+            };
+            let mut h = [0u8; 20];
+            for (k, b) in h.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[2 * k..2 * k + 2], 16).unwrap();
+            }
+            out.entry(tree.clone()).or_default().push(h);
+        }
+        out
+    }
+
+    fn contains(hay: &[u8], needle: &[u8; 20]) -> bool {
+        hay.windows(20).any(|w| w == needle)
+    }
+
+    /// The layout facts OBS-018 and OBS-021 rest on, as booleans, so the
+    /// builder's serviced layouts can be compared with DISM's.
+    #[derive(Debug, PartialEq, Eq)]
+    struct ServicedShape {
+        metadata_count: usize,
+        distinct_metadata: usize,
+        adjacent_equal_entries: bool,
+        first_after_every_other_entry: bool,
+        rest_rise: bool,
+        first_ends_at_lookup: bool,
+    }
+
+    fn serviced_shape(b: &[u8]) -> ServicedShape {
+        let h = parse_header(b).unwrap();
+        let m = metadata_entries(b);
+        let all = all_entries(b);
+        let first = m[0];
+        let len = u64::try_from(b.len()).unwrap();
+        let scan = parse_table(&slice(b, &h.lookup), Compression::Xpress, len, 1024).unwrap();
+        ServicedShape {
+            metadata_count: m.len(),
+            distinct_metadata: scan.distinct_metadata().count(),
+            adjacent_equal_entries: m.windows(2).any(|w| w[0] == w[1]),
+            first_after_every_other_entry: all
+                .iter()
+                .skip(1)
+                .all(|e| e.reshdr.offset + e.reshdr.stored_size <= first.reshdr.offset),
+            rest_rise: m[1..]
+                .windows(2)
+                .all(|w| w[0].reshdr.offset < w[1].reshdr.offset),
+            first_ends_at_lookup: first.reshdr.offset + first.reshdr.stored_size == h.lookup.offset,
+        }
+    }
+
+    /// OBS-018 (S11A, S11B), OBS-021 and OBS-022 (S12A), OBS-023 (S12B):
+    /// the recorded layout facts, checked on the bytes, and the builder's
+    /// `reuse_metadata` / `move_first_metadata` layouts against them.
+    #[test]
+    fn serviced_layouts_match_observations() {
+        let dir = samples_dir();
+        let rows = manifest(&dir);
+        let present: Vec<&str> = RECORDED
+            .iter()
+            .map(|(id, _, _)| *id)
+            .filter(|id| rows.iter().any(|r| r.id == *id))
+            .collect();
+        if present.is_empty() {
+            // Artifacts before run 40599556702 have no S11 or S12 rows; the
+            // workflow requires them in every new run.
+            println!("no S11 or S12 rows in this artifact");
+            return;
+        }
+        assert_eq!(present.len(), RECORDED.len(), "partial S11/S12 rows");
+        let s04 = dism_file(&dir, &rows, "S04");
+        let s04_meta = metadata_entries(&s04);
+
+        // OBS-018: two equal entries, one range, read once.
+        for id in ["S11A", "S11B"] {
+            let b = dism_file(&dir, &rows, id);
+            let m = metadata_entries(&b);
+            assert_eq!(m.len(), 2, "{id}");
+            assert_eq!(m[0], m[1], "{id}: entries differ");
+            assert_eq!((m[0].part_number, m[0].ref_count), (1, 1), "{id}");
+            let shape = serviced_shape(&b);
+            assert_eq!(shape.distinct_metadata, 1, "{id}");
+            let mut w = WimBuilder::new(Compression::Xpress).reuse_metadata(true);
+            for k in 1..=2 {
+                w = w.image_spec(usgp_image::testkit::ImageSpec {
+                    name: format!("n{k}"),
+                    description: None,
+                    files: vec![b"same\n".repeat(900)],
+                });
+            }
+            // The superseded lookup table and XML DISM leaves between
+            // the metadata and the live lookup table (OBS-020) are not
+            // written by the builder; that one fact is not compared.
+            let ours = ServicedShape {
+                first_ends_at_lookup: shape.first_ends_at_lookup,
+                ..serviced_shape(&w.build().unwrap().0)
+            };
+            assert_eq!(ours, shape, "builder reuse layout differs from {id}");
+        }
+
+        // OBS-021, OBS-022: S12A is S04 with entry 1 moved after every
+        // other resource; entries 2 to 12 unchanged; the old copy left
+        // in place, byte for byte.
+        let b = dism_file(&dir, &rows, "S12A");
+        let m = metadata_entries(&b);
+        assert_eq!(m.len(), 12);
+        assert_eq!(m[1..], s04_meta[1..], "S12A entries 2 to 12");
+        let old = s04_meta[0].reshdr;
+        assert_eq!(slice(&b, &old), slice(&s04, &old), "S12A stale copy");
+        assert!(
+            all_entries(&b).iter().all(|e| e.reshdr != old),
+            "stale copy is named"
+        );
+        // OBS-021 index fact, through the product's reader (BOOT-002):
+        // lookup position 1 (image 1) holds both tree-service hashes and
+        // tree-01's own hashes; position 2 holds no hash that only
+        // tree-01 has.
+        let trees = tree_hashes(&dir);
+        let service = trees
+            .get("tree-service")
+            .expect("tree-service in trees.txt");
+        assert_eq!(service.len(), 2, "tree-service files");
+        let only_01: Vec<[u8; 20]> = trees["tree-01"]
+            .iter()
+            .filter(|h| {
+                trees
+                    .iter()
+                    .all(|(t, hs)| t == "tree-01" || !hs.contains(h))
+            })
+            .copied()
+            .collect();
+        assert!(!only_01.is_empty(), "tree-01 has no hash of its own");
+        let decoded = |e: &LookupEntry| {
+            let out = decode_resource(&b, &e.reshdr).unwrap();
+            assert_eq!(usgp_crypto::digest::legacy_sha1(&out).0, e.sha1);
+            out
+        };
+        let image1 = decoded(&m[0]);
+        let image2 = decoded(&m[1]);
+        for h in service.iter().chain(&only_01) {
+            assert!(contains(&image1, h), "S12A position 1 lacks {h:02x?}");
+        }
+        for h in &only_01 {
+            assert!(
+                !contains(&image2, h),
+                "S12A position 2 holds tree-01's {h:02x?}"
+            );
+        }
+
+        let shape = serviced_shape(&b);
+        assert!(
+            shape.first_after_every_other_entry && shape.rest_rise && shape.first_ends_at_lookup
+        );
+        let mut w = WimBuilder::new(Compression::Xpress).move_first_metadata(true);
+        for k in 1..=12 {
+            w = w.image(&format!("n{k}"), "d");
+        }
+        let ours = serviced_shape(&w.build().unwrap().0);
+        assert_eq!(ours, shape, "builder move layout differs from S12A");
+
+        // OBS-023: S12B keeps rising offsets; the appended image's
+        // metadata has the deleted image's hash at a new offset.
+        let b = dism_file(&dir, &rows, "S12B");
+        let m = metadata_entries(&b);
+        assert_eq!(m[..11], s04_meta[1..], "S12B entries 1 to 11");
+        assert_eq!(m[11].sha1, s04_meta[0].sha1);
+        assert!(m[11].reshdr.offset > s04_meta[11].reshdr.offset);
+        assert!(
+            m.windows(2)
+                .all(|w| w[0].reshdr.offset < w[1].reshdr.offset)
+        );
     }
 
     /// Every compressed lookup entry of every XPRESS file, including each

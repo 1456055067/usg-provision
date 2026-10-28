@@ -17,11 +17,13 @@ Sources:
   unattend `MetaData` key, the `WIMSetImageInformation` API page, Windows
   Setup supported platforms, and the `SYSTEM_INFO` structure.
 - **Observation record (clean side, not Microsoft text)**:
-  `docs/formats/wim-observed.md`, records OBS-001 to OBS-017, made under
+  `docs/formats/wim-observed.md`, records OBS-001 to OBS-023, made under
   project decision 0006 from WIM files the project built itself with
-  Microsoft's DISM. All records so far come from one run, **R1**
-  (workflow run 40535666995, commit ba23bed; DISM file version
-  10.0.26100.32860 on Windows build 26100.33650).
+  Microsoft's DISM. Records come from two runs: **R1** (OBS-001 to
+  OBS-017; workflow run 40535666995, commit ba23bed) and **R2**
+  (OBS-018 to OBS-023; workflow run 40599556702, commit 5d3c8c7). Both
+  runs used DISM file version 10.0.26100.32860 on Windows build
+  26100.33650.
 
 Labels: **[derived]** means we computed it from facts the sources state
 (for example, offsets from field order and sizes). **[reading]** means our
@@ -30,9 +32,10 @@ by Microsoft. Each has an OPEN item in §13 where it matters.
 
 Two further labels were added in M2 fix round 1 (drift):
 
-- **[observed]** marks what was seen in the R1 files, cited by record
-  (OBS-nnn). It is evidence about those files only, not a statement by
-  Microsoft, and says nothing about other DISM builds or other tools.
+- **[observed]** marks what was seen in the R1 or R2 files, cited by
+  record (OBS-nnn). It is evidence about those files only, not a
+  statement by Microsoft, and says nothing about other DISM builds or
+  other tools. The R2 notes were added after run R2 (2026-10-27).
   An observation can confirm or contradict a [derived] or [reading]
   point, or the paper itself; each note below says which.
 - **[project rule]** marks a rule the product applies that neither
@@ -195,6 +198,12 @@ size bytes and 1 flag byte". The stored size is therefore a 56-bit value
   flag 0x10, which the paper does not define (OBS-006).
 - **[observed]** No split part has any entry with flag 0x08; the only
   resource flags seen in split parts are 0x00, 0x04 and 0x06 (OBS-017).
+- **[observed]** Unused space (recorded from R2; also present in R1's
+  12-image file): files changed after their first
+  capture (append, export into an existing file, commit, delete) hold
+  byte ranges that neither the file header nor any lookup entry names
+  (OBS-020, OBS-022, OBS-023). See
+  §5 for what those ranges held.
 
 ## 4. File resources and chunking (WIM paper, "WIM File Resource")
 
@@ -272,14 +281,58 @@ size bytes and 1 flag byte". The stored size is therefore a 56-bit value
   reference count counts uses across all images in the file; identical
   content is stored once; an empty file has no entry; resources follow
   each other with no gap or alignment. The packing part of OPEN-WIM-6
-  is **confirmed** for R1.
+  is **confirmed** for R1. The "no gap" point holds only for files
+  made in one step; OBS-020 (below) **contradicts** it for files
+  changed later, including R1's own 12-image file, which was built by
+  appends. The reference-count point is **qualified** by
+  OBS-019, below.
 - **[observed]** Metadata entries come first in the table in every
   single-file `.wim` of R1 and in split part 1 (OBS-009). In the
   12-image file, the k-th entry
   with the metadata flag is the metadata of image index k. In that file
-  lookup order, file-offset order and index order are the same, so
-  which of them a reader should use is **still open** (OPEN-WIM-6,
-  mapping part). A sample whose orders differ is needed.
+  lookup order, file-offset order and index order are the same.
+
+**Observations on the lookup table (R2).** Files changed after their
+first capture.
+
+- **[observed]** Identical metadata (OBS-018): when two images have
+  identical metadata (the same tree appended twice, or the same index
+  exported twice into one file), the table holds two adjacent entries
+  with the metadata flag that are equal in all 50 bytes, each with
+  reference count 1, and both name one stored copy of the metadata.
+  The XML and DISM's own listing still show two images, index 1 and 2.
+  So two lookup entries can name the same byte range, and a file can
+  hold fewer metadata copies than images. DISM refused neither step.
+- **[observed]** Reference counts (OBS-019): a resource used once by
+  each of two images has count 2, but a resource used several times
+  per image had counts that follow no stable rule (the same capture
+  command gave different counts in R1 and R2). This **qualifies** the
+  paper's description of the count above: in these files it is not a
+  reliable count of uses.
+- **[observed]** Superseded tables (OBS-020): each append, export into
+  an existing file, commit and delete writes a new lookup table and
+  new XML and leaves the previous ones in the file, named by nothing.
+  The file then has unnamed gaps between resources. Files made by a
+  single capture have none. This **contradicts**, for changed files,
+  the "no gap" point of OBS-008.
+- **[observed]** Commit (OBS-021, OBS-022): committing a change to
+  image index 1 of the 12-image file kept every earlier byte except
+  the header, and appended the new file data, the image's new
+  metadata, a new lookup table and new XML. The replaced metadata
+  stays where it was, named by nothing. The new metadata lies after
+  every other resource, but its entry is still the first metadata
+  entry in the table. In that file lookup order and file-offset order
+  of metadata **differ**, and the k-th metadata entry in lookup order
+  is image index k. So lookup order, not file-offset order, gives the
+  index there.
+- **[observed]** Delete then append (OBS-023): deleting index 1 of the
+  12-image file and appending the same tree again renumbered the
+  remaining images 1 to 11 and added the appended image as 12. Its
+  metadata was written again at the end of the file, at a new offset,
+  although an identical copy was still stored, unnamed, at the old
+  offset. The stored file data was reused. In that file lookup order,
+  file-offset order and index order of metadata agree.
+- What is settled and what is not is in §13 under OPEN-WIM-6.
 
 ## 6. Metadata resource (WIM paper, "WIM Metadata Resource")
 
@@ -485,6 +538,19 @@ own limits before using it.
 - **OPEN-WIM-5**: how an incompressible chunk is stored (§4).
 - **OPEN-WIM-6**: lookup entry packing, and how metadata entries map to
   image indexes (§5).
+  - Settled for the R1 and R2 files: packing (OBS-008); and the k-th
+    entry with the metadata flag, in lookup order, is the metadata of
+    image index k. This held in every file seen, including one where
+    file-offset order differs from lookup order (OBS-021) and ones
+    where two entries name one shared copy (OBS-018), so lookup order,
+    not file-offset order, gives the index in those files.
+  - Still open: whether this holds after a commit of an index other
+    than 1 (S12C) or after several commits (S12D); whether three or
+    more identical images, or identical images that are not adjacent
+    in index order, also share one copy through adjacent equal entries
+    (S11C, S11D); whether lookup order can ever differ from index order
+    (never seen); and whether other DISM builds or other tools write
+    files the same way.
 - **OPEN-WIM-7**: directory entry alignment and short-name placement
   (§6).
 - **OPEN-WIM-8**: the content of `NAME`, `DESCRIPTION`, `FLAGS` and
@@ -495,29 +561,42 @@ own limits before using it.
   and whether it is "over" or "at least" (§4).
 - **OPEN-WIM-11**: the integrity chunk size unit (§8).
 
-**Status after R1** (M2 fix round 1, drift). An observation settles a
-point for the R1 files only; other DISM builds are not covered.
+**Status after R1 and R2** (R1 in M2 fix round 1, drift; R2 added
+2026-10-27). An observation settles a point for the files of its run
+only; other DISM builds are not covered.
 
-| Item | Status after R1 | Records |
-|------|-----------------|---------|
+| Item | Status after R1 and R2 | Records |
+|------|------------------------|---------|
 | OPEN-WIM-1 | Settled for R1: little-endian | OBS-002 |
 | OPEN-WIM-2 | Partly: values written are known; which to accept is open | OBS-003 |
 | OPEN-WIM-3 | Partly: not the file size (paper contradicted); meaning is a [reading] | OBS-004 |
 | OPEN-WIM-4 | Partly: `.esd` flags recorded; its compression is undocumented | OBS-006 |
 | OPEN-WIM-5 | Resource level settled; chunk level open | OBS-010 |
-| OPEN-WIM-6 | Packing settled; metadata first; index mapping partly settled | OBS-008, OBS-009 |
+| OPEN-WIM-6 | Packing settled; metadata first; lookup order gives the index in every file seen, including when offset order differs (R2); other cases open (see above) | OBS-008, OBS-009, OBS-018, OBS-021, OBS-023 |
 | OPEN-WIM-7 | Open (not examined; not needed in M2) | none |
 | OPEN-WIM-8 | Partly: encoding and element set for non-Windows content; edition, architecture, version not observable (decision 0013) | OBS-014 |
 | OPEN-WIM-9 | Partly: shared GUID, part and total | OBS-016 |
 | OPEN-WIM-10 | Width 4 below 2^32 confirmed; threshold open | OBS-011 |
 | OPEN-WIM-11 | Partly: unit is 10 MiB; range confirmed; multi-entry open | OBS-015 |
 
-**Never observed in R1**: an 8-byte chunk-table entry; a raw chunk
-inside a compressed resource; an integrity table with more than one
-entry; a bootable image (non-zero boot index); a file whose lookup
-order differs from its index order.
+**Never observed in R1 or R2**: an 8-byte chunk-table entry; a raw
+chunk inside a compressed resource; an integrity table with more than
+one entry; a bootable image (non-zero boot index); a file whose lookup
+order differs from its index order (file-offset order does differ in
+OBS-021); a commit of any index other than 1; more than two images
+sharing one metadata copy.
 
-**Samples still needed** (from the M2 boot-protocol review):
+**Samples recorded in R2** (asked for by the M2 boot-protocol review
+as S11 and S12):
+
+- **S11** (two images with identical metadata), as S11A (same tree
+  appended) and S11B (same index exported twice): recorded, OBS-018,
+  OBS-019, OBS-020.
+- **S12A** (mount and commit of index 1): recorded, OBS-020, OBS-021,
+  OBS-022.
+- **S12B** (delete index 1, then append): recorded, OBS-020, OBS-023.
+
+**Samples still needed** (from the M2 boot-protocol review and run R2):
 
 - a tree with long runs (for example 32 KiB of zero bytes and a
   repeated 300-byte pattern), to exercise long matches and many-chunk
@@ -526,14 +605,16 @@ order differs from its index order.
   index and boot metadata header (§2, §11); no R1 file has a non-zero
   boot index, so these fields have no sample at all;
 - an export of a multi-image file in reverse index order (OPEN-WIM-6);
-- **S11**: a file with two images whose metadata is identical, such as
-  the same index exported twice into one file, to see whether the two
-  images share one metadata entry or keep two, and how each index then
-  finds its metadata (§5, OPEN-WIM-6);
-- **S12**: a multi-image file changed after capture, first by mount
-  and commit and then by deleting an image and appending another, to
-  see whether lookup order, file-offset order and index order can
-  differ, and whether unused space is left in the file (§3, §5,
+- **S12C**: a commit of index 5 of a multi-image file, to see whether
+  lookup order still gives the index when the moved metadata is not
+  the first (§5, OPEN-WIM-6);
+- **S12D**: a commit of index 1 and then of index 3 in the same file,
+  to see the order after two commits (§5, OPEN-WIM-6);
+- **S11C**: the same tree appended three times, to see whether three
+  identical images share one copy through three adjacent equal entries
+  (§5, OPEN-WIM-6);
+- **S11D**: images A, B, then A again by export, to see what happens
+  when identical images are not adjacent in index order (§5,
   OPEN-WIM-6);
 - a mixed file (compressible then pseudorandom data) for the chunk-level
   case of OPEN-WIM-5;
@@ -558,3 +639,9 @@ results so far are the [observed] notes in this file, from
   outside the format (see `security-baseline.md`).
 - All sizes, offsets, counts and the XML text come from the file. A reader
   must treat them as untrusted input.
+- **[observed]** Deleting or changing an image with DISM did not remove
+  the old data from the file: replaced and deleted metadata, and old
+  lookup tables and XML, stayed in place, named by nothing (OBS-020,
+  OBS-022, OBS-023).
+- **[derived]** From that observation: content that an operator
+  believes was removed from a WIM may still be present in its bytes.

@@ -293,6 +293,33 @@ fn wim_seeds() -> Result<[Seeds; 4], String> {
             )?,
         ),
         (
+            // OBS-018 (S11A, S11B): two images name one metadata resource
+            // through equal lookup entries; accepted, read once.
+            "wu9-xpress-reused-metadata",
+            ok(
+                WimBuilder::new(Compression::Xpress)
+                    .image_spec(small("a", "b"))
+                    .image_spec(small("a", "b"))
+                    .reuse_metadata(true)
+                    .build(),
+                "reused-metadata",
+            )?,
+        ),
+        (
+            // OBS-021, OBS-022 (S12A): image 1's metadata moved after every
+            // other resource, the old copy left unnamed; accepted.
+            "wu9-xpress-moved-first-metadata",
+            ok(
+                WimBuilder::new(Compression::Xpress)
+                    .image_spec(small("a", "b"))
+                    .image_spec(small("c", "d"))
+                    .image_spec(small("e", "f"))
+                    .move_first_metadata(true)
+                    .build(),
+                "moved-first-metadata",
+            )?,
+        ),
+        (
             "wu9-count-mismatch",
             ok(
                 WimBuilder::new(Compression::None)

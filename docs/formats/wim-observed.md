@@ -11,10 +11,11 @@ the standards summaries
 [specs/standards/wim-compression.md](../../specs/standards/wim-compression.md),
 whose OPEN items it settles one record at a time.
 
-**Status: first records written (run R1, 2026-10-27).** Records
-OBS-001 to OBS-017 come from one run of the `wim-samples` workflow (R1
-in [Runs examined](#runs-examined)). They describe the files of that
-run only; rule 6 below applies to every conclusion. OPEN items not
+**Status: records from two runs (R1 and R2, 2026-10-27).** Records
+OBS-001 to OBS-017 come from run R1 and OBS-018 to OBS-023 from run R2
+of the `wim-samples` workflow (see [Runs examined](#runs-examined)).
+They describe the files of those runs only; rule 6 below applies to
+every conclusion. OPEN items not
 listed as confirmed stay open, and parser constants that rest on them
 stay marked `// FORMAT: derived, unconfirmed`.
 
@@ -30,7 +31,11 @@ stay marked `// FORMAT: derived, unconfirmed`.
 | OPEN-WIM-4 `.esd` (recovery) flags | partly: header flag `0x00080000` and resource flag `0x10`, neither defined by the paper; format still undocumented | OBS-006 |
 | Resource header layout (§3), 56-bit size ([reading]); header resource locations | confirmed for the lookup, XML and integrity locations; their flag bytes are `0x02`, `0x02`, `0x00` | OBS-007 |
 | OPEN-WIM-6 lookup entry packing | confirmed: 50 bytes, packed, field order as §5; hash is SHA-1 of the uncompressed content | OBS-008 |
-| OPEN-WIM-6 metadata entry to image index | partly: in S04 the k-th metadata entry is index k; lookup order and file-offset order agree there, so which one rules is still open | OBS-009 |
+| OPEN-WIM-6 metadata entry to image index | partly: in S04 the k-th metadata entry is index k; in S12A (R2), where lookup order and file-offset order differ, lookup order gives the index; other layouts open | OBS-009, OBS-021 |
+| `wim.md` §13 S11: identical metadata for two images | one resource named by two adjacent lookup entries equal in all 50 bytes (S11A append, S11B export); DISM did not refuse | OBS-018 |
+| Reference counts | not a reliable use count (5, 2, 9, 10 seen on one resource) | OBS-019 |
+| `wim.md` §13 S12: unused space, stale resources | superseded lookup tables, XML and metadata stay in the file, unnamed; a commit appends | OBS-020, OBS-022 |
+| `wim.md` §13 S12: order after commit / delete and append | commit of index 1: its metadata moves after every other resource, entry stays first; delete and append: offsets keep rising | OBS-021, OBS-023 |
 | OPEN-WIM-5 incompressible data | partly: whole resources that do not compress are stored raw with flag `0x04` clear, inside an XPRESS file; a raw chunk *inside* a compressed resource was not seen | OBS-010 |
 | Chunk table (§4 readings); OPEN-WIM-10 | §4 readings confirmed; width 4 below 4 GiB confirmed; the threshold stays open (needs S08) | OBS-011 |
 | OPEN-WIMC-1 codec and block rule | confirmed: [MS-XCA] LZ77+Huffman, one 256-byte table per chunk, all 369 chunk instances decode to the lookup SHA-1 | OBS-012 |
@@ -51,9 +56,24 @@ stay marked `// FORMAT: derived, unconfirmed`.
   (OPEN-WIM-5, chunk level).
 - **A `/CheckIntegrity` sample over 10 MiB**: more than one integrity
   entry and the chunk boundary rule (OPEN-WIM-11).
-- **A sample whose lookup order differs from offset or index order**
-  (for example an export of S04's indexes in reverse order): the
-  metadata-entry-to-index rule (OPEN-WIM-6).
+- **More serviced layouts** (OPEN-WIM-6): S12A (R2) gave one file whose
+  lookup and offset order differ (OBS-021). Not yet seen, with what the
+  checker does with each layout until a sample is recorded:
+  - a commit of an index between 1 and the last: if DISM moves that
+    image's metadata to the end as in OBS-021, the file is refused
+    (`wim_metadata_order_not_supported`);
+  - a commit of the last index: if its metadata moves to the end,
+    offsets still rise and the file is accepted;
+  - commits of several indexes: refused unless offsets rise or only
+    index 1 moved;
+  - three or more images with identical metadata: if DISM names one
+    copy from three or more entries, refused (`wim_resource_overlap`);
+  - identical images that are not adjacent: if DISM names one copy
+    from entries that are not next to each other in the lookup table,
+    refused (`wim_resource_overlap`); separate copies are accepted;
+  - an export of S04's indexes in reverse order: its layout is
+    unknown; accepted if metadata offsets rise in lookup order (or
+    only the first entry is moved as in OBS-021), refused otherwise.
 - **Edition, architecture, version** (OPEN-WIM-8): only a capture of a
   real Windows installation would show them; our content rules forbid
   that, so these facts stay operator-declared (decision 0013).
@@ -63,7 +83,8 @@ stay marked `// FORMAT: derived, unconfirmed`.
   16-bit length extension and multi-chunk tables of long matches.
 - **A bootable sample** (BOOT-006): how the boot metadata header relates
   to the boot image's lookup entry; waits on OPEN-PE-LIC.
-- **Other DISM builds or runner images**: every claim is for R1 only.
+- **Other DISM builds or runner images**: every claim is for R1 or R2
+  (same DISM build and runner image).
 
 ## Contents
 
@@ -170,6 +191,7 @@ required; "n/a" is allowed only where stated.
 | Run | Run ID | Attempt | Commit | Runner image | OS build | DISM version | Date (UTC) |
 |-----|--------|---------|--------|--------------|----------|--------------|------------|
 | R1 | 40535666995 | 1 | ba23bedea96e5d1c68c8f77e8bff4ce9cb012825 (branch `m2-wim-samples`, job `generate`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-27T15:54:56Z |
+| R2 | 40599556702 | 1 | 5d3c8c701506ff780ff8a86c5e692f725634a6bd (job `generate`) | `win25-vs2026` 20261021.278.1 (windows-2025) | Microsoft Windows NT 10.0.26100.0; `ver` 10.0.26100.33650; CurrentBuild.UBR 26100.33650; 24H2; ServerDatacenter | `Dism.exe` FileVersion and ProductVersion 10.0.26100.32860 (WinBuild.160101.0800); `dism /English /?` banner "Version: 10.0.26100.5074" | 2026-10-27T23:05:02Z |
 
 R1 identity, from `host.txt`: PowerShell 7.6.7, `RUNNER_ARCH` X64.
 The DISM file version and the version in DISM's own banner differ;
@@ -265,6 +287,69 @@ How the R1 bytes were examined (clean side, macOS):
 Results from the scripts are readings; each record therefore also
 quotes the raw bytes it rests on.
 
+R2 checks done before any record was written (macOS, local copy of the
+artifact of run 40599556702, downloaded by the orchestrator):
+
+- `shasum -a 256 -c SHA256SUMS`: all 19 files `OK`.
+- `manifest.tsv`: 19 rows, all `produced` (S11A, S11B, S12A and S12B
+  with expected `observe`). No S08 row.
+- `commands.log`: 86 DISM commands, every one `EXIT 0` (DISM refused
+  no S11 step). `host.txt` identity as in the table above: same OS
+  build, DISM version and runner image as R1.
+- Before this change the checker refused S11A and S11B with
+  `wim_resource_overlap` and S12A with
+  `wim_metadata_order_not_supported`, and accepted S12B (12 images),
+  as the CI run reported.
+
+R2 sample files used by OBS-018 to OBS-023 (SHA-256 from `SHA256SUMS`,
+checked):
+
+| Sample | File | Bytes | SHA-256 |
+|--------|------|-------|---------|
+| S01 | S01.wim | 972691 | b1d7a9b7626763f730246a5cbaf0ff9c7bfc88100b8cf307c02e5e421c65f594 |
+| S02 | S02.wim | 644868 | bbfccc22f6834fe19e64e171f7c23c576effa6668b02659304a157d79b1564c9 |
+| S04 | S04.wim | 6701536 | edf3db30578e78b2bd7a61a25970591cf7cd4afa1594d1eabd8ad634a40b3c1e |
+| S11A | S11A.wim | 647666 | a62b1c5074edec459e82e83ba0b8a3cfaf32150ce1236fe08b8b2d00376a3ae8 |
+| S11B | S11B.wim | 647626 | b4178b296ff73cb7f5d2396a6b5e1eca7019777c4569a7e30f9fe3799a8ac7f6 |
+| S12A | S12A.wim | 6763270 | 5db80ce24d971a8ca2ff8b55c056ea0575c798f703e30e77643c601a672d24c7 |
+| S12B | S12B.wim | 6742165 | b5f93ddd9840a9f30790e32fcfd6658c79cd57ef393c7c3de0480125bdd92f09 |
+
+R2 commands for these samples (from `commands.log`; S01, S02 and S04
+as in R1, with `D:\a\_temp` paths):
+
+```text
+S11A dism.exe /English /Capture-Image /ImageFile:D:\a\_temp\wim-samples\S11A.wim /CaptureDir:D:\a\_temp\wim-work\tree-01 /Name:USGP-S11A-01 /Description:usgp-sample-S11A-index-01-same-tree /Compress:fast
+     dism.exe /English /Append-Image /ImageFile:D:\a\_temp\wim-samples\S11A.wim /CaptureDir:D:\a\_temp\wim-work\tree-01 /Name:USGP-S11A-02 /Description:usgp-sample-S11A-index-02-same-tree
+S11B dism.exe /English /Export-Image /SourceImageFile:D:\a\_temp\wim-samples\S02.wim /SourceIndex:1 /DestinationImageFile:D:\a\_temp\wim-samples\S11B.wim /Compress:fast
+     dism.exe /English /Export-Image /SourceImageFile:D:\a\_temp\wim-samples\S02.wim /SourceIndex:1 /DestinationImageFile:D:\a\_temp\wim-samples\S11B.wim /DestinationName:USGP-S11B-02
+S12A copy S04.wim to S12A.wim
+     dism.exe /English /Mount-Image /ImageFile:D:\a\_temp\wim-samples\S12A.wim /Index:1 /MountDir:D:\a\_temp\wim-work\mount-S12A
+     copy tree-service to mount\usgp-serviced
+     dism.exe /English /Unmount-Image /MountDir:D:\a\_temp\wim-work\mount-S12A /Commit
+S12B copy S04.wim to S12B.wim
+     dism.exe /English /Delete-Image /ImageFile:D:\a\_temp\wim-samples\S12B.wim /Index:1
+     dism.exe /English /Append-Image /ImageFile:D:\a\_temp\wim-samples\S12B.wim /CaptureDir:D:\a\_temp\wim-work\tree-01 /Name:USGP-S12B-12 /Description:usgp-sample-S12B-index-12-appended
+```
+
+How the R2 bytes were examined: `xxd`, `shasum` and `cmp`; the R1
+scripts `lookup.py`, `metamap.py` and `xpr.py` unchanged; and two new
+scripts written for R2 from `wim.md` (and, through `xpr.py`,
+`wim-compression.md`) only, committed under
+`scripts/wim-samples/analysis/` with the same kind of header:
+
+| Script | Use | SHA-256 |
+|--------|-----|---------|
+| `gaps.py` | sorts every named range, prints unnamed ranges and overlaps (OBS-018, OBS-020 to OBS-022) | 24c970ae539859325db9c2791232d053ba8c93e412999a6da90dd5dbe6079b47 |
+| `metahash.py` | decodes each metadata resource, checks its SHA-1, looks for the tree-service hashes, prints XML index and name (OBS-021) | 78516eef8462144ad0940a3c90cb4c2ef47723d95f32f682d6ef9be5314e8f88 |
+
+`metahash.py`'s header lists `wim.md` sections 2 to 5 as its sources;
+it also reads the XML index and name, which rests on `wim.md` §7 and
+OBS-014. The header is left as run, since the file is hashed above.
+
+The product's own reader confirms the layout facts in a committed
+test: `crates/usgp-image/tests/dism_samples.rs`
+(`serviced_layouts_match_observations`, feature `dism-samples`).
+
 ## Open items and samples
 
 Status `pending` means no record exists yet. Questions listed here are
@@ -279,7 +364,7 @@ the samples can address; the samples are defined in
 | OPEN-WIM-3 | What the field at offset 20 holds | S01, S02, S04 | header (`@20`) | partly: OBS-004 (not the file size; meaning a reading) |
 | OPEN-WIM-4 | Flags of `recovery` (`.esd`) output | S07 | header (`@16`), lookup | partly: OBS-006 (flags recorded; format undocumented) |
 | OPEN-WIM-5 | How an incompressible chunk is stored | S09 (with `trees.txt` chunk bytes), S02 | chunks | partly: OBS-010 (resource level); chunk level needs a mixed sample |
-| OPEN-WIM-6 | Lookup entry packing; metadata entry to image index | S01, S04 | lookup, metadata, xml | packing confirmed: OBS-008; index mapping partly: OBS-009 |
+| OPEN-WIM-6 | Lookup entry packing; metadata entry to image index | S01, S04, S11A, S11B, S12A, S12B | lookup, metadata, xml | packing confirmed: OBS-008; index mapping partly: OBS-009, OBS-018, OBS-021, OBS-023 (lookup order gives the index in every file seen) |
 | OPEN-WIM-7 | Directory entry alignment, short names | S01 | metadata | pending (needed only when applying images; M2 does not) |
 | OPEN-WIM-8 | Content of `NAME`, `DESCRIPTION`, `FLAGS`, `WINDOWS` | S04 | xml | partly: OBS-014 (no `FLAGS`, no `WINDOWS` in our samples; edition, architecture and version facts cannot be observed from them, see decision 0013) |
 | OPEN-WIM-9 | How parts of a split set are matched | S06 parts | header (`@24`, `@40`, `@42`) | partly: OBS-016 (shared GUID) |
@@ -291,13 +376,18 @@ the samples can address; the samples are defined in
 
 ## Observations
 
-Records are in ID order. Every record below is from run R1; its
-identity line reads: Windows NT 10.0.26100.0, build 26100.33650;
+Records are in ID order. OBS-001 to OBS-017 are from run R1, OBS-018
+to OBS-023 from run R2. The R2 identity line reads: Windows NT
+10.0.26100.0, build 26100.33650; `Dism.exe` 10.0.26100.32860 (banner
+10.0.26100.5074); runner image `win25-vs2026` 20261021.278.1; run
+40599556702, attempt 1, commit 5d3c8c7; R2 commands and SHA-256 values
+are in [Runs examined](#runs-examined). The R1 records' identity line
+reads: Windows NT 10.0.26100.0, build 26100.33650;
 `Dism.exe` 10.0.26100.32860 (banner 10.0.26100.5074); runner image
 `win25-vs2026` 20261021.278.1; run 40535666995, attempt 1, commit
-ba23bed. Sample SHA-256 values are given in full in the R1 sample
-table; records quote the first 16 hex digits. Commands are the R1
-command lines above. Offsets are file offsets, decimal then hex.
+ba23bed. Sample SHA-256 values are given in full in the R1 and R2
+sample tables; records quote the first 16 hex digits. Commands are the
+R1 and R2 command lines above. Offsets are file offsets, decimal then hex.
 Multi-byte values are read little-endian (OBS-002).
 
 ### OBS-001: header signature, cbSize 208, header ends at 208
@@ -1024,3 +1114,326 @@ Multi-byte values are read little-endian (OBS-002).
   `crates/usgp-image/tests/negative.rs`,
   `crates/usgp-image/tests/dism_samples.rs` (`// FORMAT: OBS-017` or a
   comment or test naming the record; filled in fix round 1, CR-601)
+
+### OBS-018: two images with identical metadata share one entry's bytes
+
+- Status: Recorded
+- Settles: `wim.md` §13 S11 (two resources, one shared range, or a
+  DISM refusal: one shared range); OPEN-WIM-6, part 2, for this case
+- Sample: S11A (S11A.wim, a62b1c5074edec45), S11B (S11B.wim,
+  b4178b296ff73cb7)
+- Command: R2 commands S11A (capture of tree-01, then `/Append-Image`
+  of tree-01 as `USGP-S11A-02`) and S11B (`/Export-Image` of S02.wim
+  index 1 to a new file, then again to the same file with
+  `/DestinationName:USGP-S11B-02`)
+- Source tree: tree-01, seed 101 (S11B: by way of R2 S02.wim)
+- Host, DISM, runner, run: R2 identity line
+- Location: S11A lookup 644882 (0x9D712), entries 0 and 1, 100 bytes;
+  S11B lookup 644868 (0x9D704), entries 0 and 1, 100 bytes
+- Bytes:
+
+  ```text
+  S11A 0009d712: 1505 0000 0000 0006 b9ca 0900 0000 0000
+  S11A 0009d722: a812 0000 0000 0000 0100 0100 0000 484d
+  S11A 0009d732: cebe 99b4 b4ee 93d7 5cb9 0dcc 35cb b9f8
+  S11A 0009d742: c6a5 1505 0000 0000 0006 b9ca 0900 0000
+  S11A 0009d752: 0000 a812 0000 0000 0000 0100 0100 0000
+  S11A 0009d762: 484d cebe 99b4 b4ee 93d7 5cb9 0dcc 35cb
+  S11A 0009d772: b9f8 c6a5
+  S11B 0009d704: 1505 0000 0000 0006 b9ca 0900 0000 0000
+  S11B 0009d714: a812 0000 0000 0000 0100 0100 0000 484d
+  S11B 0009d724: cebe 99b4 b4ee 93d7 5cb9 0dcc 35cb b9f8
+  S11B 0009d734: c6a5 1505 0000 0000 0006 b9ca 0900 0000
+  S11B 0009d744: 0000 a812 0000 0000 0000 0100 0100 0000
+  S11B 0009d754: 484d cebe 99b4 b4ee 93d7 5cb9 0dcc 35cb
+  S11B 0009d764: b9f8 c6a5
+  ```
+
+- Observation: in both files the header records 2 images, and the
+  lookup table (19 entries) starts with exactly two entries with flag
+  0x02. In each file those two entries are equal in all 50 bytes:
+  stored 1301, flags 0x06, offset 641721, original 4776, part 1,
+  reference count 1, SHA-1 `484dcebe99b4b4ee93d75cb90dcc35cbb9f8c6a5`
+  (the same values as R2 S02's single metadata entry). No other entry
+  in either file has flag 0x02. No other byte range in the file holds
+  a second copy of that resource: the only ranges named by entries are
+  these, 17 file resources, the lookup table and the XML. The 1301
+  bytes at 641721 decode to 4776 bytes with that SHA-1 (`metamap.py`
+  plus `xpr.py`, and the product's reader in `dism_samples.rs`); the
+  decoded data holds tree-01's `bin\random-1.bin` hash. DISM's own
+  `/Get-WimInfo` lists index 1 and 2 for both files (S11A:
+  `USGP-S11A-01`, `USGP-S11A-02`; S11B: `USGP-S02-01`,
+  `USGP-S11B-02`, both with the source's description
+  `usgp-sample-S02-index-01-fast`), each 965,911 bytes.
+- Conclusion: in S11A and S11B, two images whose metadata is identical
+  are written as one metadata resource named by two adjacent lookup
+  entries equal in every byte, reference count 1 each. Lookup position
+  still gives the index (the XML names two images); DISM did not
+  refuse either step. Whether DISM does the same for three or more
+  images, or for identical images that are not adjacent in index
+  order, was not observed.
+- Also seen in: none
+- Cited by: `crates/usgp-image/src/wim/lookup.rs`,
+  `crates/usgp-image/src/wim/check.rs`,
+  `crates/usgp-image/src/error.rs`,
+  `crates/usgp-image/src/testkit/builder.rs` (`reuse_metadata`),
+  `crates/usgp-image/tests/check.rs`,
+  `crates/usgp-image/tests/negative.rs`,
+  `crates/usgp-image/tests/dism_samples.rs`,
+  `fuzz/fuzz_targets/wim_lookup.rs`, `fuzz/fuzz_targets/wim_check.rs`
+
+### OBS-019: file reference counts in S11 do not equal a use count
+
+- Status: Recorded
+- Settles: nothing; qualifies the reference-count reading of OBS-008
+- Sample: S11A (a62b1c5074edec45), S11B (b4178b296ff73cb7), R2 S02
+  (S02.wim, bbfccc22f6834fe1), R1 S02 (6b3a317d2b4dec47)
+- Command: R2 commands S11A, S11B, S02; R1 command S02
+- Source tree: tree-01, seed 101; `names\*.txt` are five 23-byte files
+  with one SHA-1, `6639623d0df61f7ab55eed28a8b1d3c51d3ccd4d`
+  (`trees.txt`)
+- Host, DISM, runner, run: R2 identity line; R1 identity line for R1
+  S02
+- Location: S11A entry 7 at 645232 (0x9D870); S11B entry 9 at 645318
+  (0x9D8C6); R2 S02 entry 8 at 643422 (0x9D15E); R1 S02 entry 6 at
+  643322 (0x9D0FA); S11A entry 2 at 644982 (0x9D776); 50 bytes each
+- Bytes:
+
+  ```text
+  S11A   0009d870: 1700 0000 0000 0000 d090 0100 0000 0000
+  S11A   0009d880: 1700 0000 0000 0000 0100 0900 0000 6639
+  S11B   0009d8c6: 1700 0000 0000 0000 7017 0400 0000 0000
+  S11B   0009d8d6: 1700 0000 0000 0000 0100 0a00 0000 6639
+  R2 S02 0009d15e: 1700 0000 0000 0000 7017 0400 0000 0000
+  R2 S02 0009d16e: 1700 0000 0000 0000 0100 0200 0000 6639
+  R1 S02 0009d0fa: 1700 0000 0000 0000 d090 0100 0000 0000
+  R1 S02 0009d10a: 1700 0000 0000 0000 0100 0500 0000 6639
+  S11A   0009d776: 0100 0000 0000 0000 d000 0000 0000 0000
+  S11A   0009d786: 0100 0000 0000 0000 0100 0200 0000 3014
+  ```
+
+- Observation: every file resource of S11A and S11B has one entry
+  (no hash repeated among the 17 file entries), and both images use
+  all of them. Every file entry except the `names\*.txt` one has
+  reference count 2 (S11A entry 2 above: `bin\random-1.bin`, count 2;
+  R2 S02 has count 1 on the same resource). The `names\*.txt` entry has
+  count 9 in S11A and 10 in S11B. The same command captured the same
+  tree in R1 S02 and R2 S02; that entry has count 5 in R1 S02 and 2 in
+  R2 S02. Its offset differs too (102608 in R1, 268144 in R2), so the
+  order in which DISM stored the files differs between the two runs.
+- Conclusion: in these files a resource used once per image by two
+  images has reference count 2, but the count on a resource used
+  several times per image is not a stable function of its uses (5, 2,
+  9 and 10 for 5, 5, 10 and 10 uses). A reader should not rely on
+  reference counts; the checker does not read them except as part of
+  the 50-byte equality of OBS-018.
+- Also seen in: none
+- Cited by: `crates/usgp-image/src/wim/lookup.rs` (equality includes
+  the count; no rule on its value)
+
+### OBS-020: superseded lookup tables and XML stay in the file, unnamed
+
+- Status: Recorded
+- Settles: partly `wim.md` §13 S12 ("whether unused space is left in
+  the file"): yes. Narrows OBS-008's "no gap" to single-step files
+- Sample: S11A, S11B, S12A, S12B (hashes as above), R2 S04 (S04.wim,
+  edf3db30578e78b2), R2 S01 (S01.wim, b1d7a9b7626763f7), R2 S02
+  (bbfccc22f6834fe1); R1 S04 (d59d219ec33c8b1d)
+- Command: R2 commands S01, S02, S04, S11A, S11B, S12A, S12B; R1
+  command S04
+- Source tree: as each sample
+- Host, DISM, runner, run: R2 identity line; R1 identity line for R1
+  S04
+- Location: S11A 643022 to 644882 (1860 bytes); S11B 643022 to 644868
+  (1846 bytes); S04 (R1 and R2) 11 ranges, the first 643022 to 644868;
+  S12A 6681422 to 6701536 (20114 bytes); S12B 6681422 to 6720738
+  (39316 bytes)
+- Bytes: first bytes of the S11A range and of its XML part; the S12A
+  range; the three places where the S11B range differs from R2 S02's
+  lookup table and XML at the same offsets (S02 line first); the first
+  entry, the last entry, the XML start and the XML end of the S12B
+  post-delete table (6701536, 9650 bytes = 193 entries; XML 6711186 to
+  6720738, 9552 bytes):
+
+  ```text
+  S11A 0009cfce: 1505 0000 0000 0006 b9ca 0900 0000 0000
+  S11A 0009d352: fffe 3c00 5700 4900 4d00 3e00 3c00 5400
+  S12A 0065f34e: 1505 0000 0000 0006 b9ca 0900 0000 0000
+  S02  0009d16e: 1700 0000 0000 0000 0100 0200 0000 6639
+  S11B 0009d16e: 1700 0000 0000 0000 0100 0500 0000 6639
+  S02  0009d376: 3600 3400 3300 3900 3200 3200 3c00 2f00
+  S11B 0009d376: 3600 3400 3400 3800 3600 3800 3c00 2f00
+  S02  0009d5ce: 3900 4300 3100 4100 3400 3700 3100 3500
+  S11B 0009d5ce: 3900 4500 4300 3100 4200 3700 3500 3500
+  S12B 006641e0: 1505 0000 0000 0006 810a 1200 0000 0000
+  S12B 00666760: 810c 0100 0000 0004 b4e1 6400 0000 0000
+  S12B 00666770: f09a 0500 0000 0000 0100 0100 0000 2b2c
+  S12B 00666792: fffe 3c00 5700 4900 4d00 3e00 3c00 5400
+  S12B 00668cd2: 4500 3e00 3c00 2f00 5700 4900 4d00 3e00
+  ```
+
+- Observation: sorting every range the header and lookup table name
+  (`gaps.py`) leaves these ranges named by nothing. In S11A the 1860 bytes are
+  a 900-byte table of 18 entries (the first equal to the metadata entry of
+  OBS-018) followed by 960 bytes of UTF-16LE XML with a BOM naming one image,
+  `USGP-S11A-01`: the lookup table and XML of the first step. In S11B the 1846
+  bytes are a 900-byte table and 946 bytes of XML naming `USGP-S02-01`; they
+  differ from R2 S02's own lookup table and XML in 10 bytes: 1 in entry 8's
+  reference count (2 in S02, 5 here), 4 in the digits of the top-level
+  `TOTALBYTES` (643922 in S02, 644868 here) and 5 in the digits of a `LOWPART`
+  time value. In S04 (both runs) each later image's file resources start after
+  such a range, whose size is the previous step's table plus XML (1846, 3508,
+  ..., 18452 bytes). In S12A the 20114 bytes are byte-identical to S04's
+  lookup table and XML at the same offset. In S12B the 39316 bytes are S04's
+  lookup table and XML (20114 bytes, identical), then a 9650-byte table (193
+  entries of 50 bytes: S04's without the first metadata entry; its first entry
+  names image 2's metadata at 1182337, its last a compressed file resource)
+  and 9552 bytes of XML naming 11 images, the state after `/Delete-Image`. No
+  range named by the live header or lookup table overlaps another, except
+  OBS-018's.
+- Conclusion: in these files each append, export, commit or delete
+  writes a new lookup table and XML and leaves the old ones in place;
+  the file then has unnamed ranges between resources. Single-step
+  captures (R2 S01 and S02, by `gaps.py`) have none.
+- Also seen in: R1 S04 (same 11 ranges)
+- Cited by: `crates/usgp-image/src/wim/lookup.rs` (gaps allowed);
+  `crates/usgp-image/tests/dism_samples.rs` (the builder does not write
+  them; noted where the S11 layout is compared)
+
+### OBS-021: after a commit of index 1, lookup order gives the index
+
+- Status: Recorded
+- Settles: OPEN-WIM-6, part 2, partly: in a file where lookup order and
+  file-offset order differ, lookup order gives the index; `wim.md` §13
+  S12 (mount and commit)
+- Sample: S12A (S12A.wim, 5db80ce24d971a8c)
+- Command: R2 command S12A: copy of S04.wim, `/Mount-Image /Index:1`,
+  copy of tree-service under `usgp-serviced\`, `/Unmount-Image /Commit`
+- Source tree: tree-01 to tree-12 (S04); tree-service, profile Service,
+  seed 501: `serviced.txt` (57 bytes, SHA-1 a8ccfd6b...) and
+  `serviced-40000.bin` (40000 bytes, SHA-1 880baf1c...) (`trees.txt`)
+- Host, DISM, runner, run: R2 identity line
+- Location: lookup 6743054 (0x66E40E), 9800 bytes; entries 0 and 1
+- Bytes:
+
+  ```text
+  0066e40e: b505 0000 0000 0006 59de 6600 0000 0000
+  0066e41e: c815 0000 0000 0000 0100 0100 0000 4d2a
+  0066e42e: 61c8 4cf4 dc6d 2892 f572 a9d4 1685 09de
+  0066e43e: 3017 1505 0000 0000 0006 810a 1200 0000
+  0066e44e: 0000 a812 0000 0000 0000 0100 0100 0000
+  0066e45e: 8cd0 4fe2 8cb6 18eb 02bd 69b1 9639 3ca7
+  ```
+
+- Observation: the table has 196 entries; the first 12 have flag 0x06
+  and no other has 0x02. Entry 0 is stored 1461, offset 6741593,
+  original 5576, SHA-1 `4d2a61c8...`; entries 1 to 11 are equal in all
+  50 bytes to S04's entries 1 to 11 (offsets 1182337 rising to
+  6680117). Entry 0's range ends at 6743054, where the lookup table
+  starts, and lies after every other range the table names (the two new
+  file entries end at 6741593). So in lookup order the metadata offsets
+  are 6741593, then 1182337 to 6680117 rising: offset order and lookup
+  order differ for entry 0 only. Decoded (`metamap.py`, `xpr.py`,
+  `metahash.py`): entry 0 decodes to its SHA-1 and holds tree-01's
+  `bin\random-1.bin` hash and the SHA-1 of both tree-service files;
+  entry k (k = 1 to 11) holds tree-(k+1)'s
+  hash. The XML gives `INDEX="1"` the name `USGP-S04-01` (tree-01,
+  the mounted image) and `INDEX="k+1"` `USGP-S04-(k+1)`; DISM's
+  `/Get-WimInfo` agrees.
+- Conclusion: in S12A, committing index 1 writes that image's new
+  metadata after every other resource and keeps its lookup entry
+  first; the k-th metadata entry in lookup order is still image index
+  k, so lookup order (not file-offset order) gives the index here.
+  A commit of another index, or of several, was not observed.
+- Also seen in: none
+- Cited by: `crates/usgp-image/src/wim/lookup.rs`,
+  `crates/usgp-image/src/wim/check.rs`,
+  `crates/usgp-image/src/error.rs`,
+  `crates/usgp-image/src/testkit/builder.rs` (`move_first_metadata`),
+  `crates/usgp-image/tests/check.rs`,
+  `crates/usgp-image/tests/negative.rs`,
+  `crates/usgp-image/tests/dism_samples.rs`,
+  `fuzz/fuzz_targets/wim_lookup.rs`
+
+### OBS-022: a commit appends; the old metadata stays in place, unnamed
+
+- Status: Recorded
+- Settles: `wim.md` §13 S12, stale resources after a commit
+- Sample: S12A (5db80ce24d971a8c), R2 S04 (edf3db30578e78b2)
+- Command: R2 command S12A
+- Source tree: as OBS-021
+- Host, DISM, runner, run: R2 identity line
+- Location: header 48 to 96; 641721 (0x9CAB9), 1301 bytes; 6701536
+  (0x6642E0) onwards
+- Bytes:
+
+  ```text
+  S12A 00000030: 4826 0000 0000 0002 0ee4 6600 0000 0000
+  S04  00000030: e425 0000 0000 0002 4ef3 6500 0000 0000
+  S12A 0009cab9: 7477 97a9 8898 87a9 87a7 8708 088a a988
+  S12A 006709f2: 3900 0000 0000 0000 e041 6600 0000 0000
+  S12A 00670a02: 3900 0000 0000 0000 0100 0100 0000 a8cc
+  ```
+
+- Observation: the first 6701536 bytes of S12A (S04's length) differ
+  from S04 in 12 bytes, all within header offsets 48 to 88 (the lookup
+  and XML resource headers). The 1301 bytes at 641721, which S04's
+  entry 0 names (image 1's metadata, SHA-1 `484dcebe...`), are still
+  there byte for byte; no S12A entry names them. After 6701536 come
+  the new file resources (entries 194 and 195: 57 bytes at 6701536,
+  `serviced.txt`; 40000 bytes at 6701593, `serviced-40000.bin`), the
+  new metadata of OBS-021, the new lookup table and the new XML. All
+  other file entries are unchanged.
+- Conclusion: in S12A, `/Unmount-Image /Commit` left every existing
+  byte except the header in place and appended the changes; the
+  replaced metadata is a stale resource that nothing references.
+- Also seen in: S12B (S04's image 1 metadata at 641721, unnamed after
+  the delete; OBS-023)
+- Cited by: `crates/usgp-image/src/testkit/builder.rs`
+  (`move_first_metadata` leaves the stale copy),
+  `crates/usgp-image/tests/check.rs`,
+  `crates/usgp-image/tests/dism_samples.rs`
+
+### OBS-023: delete then append keeps metadata offsets rising
+
+- Status: Recorded
+- Settles: `wim.md` §13 S12 (delete then append): lookup, offset and
+  index order agree in this file
+- Sample: S12B (S12B.wim, b5f93ddd9840a9f3)
+- Command: R2 command S12B: copy of S04.wim, `/Delete-Image /Index:1`,
+  `/Append-Image` of tree-01 as `USGP-S12B-12`
+- Source tree: tree-01 to tree-12
+- Host, DISM, runner, run: R2 identity line
+- Location: lookup 6722039 (0x6691F7), entries 11 and 12; superseded
+  post-delete table (OBS-020) entry 11 at 6702086 (0x664406)
+- Bytes (live entries 11 and 12; then the superseded entry 11, whose
+  reference count, bytes 26 to 29, is 0):
+
+  ```text
+  0066941d: 1505 0000 0000 0006 e28c 6600 0000 0000
+  0066942d: a812 0000 0000 0000 0100 0100 0000 484d
+  0066943d: cebe 99b4 b4ee 93d7 5cb9 0dcc 35cb b9f8
+  0066944f: 0100 0000 0000 0000 d000 0000 0000 0000
+  0066945f: 0100 0000 0000 0000 0100 0100 0000 3014
+  00664406: 0100 0000 0000 0000 d000 0000 0000 0000
+  00664416: 0100 0000 0000 0000 0100 0000 0000 3014
+  00664426: 0397 fe38 ee61 f01e ff44 b5cf a482 85e4
+  ```
+
+- Observation: 194 entries; entries 0 to 10 are equal to S04's entries
+  1 to 11; entry 11 has offset 6720738 and the SHA-1 of S04's deleted
+  image 1 metadata (`484dcebe...`), written again rather than pointing
+  at the old copy at 641721, which no entry names. Metadata offsets
+  rise with lookup order. Decoded, entry k holds tree-(k+2)'s hash for
+  k = 0 to 10 and entry 11 tree-01's; the XML names index 1 to 11
+  `USGP-S04-02` to `USGP-S04-12` and index 12 `USGP-S12B-12`. Tree-01's
+  file resources keep their S04 offsets (entry 12: offset 208, count
+  1). The superseded post-delete table (OBS-020) lists those file
+  entries with reference count 0.
+- Conclusion: in S12B, deleting index 1 and appending the same tree
+  renumbers the remaining images, adds new metadata at the end, reuses
+  the stored file resources and leaves the deleted metadata unnamed.
+  The checker accepted S12B before this change (CI run 40599556702).
+- Also seen in: none
+- Cited by: `crates/usgp-image/src/wim/lookup.rs`,
+  `crates/usgp-image/tests/dism_samples.rs`

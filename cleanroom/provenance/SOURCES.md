@@ -230,6 +230,30 @@ DEC-0017 status update (2026-10-27):
   INDEX preamble and topic 9 now say accepted. The CR-605 line above is
   kept as the historical record.
 
+DISM sample run R2 folded into wim.md (2026-10-27):
+
+- No research, no fetches and no searches. No vendor source and no
+  Microsoft page was opened. The researcher read the clean-room
+  protocol, the dirty-side spec and provenance files, and, at the
+  orchestrator's direction (as in the drift round), only the "Runs
+  examined" and "Open items" sections and records OBS-018 to OBS-023
+  of the observation record `docs/formats/wim-observed.md`. No code,
+  decision record or other docs file was opened. The code paths the
+  records list as citing them were not followed.
+- The observation-record table below now has an R2 row (OBS-018 to
+  OBS-023, workflow run 40599556702, commit 5d3c8c7). `wim.md` cites
+  the records under the [observed] label, in its own words: Sources and
+  label text, §3 (unused space), §5 (R2 lookup-table notes; the R1
+  "no gap" note marked contradicted for changed files and the
+  reference-count note qualified), §13 (OPEN-WIM-6 settled and open
+  parts, status table, never-observed list; S11, S12A and S12B marked
+  recorded; S12C, S12D, S11C and S11D still needed) and §14 (stale
+  data after delete or commit).
+- INDEX preamble and topic 9 updated. The R2 notes were audited on
+  2026-10-27 (approve with comments): CR-001 removed the paper's free
+  flag from the §3 [observed] note; CR-006 split the §14 inference into
+  a separate [derived] note.
+
 ## Project decisions cited
 
 These are project design decisions, not product behaviour. They are
@@ -260,6 +284,7 @@ cited in specs only under the [observed] label.
 | ID | Title | Repo path | Run and date | Nature | Used for |
 |----|-------|-----------|--------------|--------|----------|
 | OBS-001 to OBS-017 (run R1) | WIM format: observations from our own DISM-made files | `docs/formats/wim-observed.md` | Workflow run 40535666995, attempt 1, commit ba23bed (branch of the WIM sample job); DISM 10.0.26100.32860 on Windows build 26100.33650; 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R1 files only | standards/wim.md Sources, labels, §2, §3, §4, §5, §7, §8, §9, §10, §12, §13; standards/wim-compression.md Sources, §1, §3, §3.1, §3.3, §3.4, §3.6, §7; REQ-IMG-038 Status (OPEN-WIMC-1 confirmed for R1); INDEX header, topics 9 and 20 |
+| OBS-018 to OBS-023 (run R2) | WIM format: observations from our own DISM-made files changed after capture (identical images, append, export, commit, delete) | `docs/formats/wim-observed.md` | Workflow run 40599556702, attempt 1, commit 5d3c8c7 (job `generate`); DISM 10.0.26100.32860 on Windows build 26100.33650 (same as R1); 2026-10-27 | Clean-side observation of files the project built itself with Microsoft's DISM (DEC-0006); claims hold for R2 files only (OBS-020 also notes R1's 12-image file) | standards/wim.md Sources, labels, §3, §5, §13 (OPEN-WIM-6, status table, never-observed list, samples recorded and still needed), §14; INDEX header and topic 9 |
 
 ## Sources used
 

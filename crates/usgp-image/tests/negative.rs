@@ -15,7 +15,7 @@
 mod negative {
     use std::io::Cursor;
 
-    use usgp_image::testkit::{BuildInfo, WimBuilder};
+    use usgp_image::testkit::{BuildInfo, ImageSpec, WimBuilder};
     use usgp_image::wim::xml::encode_utf16;
     use usgp_image::{Compression, NoProgress, WimError, WimLimits, WimSummary, check_wim};
 
@@ -570,36 +570,112 @@ mod negative {
     }
 
     #[test]
-    fn repeated_metadata_range_refused() {
+    fn shared_metadata_range_refused_unless_identical() {
         // SEC-003 / BOOT-001: metadata entries naming the same bytes would
-        // be decoded and hashed once per entry.
+        // be decoded and hashed once per entry. OBS-018: the one sharing
+        // DISM wrote (S11A, S11B) is an entry equal in all 50 bytes to the
+        // one before it; that is accepted and read once (tests/check.rs,
+        // `reused_metadata_entry_accepted`). Anything else is refused.
         for c in [Compression::None, Compression::Xpress] {
             let (b, info) = two_images(c);
-            // Entry 2 = entry 1 exactly (same range, same hash). Metadata
-            // hashes are not compared (BOOT-011); the shared range is.
-            let mut d = b.clone();
             let e1 = entry_bytes(&b, lookup_entry_at(&info, 0));
+            let m0 = info.metadata[0];
+
+            // Exact repeat: the S11 shape, accepted (image 2's own
+            // metadata becomes unnamed space).
+            let mut d = b.clone();
             put(&mut d, lookup_entry_at(&info, 1), &e1);
-            assert_eq!(run(&d).unwrap_err(), WimError::ResourceOverlap, "{c:?}");
-            // Entry 2 points at entry 1's range but keeps its own hash.
+            assert!(run(&d).is_ok(), "{c:?}");
+
+            // Same range, image 2's own hash.
             let mut d = b.clone();
             put(&mut d, lookup_entry_at(&info, 1), &e1[..24]);
             assert_eq!(run(&d).unwrap_err(), WimError::ResourceOverlap, "{c:?}");
-            // Entry 2 starts inside entry 1's range.
+
+            // Same offset and hash, different size.
+            let mut rh = m0;
+            rh.stored_size -= 1;
+            if c == Compression::None {
+                rh.original_size -= 1;
+            }
             let mut d = b.clone();
-            let m0 = info.metadata[0];
+            put(&mut d, lookup_entry_at(&info, 1), &e1);
+            put(&mut d, lookup_entry_at(&info, 1), &rh.to_bytes());
+            assert_eq!(run(&d).unwrap_err(), WimError::ResourceOverlap, "{c:?}");
+
+            // Same location and hash, different reference count.
+            let mut d = b.clone();
+            put(&mut d, lookup_entry_at(&info, 1), &e1);
+            put(&mut d, lookup_entry_at(&info, 1) + 26, &7u32.to_le_bytes());
+            assert_eq!(run(&d).unwrap_err(), WimError::ResourceOverlap, "{c:?}");
+
+            // Partial overlap: entry 2 starts inside entry 1's range.
+            let mut d = b.clone();
             let mut rh = info.metadata[1];
             rh.offset = m0.offset + 1;
             put(&mut d, lookup_entry_at(&info, 1), &rh.to_bytes());
-            let e = run(&d).unwrap_err();
-            assert!(
-                matches!(
-                    e,
-                    WimError::ResourceOverlap | WimError::MetadataOrderNotSupported
-                ),
-                "{c:?} {e:?}"
-            );
+            assert_eq!(run(&d).unwrap_err(), WimError::ResourceOverlap, "{c:?}");
         }
+
+        // A reused entry (builder S11 layout) whose repeat differs in its
+        // hash only.
+        let spec = |name: &str| ImageSpec {
+            name: name.to_owned(),
+            description: None,
+            files: vec![b"one tree\n".repeat(500)],
+        };
+        let (mut b, info) = built(
+            WimBuilder::new(Compression::Xpress)
+                .reuse_metadata(true)
+                .image_spec(spec("a"))
+                .image_spec(spec("b")),
+        );
+        assert!(run(&b).is_ok());
+        put(&mut b, lookup_entry_at(&info, 1) + 30, &[0xee; 20]);
+        assert_eq!(run(&b).unwrap_err(), WimError::ResourceOverlap);
+    }
+
+    #[test]
+    fn reused_metadata_not_adjacent_refused() {
+        // OBS-018 saw the twin entries next to each other in the lookup
+        // table; a repeat after another image's entry (A, B, A) keeps its
+        // own range: overlap.
+        let (mut b, info) = three_images(Compression::Xpress);
+        let e1 = entry_bytes(&b, lookup_entry_at(&info, 0));
+        put(&mut b, lookup_entry_at(&info, 2), &e1);
+        assert_eq!(run(&b).unwrap_err(), WimError::ResourceOverlap);
+    }
+
+    #[test]
+    fn reused_metadata_across_a_file_entry_refused() {
+        // BOOT-004 / SEC-001: [a, file, a]. Image 2's metadata entry is
+        // moved after a file entry and set equal to image 1's: the two
+        // equal entries are not adjacent in the lookup table.
+        let (b, info) = two_images(Compression::Xpress);
+        let e1 = entry_bytes(&b, lookup_entry_at(&info, 0));
+        let f = entry_bytes(&b, lookup_entry_at(&info, 2));
+        let mut d = b.clone();
+        put(&mut d, lookup_entry_at(&info, 1), &f);
+        put(&mut d, lookup_entry_at(&info, 2), &e1);
+        assert_eq!(run(&d).unwrap_err(), WimError::ResourceOverlap);
+        // The same three entries with the twins adjacent are accepted.
+        let mut d = b.clone();
+        put(&mut d, lookup_entry_at(&info, 1), &e1);
+        assert!(run(&d).is_ok());
+    }
+
+    #[test]
+    fn third_equal_metadata_entry_refused() {
+        // BOOT-001: OBS-018 saw exactly two equal entries; a third is
+        // refused as an overlap.
+        let (mut b, info) = three_images(Compression::Xpress);
+        let e1 = entry_bytes(&b, lookup_entry_at(&info, 0));
+        put(&mut b, lookup_entry_at(&info, 1), &e1);
+        let mut two = b.clone();
+        // Image 3 keeps its own entry: two equal, accepted.
+        assert!(run(&two).is_ok());
+        put(&mut two, lookup_entry_at(&info, 2), &e1);
+        assert_eq!(run(&two).unwrap_err(), WimError::ResourceOverlap);
     }
 
     #[test]
@@ -652,22 +728,78 @@ mod negative {
         assert_eq!(run(&b).unwrap_err(), WimError::DuplicateResource);
     }
 
+    fn three_images(c: Compression) -> (Vec<u8>, BuildInfo) {
+        built(
+            WimBuilder::new(c)
+                .image("a", "b")
+                .image("c", "d")
+                .image("e", "f"),
+        )
+    }
+
+    /// Rewrites the metadata entries of a three-image file so that lookup
+    /// entry k names the metadata at position `order[k]`.
+    fn reorder(b: &[u8], info: &BuildInfo, order: [u64; 3]) -> Vec<u8> {
+        let orig: Vec<[u8; 50]> = (0..3)
+            .map(|k| entry_bytes(b, lookup_entry_at(info, k)))
+            .collect();
+        let mut d = b.to_vec();
+        for (k, from) in (0u64..).zip(order) {
+            put(&mut d, lookup_entry_at(info, k), &orig[from as usize]);
+        }
+        d
+    }
+
     #[test]
     fn metadata_out_of_offset_order_refused() {
-        // BOOT-003: lookup order and offset order differ; which one names
-        // the index is OPEN-WIM-6, so the file is refused.
+        // BOOT-003, BOOT-012: lookup order and offset order differ. Only
+        // the S12A shape (OBS-021: the first entry names the resource
+        // after every other one, the rest rise) is accepted.
         for c in [Compression::None, Compression::Xpress] {
+            let (b, info) = three_images(c);
+            // Observed shape: m3, m1, m2.
+            assert!(run(&reorder(&b, &info, [2, 0, 1])).is_ok(), "{c:?}");
+            for order in [
+                // First entry moved, but not after every other resource.
+                [1, 0, 2],
+                // The moved entry is not the first one.
+                [0, 2, 1],
+                // Reversed; and a rotation the other way.
+                [2, 1, 0],
+                [1, 2, 0],
+            ] {
+                assert_eq!(
+                    run(&reorder(&b, &info, order)).unwrap_err(),
+                    WimError::MetadataOrderNotSupported,
+                    "{c:?} {order:?}"
+                );
+            }
+            // With two images a swapped pair is the observed shape.
             let (mut b, info) = two_images(c);
             let e1 = entry_bytes(&b, lookup_entry_at(&info, 0));
             let e2 = entry_bytes(&b, lookup_entry_at(&info, 1));
             put(&mut b, lookup_entry_at(&info, 0), &e2);
             put(&mut b, lookup_entry_at(&info, 1), &e1);
-            assert_eq!(
-                run(&b).unwrap_err(),
-                WimError::MetadataOrderNotSupported,
-                "{c:?}"
-            );
+            assert!(run(&b).is_ok(), "{c:?}");
         }
+    }
+
+    #[test]
+    fn moved_first_metadata_with_reuse_refused() {
+        // OBS-018 and OBS-021 were each seen alone; together they are
+        // unobserved and refused.
+        let (b, info) = built(
+            WimBuilder::new(Compression::Xpress)
+                .move_first_metadata(true)
+                .image("a", "b")
+                .image("c", "d")
+                .image("e", "f"),
+        );
+        assert!(run(&b).is_ok());
+        let mut d = b.clone();
+        let e2 = entry_bytes(&b, lookup_entry_at(&info, 1));
+        put(&mut d, lookup_entry_at(&info, 2), &e2);
+        assert_eq!(run(&d).unwrap_err(), WimError::MetadataOrderNotSupported);
     }
 
     #[test]

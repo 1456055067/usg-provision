@@ -16,8 +16,10 @@
 //!   reason code;
 //! - bounded work (SEC-003, BOOT-001): the bytes read through the progress
 //!   hook never exceed twice the file length plus the header (each
-//!   resource read at most once, plus the integrity range), and an
-//!   accepted file's metadata original sizes sum to at most
+//!   resource read at most once, a metadata entry repeating the lookup
+//!   entry directly before it (OBS-018) included, plus the integrity
+//!   range), and an accepted file's distinct metadata original sizes
+//!   (each such repeat counted once) sum to at most
 //!   `METADATA_EXPANSION_LIMIT` times the file length and the configured
 //!   total.
 
@@ -42,17 +44,26 @@ use usgp_image::wim::lookup::LookupEntry;
 use usgp_image::{WimError, WimLimits, check_pe, check_wim};
 
 /// Sum of the original sizes of the metadata entries, read straight from
-/// the bytes of an accepted file.
+/// the bytes of an accepted file; an entry equal to the lookup entry
+/// directly before it, which is not itself such a repeat, names the same
+/// resource (OBS-018) and is counted once.
 fn metadata_total(data: &[u8]) -> u64 {
     let h = parse_header(data).expect("accepted file has a header");
     let start = h.lookup.offset as usize;
     let end = start + h.lookup.stored_size as usize;
-    data[start..end]
+    let mut previous: Option<(LookupEntry, bool)> = None;
+    let mut total = 0u64;
+    for e in data[start..end]
         .chunks(50)
         .map(|raw| LookupEntry::parse(raw).expect("entry"))
-        .filter(|e| e.reshdr.is_metadata())
-        .map(|e| e.reshdr.original_size)
-        .sum()
+    {
+        let repeat = e.reshdr.is_metadata() && matches!(previous, Some((p, false)) if p == e);
+        if e.reshdr.is_metadata() && !repeat {
+            total += e.reshdr.original_size;
+        }
+        previous = Some((e, repeat));
+    }
+    total
 }
 
 fn assert_listed(e: &WimError) {

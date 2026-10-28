@@ -35,6 +35,8 @@ prefix (see `fuzz/corpus/xpress_chunk/SOURCE.md`).
 | `wu9-xpress-no-description.bin` | same | XPRESS, one image with no `DESCRIPTION` |
 | `wu9-xpress-bad-metadata-hash.bin` | same | XPRESS, two images, wrong SHA-1 on image 2 metadata (refused) |
 | `wu9-xpress-identical-metadata.bin` | same | XPRESS, two images with identical files and identical metadata (one SHA-1, two ranges; accepted, BOOT-011) |
+| `wu9-xpress-reused-metadata.bin` | same | XPRESS, two images naming one metadata resource through equal lookup entries (the S11 layout; accepted, OBS-018) |
+| `wu9-xpress-moved-first-metadata.bin` | same | XPRESS, three images, image 1's metadata moved after every other resource and the old copy left unnamed (the S12A layout; accepted, OBS-021) |
 | `wu9-count-mismatch.bin` | same | header image count 2, one image (refused) |
 | `wu9-split-part.bin` | same | part 1 of 2 (refused as split) |
 | `wu9-xml-doctype.bin` | same | XML replaced by a document with a DOCTYPE (refused) |

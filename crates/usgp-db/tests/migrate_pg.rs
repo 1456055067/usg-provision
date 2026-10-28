@@ -87,18 +87,21 @@ mod t {
     async fn newer_schema_refused() {
         let db = TestDb::migrated().await;
         let owner = db.raw_owner().await;
+        // One past the newest migration this build knows.
+        let future = SCHEMA_VERSION + 1;
         owner
-            .batch_execute(
+            .batch_execute(&format!(
                 "INSERT INTO schema_migrations (version, name, sha256) \
-             VALUES (3, 'future', decode(repeat('00', 32), 'hex'))",
-            )
+             VALUES ({future}, 'future', decode(repeat('00', 32), 'hex'))"
+            ))
             .await
             .unwrap();
         let err = db.app.check_schema().await.unwrap_err();
         assert!(
             matches!(
                 err,
-                DbError::Migration(MigrationError::UnknownApplied { version: 3 })
+                DbError::Migration(MigrationError::UnknownApplied { version })
+                    if version == future
             ),
             "{err:?}"
         );

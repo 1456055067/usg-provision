@@ -394,7 +394,7 @@ jobs:
             exit 1
           }
           $plain = (Get-Content -LiteralPath $log) -replace '\x1b\[[0-9;]*m', ''
-          if (-not ($plain -match '^test tests::windows_sys_links_and_agrees_with_std \.\.\. ok$')) {
+          if (-not ($plain -match '^test ffi::tests::windows_sys_links_and_agrees_with_std \.\.\. ok$')) {
             Write-Output '::error::usgp-winapi link probe did not run and pass'
             exit 1
           }

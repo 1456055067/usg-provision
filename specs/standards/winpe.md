@@ -4,14 +4,19 @@ Topic 11 of the standards reading list. This is our summary of
 Microsoft's public documentation on Windows PE: what it is, how it is
 obtained and built, how it is customised and starts, and its use and
 redistribution limits. For PE-1 (`specs/preinstall-env.md`). Booting
-WinPE over the network belongs to milestone M3 and is not summarised here
-(§8).
+WinPE over the network is summarised in topic 22,
+`specs/standards/winpe-network-boot.md` (§8). M3 added §5.1 to §5.3
+(automatic start, networking, boot information), §8 (pointer) and §9
+(RAM disk); these were AUDITED on 2026-10-28 (M3 re-audit round 1).
 
 Sources (all Microsoft Learn unless noted): "Windows PE (WinPE)",
 "Download and install the Windows ADK", "WinPE: Create bootable media",
 "Copype command-line options", "WinPE: Mount and Customize", "Wpeinit and
 Startnet.cmd", "Windows Setup Supported Platforms and Cross-Platform
 Deployments", and one Microsoft Q&A answer marked **[secondary]** in §7.
+M3 added: "Winpeshl.ini Reference", "Wpeutil Command-Line Options",
+"WinPE Network Drivers: Initializing and adding drivers", "WinPE:
+Install on a Hard Drive (Flat Boot or Non-RAM)".
 Microsoft's pages have headings but no section numbers, so this file
 cites them by page and heading.
 
@@ -108,6 +113,73 @@ cites them by page and heading.
 - A `Winpeshl.ini` file can name a shell or application to launch instead
   of the default command prompt.
 
+### 5.1 Starting a program automatically (M3 addition)
+
+Sources: "Wpeinit and Startnet.cmd", "Winpeshl.ini Reference",
+"Configure a PXE server to load Windows PE", "WinPE: Install on a Hard
+Drive (Flat Boot or Non-RAM)".
+
+- At start, WinPE opens a command window and runs `wpeinit`
+  automatically; on slower hardware this can take a few minutes.
+- Microsoft documents two ways to run something automatically, both by
+  changing files **inside** the WinPE image before it is booted (mount,
+  change, commit; §4):
+  1. **Startup script**: add commands to `Startnet.cmd` in
+     `%SYSTEMROOT%\System32`. The default script runs `wpeinit`; custom
+     commands follow it.
+  2. **Replacement shell**: a `Winpeshl.ini` file in
+     `%SYSTEMROOT%\System32` replaces the default command prompt with one
+     or more programs:
+     - a single-program section takes one program path, no command-line
+       options, at most 250 characters;
+     - a multi-program section lists programs, each optionally with
+       options after a comma, each line at most 250 characters; it runs
+       programs, not scripting commands;
+     - programs from both sections run one after another in file order;
+       each starts only after the previous one has ended.
+  Whether `wpeinit` still runs automatically when `Winpeshl.ini` replaces
+  the shell is not stated on the pages read (**OPEN-WINPE-1**).
+- An answer file given to `wpeinit` can also run commands at start
+  (synchronous or asynchronous commands; list in §5 above).
+- Nothing can be added at run time that survives a restart (§6). A
+  program that must start on every boot must be in the image.
+
+### 5.2 Networking at start (M3 addition)
+
+Sources: "Wpeinit and Startnet.cmd", "Wpeutil Command-Line Options"
+(updated 2023-08-15), "WinPE Network Drivers: Initializing and adding
+drivers".
+
+- By default `wpeinit` starts networking as soon as WinPE boots. The
+  answer-file network setting (§5) can turn that off.
+- `wpeutil InitializeNetwork` starts network components and drivers and
+  gives the machine a random name. Without its no-wait option WinPE waits
+  to get an IP address (by DHCP) before the session finishes loading;
+  the no-wait option skips that wait, for networks without DHCP.
+- `wpeutil WaitForNetwork` waits until the network card is initialised;
+  Microsoft suggests it in scripts that need the network.
+- `wpeutil` can also enable or disable the WinPE firewall, restart or
+  shut down WinPE, wait for removable storage, and report how WinPE
+  booted (§10).
+- WinPE includes generic drivers for many common network adapters. If a
+  device's adapter is not covered, the driver is added to the image with
+  DISM (recommended), or loaded at run time with `drvload` (lost at
+  restart).
+- Limits: only TCP/IP and NetBIOS over TCP/IP to file servers; general
+  wireless networking is not supported; reaching an IPv4 network from
+  WinPE on an IPv6 network is not supported; SMB1 is off by default from
+  version 1709; WinPE cannot join a domain or act as a server. Wired
+  802.1X needs the 802.1X optional component and a LAN profile.
+
+### 5.3 Telling how WinPE booted ("Wpeutil", UpdateBootInfo)
+
+`wpeutil UpdateBootInfo` writes registry values that say how WinPE
+started: the boot type (flat, remote, RAM disk from a known or unknown
+source, RAM disk from optical media, or error), the source drive letter
+when known, and the **firmware mode** (1 = BIOS, 2 = UEFI). Microsoft's
+deployment samples use the firmware value to choose between the BIOS/MBR
+and UEFI/GPT partition layouts (`gpt.md` §10).
+
 ## 6. Limits and hardware ("Windows PE (WinPE)")
 
 - **Use restriction**: WinPE is not a general-purpose operating system.
@@ -171,9 +243,32 @@ Consequences for the product (see `specs/preinstall-env.md`):
   the kit is a cautious project stance; its redistribution source is
   secondary.
 
-## 8. Not summarised
+## 8. Network boot
 
-- Network boot of WinPE (UEFI PXE files, boot configuration data, RAM
-  disk options). A Microsoft page on preparing a PXE server for UEFI boot
-  returned "not found" during this run. Needed for M3.
+Summarised separately in M3: `specs/standards/winpe-network-boot.md`
+(topic 22): files needed, boot configuration data, RAM disk, TFTP size
+limits.
+
+## 9. RAM-disk behaviour (M3 addition)
+
+Sources: "Windows PE (WinPE)", "WinPE: Mount and Customize", "WinPE:
+Install on a Hard Drive (Flat Boot or Non-RAM)", and the archived
+"How Booting into a Boot Image Works" (via topic 22).
+
+- When booted from network, USB or ISO media in the usual way, WinPE runs
+  from a RAM disk and uses drive `X:`. Files added to the image appear on
+  `X:`.
+- RAM boot needs a contiguous block of memory large enough for the whole
+  WIM, on top of the 512 MB the base image needs. Large images and many
+  added files use up that memory and slow WinPE (§4, §6).
+- Scratch space (writable temporary storage in RAM) is 32 to 512 MB
+  (§4).
+- Everything written while WinPE runs is lost at restart (§6). Anything
+  the deployment must keep (downloaded content, logs) has to be written
+  to a disk or sent over the network before WinPE restarts.
+- The alternative "flat" boot from a hard drive, which avoids the RAM
+  disk, is a local-disk setup, not a network boot.
+
+## 10. Not summarised
+
 - The full optional-component list and language packs.

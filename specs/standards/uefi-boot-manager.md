@@ -6,6 +6,9 @@ chapter 3 (Boot Manager), with supporting points from §7.4 (image services)
 and §24.3 (PXE Base Code). It describes what the standard provides. Which
 of these mechanisms usg-provision uses is a clean-side decision. Where
 behaviour is still OPEN, `specs/boot-network.md` REQ-BOOT-061 says so.
+M3 added §9: how Microsoft's BCDBoot tool, run from Windows PE, creates
+the installed Windows boot entry and where it puts it in the boot order
+(AUDITED 2026-10-28, M3 re-audit round 1).
 
 ## 1. Boot options (§3.1.1, §3.1.3)
 
@@ -127,3 +130,79 @@ here.
 Option 3 needs no change on the device but costs the PXE timeout on every
 boot. Options 1, 2 and 4 need something running on the device (the
 installer or the installed OS) to write firmware variables (§4).
+
+## 9. Creating the installed Windows boot entry from Windows PE (M3)
+
+Sources: Microsoft Learn "BCDBoot Command-Line Options" (updated
+2026-03-23), "BCD System Store Settings for UEFI", "Capture and Apply
+Windows using a WIM file", and the UEFI sample in "Deployment lab sample
+scripts". These are Microsoft tools, not part of the UEFI standard; they
+are summarised because Microsoft documents them as the way to make an
+applied Windows image bootable.
+
+### 9.1 What BCDBoot does
+
+- BCDBoot is in the Windows image itself (`%WINDIR%\System32`), in WinPE,
+  and in the ADK. Microsoft's documented deployment flow is: boot WinPE,
+  partition the disk, apply the Windows image with DISM, then run the
+  BCDBoot **from the applied Windows** against the applied Windows
+  directory, naming the ESP.
+- It copies a small set of boot files from the applied Windows into the
+  system partition (on UEFI, into `\EFI\Microsoft\Boot` on the ESP) and
+  creates a new BCD store there from a template in the applied image.
+  The Windows boot manager on UEFI is `\EFI\Microsoft\Boot\bootmgfw.efi`
+  and the Windows loader is `\Windows\System32\winload.efi` ("BCD System
+  Store Settings for UEFI").
+- If a boot entry for that Windows partition already exists, BCDBoot
+  replaces it by default (an option keeps the old values). By default it
+  puts the new entry at the top of the Windows Boot Manager's own menu
+  (an option keeps the existing default).
+- With the firmware-type option it can lay down UEFI files, BIOS files,
+  or both.
+
+### 9.2 Effect on the firmware boot entries and boot order
+
+- On UEFI, BCDBoot by default **adds a firmware boot option** (a
+  `Boot####` variable, §1) pointing at Windows Boot Manager on the ESP,
+  and places it **first in `BootOrder`** (§2).
+- Two options change that: one **keeps the existing position** of the
+  Windows Boot Manager entry in `BootOrder` (and adds it first if there
+  is none); the other **adds it last**. They cannot be combined.
+- **Exception**: when the system partition is named explicitly by drive
+  letter (the system-partition option), BCDBoot **does not create the
+  firmware entry**. It then relies on the firmware's default behaviour,
+  which per UEFI opens the removable-media default path
+  `\EFI\BOOT\BOOTX64.EFI` on the ESP (§6). Microsoft's own deployment
+  samples do name the system partition this way.
+  - Consequence: whether a deployment run from WinPE leaves a firmware
+    boot option for Windows depends on how BCDBoot is invoked, and on the
+    firmware creating options for fixed media by itself (§7). This
+    matters for `boot-network.md` REQ-BOOT-065 (**OPEN-UBM-1**).
+- On UEFI 2023 CA media and revocation: BCDBoot has an option to install
+  boot files signed under the newer Windows UEFI CA 2023
+  (`uefi-secure-boot.md`; `winpe.md` §3). A newer offline-servicing option
+  (Windows 11 24H2/25H2 build 26100.8037 onward) forces the file
+  selection.
+- "BCD System Store Settings for UEFI" also advises making Windows Boot
+  Manager the first item in the firmware display order. That is the same
+  effect as §8 item 1 (change `BootOrder`).
+
+### 9.3 Relation to the network-boot loop
+
+- If Windows Boot Manager ends up first in `BootOrder`, later restarts go
+  to the installed Windows without trying network boot (§8 item 1). This
+  lasts until something changes `BootOrder` again.
+- If it is added last, or not added, the network boot option may still
+  come first, and the device relies on the boot service not answering
+  (§8 item 3; `boot-network.md` REQ-BOOT-051).
+- Firmware may itself reorder or add options (§2), so a lasting order is
+  not guaranteed on every platform.
+
+### Open point
+
+- **OPEN-UBM-1**: on a device prepared from WinPE with the system
+  partition named explicitly, does the device get a lasting firmware
+  boot option for Windows, or does it boot only through the default
+  removable-media path or firmware-generated options? Microsoft's page
+  says no NVRAM entry is created in that mode; what the firmware then
+  does varies by platform.

@@ -1,8 +1,11 @@
 # Network boot (BOOT-1, BOOT-2, BOOT-5 for milestone M1)
 
 Status: AUDITED (clean-room re-verify round 1; DEC-0004 accepted by the
-owner on 2026-10-26). REQs marked OPEN stay open. REQ range in use:
-`REQ-BOOT-001` to
+owner on 2026-10-26). REQs marked OPEN stay open. Spec run M3
+(2026-10-27) added REQ-BOOT-063 to REQ-BOOT-067. M3 fix round 1
+(2026-10-28) settled REQ-BOOT-035 and 064 by DEC-0018 item 2 (project
+rule). After re-audit round 1, REQ-BOOT-035 and 063 to 066 are AUDITED
+(2026-10-28); 067 stays OPEN. REQ range in use: `REQ-BOOT-001` to
 `REQ-BOOT-070`. Numbers are grouped by topic in tens, so some numbers are
 unused.
 
@@ -17,6 +20,11 @@ device must not keep booting back into the network.
 This spec covers the network-boot phase only. It ends when the device's
 firmware has received the boot program and passed control to it. What the
 boot program does next belongs to other areas (PE-1, RELAY-2, SEQ-1).
+
+M3 extends this in two places: the boot service also serves the files
+that Microsoft's boot manager fetches after it starts (REQ-BOOT-063,
+REQ-BOOT-064), and the end of an install sets up the next boot from disk
+(REQ-BOOT-065 to REQ-BOOT-067).
 
 M1 scope: UEFI firmware on x86-64 hardware, IPv4, PXE with TFTP transfer.
 The device may be on the boot service's own segment or on another subnet
@@ -345,10 +353,15 @@ or truncated file because of this limit.
 
 - Priority: MUST
 - Source: SRC-026, SRC-028
+- Basis: DEC-0018 item 2 (wrap-around and large-block negotiation;
+  project rule, not described product behaviour)
 - Standards: RFC 1350 §5; RFC 2348
-- Status: OPEN (Must the service refuse such a file with an error, or may
-  it allow the block number to wrap? Wrap-around is not standardised; see
-  `specs/standards/tftp.md` §8.)
+- Status: AUDITED (2026-10-28; was OPEN before M3. Settled in M3 fix
+  round 1 by DEC-0018 item 2, project rule, not described product
+  behaviour. The boot service allows
+  the block number to wrap and negotiates larger blocks when asked;
+  REQ-BOOT-064. Requirement text unchanged. Wrap-around is not
+  standardised; see `specs/standards/tftp.md` §8.)
 
 ### Security on the unauthenticated boot network
 
@@ -532,6 +545,119 @@ to network boot and provision again.
   change at the device, such as the firmware boot order? No public source
   covers this.)
 
+### Serving the provisioning environment and finishing (M3)
+
+REQ-BOOT-063 to REQ-BOOT-067 were added in spec run M3 (2026-10-27).
+063 to 066 are AUDITED (2026-10-28); 067 is OPEN. REQ-BOOT-065 partly answers the
+question in REQ-BOOT-061, whose text is unchanged.
+
+### REQ-BOOT-063: Serve the Windows PE boot files
+
+For a UEFI x64 device it answers, the boot service offers Microsoft's
+UEFI boot manager from the operator's environment kit as the boot
+program, then serves by TFTP the further files that boot manager asks
+for: the boot configuration, the RAM-disk support file, the Windows PE
+image and any font files (`specs/preinstall-env.md` REQ-PE-012). These
+are published boot files under REQ-BOOT-041; nothing else is served.
+
+- Priority: MUST
+- Source: SRC-091 (files a PXE server needs to load Windows PE); SRC-092
+  (on EFI the boot program fetches the boot configuration, SDI file and
+  WIM itself); SRC-094 (Microsoft's UEFI boot manager is its UEFI
+  network boot program); SRC-004 (outcome only: devices network boot
+  into the provisioning environment)
+- Standards: `specs/standards/winpe-network-boot.md` §2, §3, §5;
+  `specs/standards/tftp.md`
+- Status: AUDITED (2026-10-28; exact file paths: OPEN-WPXE-1 in
+  `winpe-network-boot.md`)
+
+### REQ-BOOT-064: Deliver the Windows PE image in full
+
+The boot service delivers the Windows PE image, typically hundreds of
+megabytes, to Microsoft's boot manager by TFTP intact and complete, and
+never sends a truncated or corrupted file because of the 16-bit TFTP
+block number (REQ-BOOT-035). It answers the TFTP options the boot
+manager uses for block size and window size according to their RFCs.
+[project rule] When a client asks for a larger block size, the boot
+service negotiates it under RFC 2348; and when a transfer needs more
+blocks than a 16-bit block number can count, the boot service lets the
+block number wrap around and carries on, so that the whole file is
+delivered.
+
+- Priority: MUST
+- Source: SRC-093 (the boot manager's TFTP block and window size
+  settings, defaults 1432 bytes and 4, recommended block size at most
+  16384); SRC-091
+- Basis: DEC-0018 item 2 (wrap-around and large-block negotiation;
+  project rule, not described product behaviour)
+- Standards: RFC 1350 §5; RFC 2348; RFC 7440; `specs/standards/tftp.md`
+  §7, §8, §10; `specs/standards/winpe-network-boot.md` §5, §7
+- Status: AUDITED (2026-10-28; wrap-around is not standardised, `tftp.md` §8: the
+  value the block number wraps to is a clean-side choice that must be
+  checked against Microsoft's boot manager; which options the boot
+  manager sends is still OPEN-WPXE-2)
+
+### REQ-BOOT-065: The installed system becomes the next boot target
+
+When an install finishes, the device's firmware boot order is left so
+that the installed Windows boots before network boot on the next and
+later restarts. The product achieves this from the provisioning
+environment, before its final restart, by making the installed Windows
+boot option first in the firmware's boot order (creating the option if
+it does not exist).
+
+- Priority: MUST
+- Source: SRC-004 (outcome only: the device does not boot back into
+  network boot; whether the change is lasting is not stated)
+- Basis: making the change lasting and putting the Windows option first
+  is project design; it is also what Microsoft's boot-file tool does by
+  default (SRC-089)
+- Standards: UEFI 2.10 §3.1.1, §3.3 (SRC-021);
+  `specs/standards/uefi-boot-manager.md` §2, §8 item 1, §9
+- Status: AUDITED (2026-10-28; lasting change: confirm as D-M3-6. Firmware may reorder
+  options itself, `uefi-boot-manager.md` §2; OPEN-UBM-1 covers the case
+  where no firmware option is created)
+
+### REQ-BOOT-066: Create the installed system's boot files and entry
+
+After the image is applied (`specs/preinstall-env.md` REQ-PE-017), the
+installed Windows's boot files are placed on the EFI system partition
+and a Windows boot configuration for the installed system is created
+there, using the boot files from the applied image itself, so that the
+installed system starts from the disk with no network. A firmware boot
+option pointing at the Windows boot manager on that disk then exists
+(REQ-BOOT-065).
+
+- Priority: MUST
+- Source: SRC-089 (Microsoft's documented way to make an applied image
+  bootable: copy boot files from the applied Windows to the system
+  partition, create its boot configuration, and add a firmware entry);
+  SRC-088 (apply, then set up boot files); SRC-004 (outcome only)
+- Standards: `specs/standards/uefi-boot-manager.md` §9;
+  `specs/standards/gpt.md` §10, §11
+- Status: AUDITED (2026-10-28; the boot configuration is an undocumented Microsoft
+  format, `winpe-network-boot.md` §6; using Microsoft's tool from the
+  applied image is the documented route. Which boot files, 2011 or 2023
+  CA, is OPEN-BOOT-SB)
+
+### REQ-BOOT-067: Boot service behaviour for a device whose install is done
+
+Once a device's install has succeeded, whether the boot service keeps
+answering that device's network boots (it is then protected from a loop
+only by REQ-BOOT-065), or stops answering it automatically as for a
+suppressed device (REQ-BOOT-050, REQ-BOOT-051) until an operator makes
+it eligible again (REQ-BOOT-062), is not settled.
+
+- Priority: SHOULD
+- Source: SRC-004 (outcome only: no loop back into network boot)
+- Standards: UEFI 2.10 §3.1.2 (SRC-021);
+  `specs/standards/uefi-boot-manager.md` §8
+- Status: OPEN (D-M3-6: automatic suppression after success? If yes, a
+  person who deliberately network boots the device later gets no
+  answer until an operator acts; if no, a device whose boot order was
+  reset by its firmware will start provisioning again. No public source
+  says which the product does.)
+
 ### Timing
 
 ### REQ-BOOT-070: Answer within the client's retry window
@@ -677,8 +803,13 @@ Unknown (OPEN):
   device, and if so, which signing authority must the boot program chain
   to? This is in the INDEX Unconfirmed list. Background is in
   `specs/standards/uefi-secure-boot.md`.
-- REQ-BOOT-013, REQ-BOOT-014, REQ-BOOT-035, REQ-BOOT-054, REQ-BOOT-061,
-  REQ-BOOT-062: see the question in each Status line.
+- REQ-BOOT-013, REQ-BOOT-014, REQ-BOOT-054, REQ-BOOT-061,
+  REQ-BOOT-062, REQ-BOOT-067: see the question in each Status line. M3
+  note: REQ-BOOT-035 and REQ-BOOT-064 are settled by DEC-0018 item 2
+  (project rule); REQ-BOOT-065 answers the first question of
+  REQ-BOOT-061 for the project, pending D-M3-6.
+- M3 standards: `specs/standards/winpe-network-boot.md` (topic 22) and
+  `specs/standards/uefi-boot-manager.md` §9 (boot entry creation).
 - The primary PXE 2.1 specification text could not be retrieved from any
   public, login-free location during this run. Behaviour summarised from
   the 1999 Internet-Draft and secondary sources is labelled as such in

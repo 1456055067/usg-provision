@@ -298,7 +298,8 @@ function Dismount-SampleVhd([string] $Id, [string] $File) {
 }
 
 # Every item below $Root (not $Root itself), not entering reparse points or
-# the top-level folders in $NoDescend.
+# the top-level folders in $NoDescend. Returns one array object: assign
+# the result before piping it.
 function Get-TreeItems([string] $Root, [string[]] $NoDescend) {
     $items = [System.Collections.Generic.List[object]]::new()
     $stack = [System.Collections.Generic.Stack[string]]::new()
@@ -366,10 +367,15 @@ function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [str
                 catch { $sha = 'error: ' + (Format-Field $_.Exception.Message) }
             }
             try {
-                $named = @(Get-Item -LiteralPath $i.FullName -Stream * -Force -ErrorAction Stop |
+                # Run 40752616665: stream listing of paths over 260
+                # characters failed with "path not found"; such paths use
+                # the \\?\ form.
+                $sp = $i.FullName
+                if ($sp.Length -ge 248 -and -not $sp.StartsWith('\\?\')) { $sp = '\\?\' + $sp }
+                $named = @(Get-Item -LiteralPath $sp -Stream * -Force -ErrorAction Stop |
                         Where-Object { $_.Stream -ne ':$DATA' } | Sort-Object Stream)
                 $parts = foreach ($n in $named) {
-                    $b = [System.IO.File]::ReadAllBytes($i.FullName + ':' + $n.Stream)
+                    $b = [System.IO.File]::ReadAllBytes($sp + ':' + $n.Stream)
                     '{0}:{1}:{2}' -f $n.Stream, $b.Length, ([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($b))).ToLowerInvariant()
                 }
                 $streams = Format-Field (@($parts) -join ';')
@@ -409,7 +415,11 @@ function Save-TreeManifest([string] $Id, [string] $Root, [string] $OutFile, [str
 # that Get-TreeItems enters. cmd cannot open paths over 260 characters;
 # such a directory gets its error text, which is recorded too.
 function Save-ShortNames([string] $Id, [string] $Root, [string] $OutFile, [string[]] $NoDescend = @()) {
-    $dirs = @($Root) + @(Get-TreeItems $Root $NoDescend | Where-Object {
+    # Assigned first: Get-TreeItems returns its array as one object
+    # (", $array"), so piping the call directly would give Where-Object the
+    # whole array as $_.
+    $found = Get-TreeItems $Root $NoDescend
+    $dirs = @($Root) + @($found | Where-Object {
             $_.PSIsContainer -and ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -and
             -not ((Split-Path -Parent $_.FullName).TrimEnd('\') -eq $Root.TrimEnd('\') -and $_.Name -in $NoDescend)
         } | ForEach-Object { $_.FullName } | Sort-Object -CaseSensitive)

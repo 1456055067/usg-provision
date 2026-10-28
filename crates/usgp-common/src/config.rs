@@ -49,6 +49,11 @@
 // in the group mode bits and is refused, but a named-user entry with write
 // access does not. Deployment guidance: no ACLs on /etc/usgp-relay.
 
+// POAM: off Unix, [`read_bounded`] has no equivalent of `O_NOFOLLOW`: a
+// final symbolic link or junction is followed (the target must still be a
+// regular file). No Windows caller reads operator files through it yet;
+// the trust functions fail closed there.
+
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -294,10 +299,30 @@ fn open_regular(path: &Path) -> Result<(File, std::fs::Metadata), ConfigError> {
     Ok((file, meta))
 }
 
+/// Maps an open failure to the error for the rule it shows was broken.
+///
+/// Unix: `O_NOFOLLOW` on a final symbolic link fails with `ELOOP`.
+///
+/// Windows: a directory cannot be opened as a file without
+/// `FILE_FLAG_BACKUP_SEMANTICS` (deliberately not set: with the backup
+/// privilege enabled it bypasses the file's access checks), so the open
+/// fails with access denied before the handle can be inspected. The path is
+/// then looked up, without following a link, to report a directory as
+/// [`ConfigError::NotRegularFile`] as on Unix. This lookup only chooses
+/// which refusal to report: nothing is opened or read after it, so a swap
+/// between the open and the lookup cannot cause a file to be accepted.
 fn open_err(path: &Path, e: &std::io::Error) -> ConfigError {
     #[cfg(unix)]
     if e.raw_os_error() == Some(libc::ELOOP) {
         return ConfigError::Symlink {
+            path: path.to_path_buf(),
+        };
+    }
+    #[cfg(not(unix))]
+    if e.kind() == std::io::ErrorKind::PermissionDenied
+        && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+    {
+        return ConfigError::NotRegularFile {
             path: path.to_path_buf(),
         };
     }

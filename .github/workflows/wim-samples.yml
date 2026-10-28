@@ -29,6 +29,9 @@
 # generate-metadata adds S13B, S13C and S17B, reference adds S16B to S16D
 # (applies to another drive letter, to a subdirectory, and of the
 # /NoRpFix capture), generate-large adds S08B (compressible, over 4 GiB).
+# Run R5 (OPEN-WIM-13): the same dispatch; reference adds S16E and S16F,
+# applies of S15 (the volume-root capture from generate-metadata) to the
+# root of another drive letter and to a subdirectory.
 #
 # Samples are generated here and never downloaded from anywhere else
 # (decision 0006 item 3). The licence question for DISM-made test files is
@@ -300,7 +303,7 @@ jobs:
         with:
           name: wim-samples-metadata
           path: ${{ runner.temp }}/wim-samples-metadata
-      - name: Build S16 to S16D (DISM /Apply-Image of S13, S13B, S13C to fresh VHDs; tree manifests)
+      - name: Build S16 to S16F (DISM /Apply-Image of S13, S13B, S13C, S15 to fresh VHDs; tree manifests)
         id: build
         run: |
           ./scripts/wim-samples/Build-Samples.ps1 `

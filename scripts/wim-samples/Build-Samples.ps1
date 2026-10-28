@@ -76,6 +76,9 @@
       S16B S13B index 1 to the root of a volume lettered S:      S13B.wim
       S16C S13B index 1 to U:\deep\apply-here (subdirectory)    S13B.wim
       S16D S13C index 1 to the root of a volume lettered V:      S13C.wim
+      S16E S15 index 1 (volume-root capture, RP_FIX on) to the   S15.wim
+           root of a volume lettered W:
+      S16F S15 index 1 to X:\deep\apply-here (subdirectory)     S15.wim
 
     Tree manifests (tree-meta, the volume root, S16) are written by this
     script (Save-TreeManifest): one row per item with its type, attributes,
@@ -1076,6 +1079,9 @@ else {
     #   S16B S13B index 1 to the root of a volume lettered S: (captured on T:)
     #   S16C S13B index 1 to U:\deep\apply-here (a subdirectory)
     #   S16D S13C (/NoRpFix) index 1 to the root of a volume lettered V:
+    #   S16E S15 (a volume-root capture, RP_FIX on; OPEN-WIM-13) index 1 to
+    #        the root of a volume lettered W: (S15 was captured from R:\)
+    #   S16F S15 index 1 to X:\deep\apply-here (a subdirectory)
     $src = (Resolve-Path -LiteralPath $SampleDir).ProviderPath
     $sourceRows = @([System.IO.File]::ReadAllLines((Join-Path $src 'manifest.tsv'), $Utf8NoBom) |
             Select-Object -Skip 1 | ForEach-Object { , ($_ -split "`t") })
@@ -1084,7 +1090,9 @@ else {
         @{ Id = 'S16'; Source = 'S13'; Letter = ''; Sub = '' },
         @{ Id = 'S16B'; Source = 'S13B'; Letter = 'S'; Sub = '' },
         @{ Id = 'S16C'; Source = 'S13B'; Letter = 'U'; Sub = 'deep\apply-here' },
-        @{ Id = 'S16D'; Source = 'S13C'; Letter = 'V'; Sub = '' }
+        @{ Id = 'S16D'; Source = 'S13C'; Letter = 'V'; Sub = '' },
+        @{ Id = 'S16E'; Source = 'S15'; Letter = 'W'; Sub = '' },
+        @{ Id = 'S16F'; Source = 'S15'; Letter = 'X'; Sub = 'deep\apply-here' }
     )
     $sums = [System.Collections.Generic.List[string]]::new()
     foreach ($ap in $applies) {

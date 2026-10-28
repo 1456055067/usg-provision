@@ -86,6 +86,8 @@ questions"):
 | S16B | `/Apply-Image` of S13B index 1 to the root of a fresh volume lettered `S:` | S13B.wim | reference | Apply to another drive letter: copy or re-base (M-13, blocking for absolute targets and junctions) |
 | S16C | `/Apply-Image` of S13B index 1 to `U:\deep\apply-here` | S13B.wim | reference | Apply to a subdirectory (M-13) |
 | S16D | `/Apply-Image` of S13C index 1 to the root of a fresh volume lettered `V:` | S13C.wim | reference | Apply of a `/NoRpFix` capture (M-13) |
+| S16E | `/Apply-Image` of S15 index 1 (volume-root capture from `R:\`, RP_FIX on) to the root of a fresh volume lettered `W:` | S15.wim | reference | Apply of a volume-root capture to another letter (OPEN-WIM-13; first produced by run R5) |
+| S16F | `/Apply-Image` of S15 index 1 to `X:\deep\apply-here` | S15.wim | reference | Apply of a volume-root capture to a subdirectory (OPEN-WIM-13; run R5) |
 | S17B | `/Capture-Image /Compress:fast` | tree-mixed-tail | accept | Short final chunks (100, 5000 and 32767 bytes) that do not shrink (OPEN-WIM-5) |
 | S08B | `/Capture-Image /Compress:fast` | tree-large-text (4.5 GiB of repeated text, seed 302) | accept | A compressed resource over 4 GiB: 8-byte chunk-table entries (OPEN-WIM-10, M-22); observations only, like S08 |
 
@@ -120,7 +122,7 @@ manifest shows its real attributes. tree-mixed is profile Mixed, seed
 bytes) and `mixed-reverse-65536.bin` (the halves swapped).
 
 The VHDs stay in the work directory and are detached at the end; they
-are never uploaded. S16 to S16D upload only text. S08 (large) and S10
+are never uploaded. S16 to S16F upload only text. S08 (large) and S10
 (long runs) come from the same run R3 (below); S08B from run R4.
 
 Image names are `USGP-<ID>-<nn>`, descriptions
@@ -217,6 +219,7 @@ is recorded.
 | `volume-root.manifest.tsv` | Metadata set: S15's source, the VHD volume root (no content read; `System Volume Information` and `$RECYCLE.BIN` listed, not entered) |
 | `S16.manifest.tsv`, `S16.dirx.txt`, `S16.reparse.txt` | Reference set: DISM's apply of S13 index 1, same forms |
 | `S16B`, `S16C`, `S16D` `.manifest.tsv`, `.dirx.txt`, `.reparse.txt` | Reference set (R4): applies of S13B and S13C, same forms |
+| `S16E`, `S16F` `.manifest.tsv`, `.dirx.txt`, `.reparse.txt` | Reference set (R5): applies of S15, same forms |
 | `tree-meta2-before.manifest.tsv`, `tree-meta2.manifest.tsv`, `tree-meta2.dirx.txt`, `tree-meta2.reparse.txt`, `outside-tree.manifest.tsv` | Metadata set (R4): tree-meta2 and its out-of-tree targets |
 | `VHD-META.diskpart.txt`, `VHD-META2.diskpart.txt`, `S16*.diskpart.txt` | DiskPart and `fsutil` output of the VHD helpers |
 
@@ -280,7 +283,8 @@ unchanged; no job reads them yet. A consumer written later must:
 - Read `manifest.tsv` of each (same format and columns as above). The
   Metadata artifact has rows S13, S14, S15, S17 and, from R4, S13B,
   S13C and S17B; the Reference artifact has S16 and, from R4, S16B,
-  S16C and S16D, whose `file` is `<id>.manifest.tsv`, `compression` is
+  S16C and S16D, and from R5 S16E and S16F (sources S15.wim), whose
+  `file` is `<id>.manifest.tsv`, `compression` is
   their source's (`none`) and `expected` is the token `reference`. A
   `reference` row is never passed to `check_wim`; it is
   the oracle an apply is compared with. Any `not-produced` row, missing

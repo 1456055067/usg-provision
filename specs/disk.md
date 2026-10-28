@@ -4,7 +4,9 @@ Status: AUDITED (spec run M3, 2026-10-27; fix round 1, 2026-10-28;
 re-audit rounds 1 and 2 approved with comments). AUDITED
 2026-10-28: REQ-DISK-001 to 016 (002, 005, 006 and 016 settled by
 DEC-0018 items 7 and 8, project rules; re-audit round 2). No REQ is
-OPEN; OPEN-DISK-1 to 4 remain.
+OPEN; OPEN-DISK-1 to 4 remain. M3 build requests (2026-10-28) added
+OPEN-DISK-5 and a research note to OPEN-DISK-4 (AUDITED 2026-10-28,
+spec pass).
 REQ range in use: `REQ-DISK-001` to `REQ-DISK-016`. DISK-2 (eMMC) is not
 specced; numbers from `REQ-DISK-030` are kept for it and for legacy BIOS
 layouts (BOOT-3).
@@ -363,6 +365,22 @@ disk's earlier contents are gone.
   from the applied Windows), or is the partition only created?
 - **OPEN-DISK-4**: is a USB-attached disk that reports itself as fixed
   (not removable) eligible? DEC-0018 item 8 covers removable disks and
-  the boot-environment disk only.
+  the boot-environment disk only. (M3 build, 2026-10-28: no public
+  source on the product says; still OPEN. Windows reports the bus type
+  and the removable flag as separate facts,
+  `specs/standards/windows-storage-firmware-api.md` §3, §11.)
+- **OPEN-DISK-5** (M3 build, Q6): beyond REQ-DISK-004 and 005, does the
+  product refuse as targets: (a) read-only disks; (b) disks whose
+  logical sector size is neither 512 nor 4096 bytes; (c) SD, MMC or
+  eMMC disks; (d) file-backed virtual disks? No public source on the
+  product answers (a), (b) or (d). For (c), the public release notes
+  record a fix for bare-metal installs to devices with eMMC storage,
+  so the product does treat eMMC as a target (INDEX DISK-2, not
+  specced, P3); nothing is said about SD or MMC cards. Background
+  (Microsoft facts, not product behaviour): Windows does not support
+  logical sector sizes other than 512 and 4096 bytes, and a disk
+  reports its bus type (including SD, MMC and file-backed virtual), its
+  sector sizes and whether it is writable
+  (`specs/standards/windows-storage-firmware-api.md` §3, §6, §11).
 - REQ-DISK-002, 005, 006 and 016 are settled by DEC-0018 items 7 and 8
   (project rules).

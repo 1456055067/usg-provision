@@ -8,6 +8,9 @@ WinPE over the network is summarised in topic 22,
 `specs/standards/winpe-network-boot.md` (§8). M3 added §5.1 to §5.3
 (automatic start, networking, boot information), §8 (pointer) and §9
 (RAM disk); these were AUDITED on 2026-10-28 (M3 re-audit round 1).
+The M3 build requests (SR-2, 2026-10-28) added §10, the PE/COFF
+`Machine` field used to check a boot program's architecture (AUDITED
+2026-10-28, spec pass).
 
 Sources (all Microsoft Learn unless noted): "Windows PE (WinPE)",
 "Download and install the Windows ADK", "WinPE: Create bootable media",
@@ -269,6 +272,51 @@ Install on a Hard Drive (Flat Boot or Non-RAM)", and the archived
 - The alternative "flat" boot from a hard drive, which avoids the RAM
   disk, is a local-disk setup, not a network boot.
 
-## 10. Not summarised
+## 10. Boot program architecture: the PE/COFF Machine field (SR-2; AUDITED)
+
+Sources: Microsoft Learn "PE Format" (its parts on the MS-DOS stub,
+the signature, the "COFF File Header (Object and Image)" section with
+its "Machine Types" table, and the optional header); UEFI 2.10 §2.1.1
+(UEFI images) and §1.9.1 (byte order). Background for REQ-PE-012's
+architecture check. Field and constant names are Microsoft's and
+UEFI's; the wording is ours.
+
+- **Finding the header.** An image file starts with an MS-DOS stub. At
+  file offset `0x3C` the stub holds the file offset of the PE
+  signature. The signature is 4 bytes: `P`, `E`, `0x00`, `0x00`.
+- **COFF file header.** 20 bytes, straight after the signature. Its
+  first field, at offset 0 of the header (signature offset + 4 in the
+  file), is `Machine`, 2 bytes. Then `NumberOfSections` (2),
+  `TimeDateStamp` (4), `PointerToSymbolTable` (4), `NumberOfSymbols`
+  (4), `SizeOfOptionalHeader` (2), `Characteristics` (2).
+- **Machine values** ("Machine Types"; UEFI §2.1.1 gives the same
+  numbers for UEFI images):
+
+  | Constant | Value | CPU |
+  |----------|-------|-----|
+  | `IMAGE_FILE_MACHINE_UNKNOWN` | `0x0` | any machine |
+  | `IMAGE_FILE_MACHINE_I386` | `0x14C` | x86 (32-bit) |
+  | `IMAGE_FILE_MACHINE_AMD64` | `0x8664` | **x64** (UEFI: `EFI_IMAGE_MACHINE_x64`) |
+  | `IMAGE_FILE_MACHINE_ARM64` | `0xAA64` | ARM64 (UEFI: `EFI_IMAGE_MACHINE_AARCH64`) |
+  | `IMAGE_FILE_MACHINE_ARMNT` | `0x1C4` | ARM Thumb-2 |
+
+  An image runs only on the machine it names or on one that emulates
+  it ("Machine Types"). A UEFI platform must support its own native
+  type; others are optional (UEFI §2.1.1).
+- **Byte order.** Microsoft's page does not state the byte order of
+  the header fields. UEFI images are PE32+ files (§2.1.1) and UEFI data
+  structures are little-endian (§1.9.1). **[reading]** `Machine` is
+  little-endian, so x64 appears in the file as the bytes `64 86`.
+- **Optional header, for a fuller check.** Its first field, `Magic`, is
+  `0x10B` for PE32 and `0x20B` for PE32+. `Subsystem` is at offset 68
+  of the optional header in both forms; `10` means a UEFI application
+  (`IMAGE_SUBSYSTEM_EFI_APPLICATION`), `11` a boot-service driver, `12`
+  a runtime driver.
+- **[reading]** A UEFI x64 network boot program from the operator's kit
+  should therefore show the `PE\0\0` signature, `Machine` `0x8664`,
+  `Magic` `0x20B` and `Subsystem` `10`. Which of these the product
+  checks is a clean-side choice (REQ-PE-012).
+
+## 11. Not summarised
 
 - The full optional-component list and language packs.

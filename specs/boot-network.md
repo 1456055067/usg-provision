@@ -549,6 +549,12 @@ to network boot and provision again.
 - Status: OPEN (Through what operator action, and does it also need a
   change at the device, such as the firmware boot order? No public source
   covers this.)
+- Status note (M3 build, AUDITED 2026-10-28) [project rule]: until this
+  requirement is specced, DEC-0021 provides the only way back: a stop
+  (REQ-BOOT-067) is reversed only by an explicit operator command, and
+  that command is an audit record (`specs/operator-access.md`
+  REQ-AUD-001). Whether the device also needs a change, and the
+  product's own behaviour, stay OPEN.
 
 ### Serving the provisioning environment and finishing (M3)
 
@@ -667,6 +673,14 @@ device on purpose gets no answer until an operator acts.
   The device is recognised as in REQ-BOOT-007, so REQ-BOOT-045 applies:
   this is a convenience, not access control. How an operator makes it
   eligible again is still REQ-BOOT-062, OPEN)
+- Status note (M3 build, AUDITED 2026-10-28) [project rule]: DEC-0021
+  sets how the stop reaches a boot service and how it is undone. An
+  operator enrols each relay boot service by hand. The relay pulls
+  its boot policy (including which devices are stopped) from the
+  product as a signed list that carries a generation number.
+  A stop is reversed only by an audited operator command until
+  REQ-BOOT-062 is specced. Requirement text unchanged; the list's form
+  and signing are clean-side design.
 
 ### Timing
 

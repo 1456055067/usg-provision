@@ -47,6 +47,17 @@ and 067, and change REQ-JOB-012 and REQ-BOOT-065. After re-audit
 round 2 (approve with comments; CR-013 to CR-016 applied) all of these
 are `AUDITED` (2026-10-28). Still OPEN from M3: REQ-TGT-007,
 REQ-JOB-010, and OPEN-DISK-1 to 4. REQ-BOOT-062 (M1) also stays OPEN.
+M3 build requests (2026-10-28; AUDITED 2026-10-28 after the spec
+pass and fix round CR-001 to CR-006) extended topic 5
+(§10, load option and device path layouts) and topic 11 (§10, the
+PE/COFF machine field), added topic 23 (Windows disk, volume and
+firmware-variable APIs) and the first part of topic 14 (SMBIOS System
+UUID), and added status notes citing the owner's decisions DEC-0020
+(no device secret; settles OPEN-PE-6) and DEC-0021 (relay enrolment,
+signed boot policy, audited reversal of a stop, double content
+verification). DEC-0019 (Windows API binding) has no spec text. New
+OPEN items: OPEN-DISK-5, OPEN-TGT-3, OPEN-UBM-2, OPEN-WAPI-1 to 3,
+OPEN-SMB-1.
 
 Priority is for a **Windows client (10/11 Enterprise) first** release.
 For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64
@@ -85,7 +96,7 @@ a decision.
 | BOOT-2 | Network boot works on UEFI firmware (M1 scope by project decision: x86-64, IPv4). | `specs/boot-network.md` | P1 | AUDITED | REQ-BOOT-003, 005 | SRC-004 (indirect), DEC-0004 |
 | BOOT-3 | Network boot also works on legacy BIOS firmware, including first-generation virtual machines, with working video output. | `specs/boot-network.md` | P2 | NOT SPECCED | none | SRC-004, SRC-006, SRC-007 |
 | BOOT-4 | UEFI devices can use HTTP boot instead of TFTP-based PXE, for faster transfer. *Single source (SRC-009, dated 2022); the public release notes do not mention it. Any requirement derived from this row is capped at SHOULD, or marked `OPEN`, until a second public source confirms it.* | `specs/boot-network.md` | P2 | NOT SPECCED | none | SRC-009 |
-| BOOT-5 | After a network-booted install, the device's next boot goes to the installed disk rather than looping back into network boot. For M1, an operator can tell the boot service not to offer a boot program to a device, so that the device falls through to its next boot option (project decision, M1). M3: the boot service serves the Windows PE boot files, and the install leaves the installed Windows first in the firmware boot order. | `specs/boot-network.md` | P1 | AUDITED (partial; AUDITED: 050, 051, 060; OPEN: 062). M3: AUDITED 2026-10-28, 063, 064, 066 (064 by DEC-0018 item 2, project rule); AUDITED 2026-10-28 (re-audit round 2), 061, 065, 067 (DEC-0018 item 9, project rule) | REQ-BOOT-050, 051, 060 to 067 (OPEN: 062) | SRC-004, SRC-021, SRC-088, SRC-089, SRC-091 to SRC-094, DEC-0004, DEC-0018 |
+| BOOT-5 | After a network-booted install, the device's next boot goes to the installed disk rather than looping back into network boot. For M1, an operator can tell the boot service not to offer a boot program to a device, so that the device falls through to its next boot option (project decision, M1). M3: the boot service serves the Windows PE boot files, and the install leaves the installed Windows first in the firmware boot order. | `specs/boot-network.md` | P1 | AUDITED (partial; AUDITED: 050, 051, 060; OPEN: 062). M3: AUDITED 2026-10-28, 063, 064, 066 (064 by DEC-0018 item 2, project rule); AUDITED 2026-10-28 (re-audit round 2), 061, 065, 067 (DEC-0018 item 9, project rule). M3 build: AUDITED 2026-10-28 status notes on 062 and 067 (DEC-0021, project rule) | REQ-BOOT-050, 051, 060 to 067 (OPEN: 062) | SRC-004, SRC-021, SRC-088, SRC-089, SRC-091 to SRC-094, DEC-0004, DEC-0018, DEC-0021 |
 | BOOT-6 | ARM-architecture devices can be provisioned. | `specs/boot-network.md` | P3 | NOT SPECCED | none | SRC-004, SRC-007 |
 
 ### MEDIA — Boot media
@@ -101,7 +112,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| PE-1 | Windows installs run from a Windows PE environment that the operator prepares from Microsoft's deployment kit (the product does not ship Microsoft components). M3: the device network boots that environment, which connects back over a protected channel, downloads and verifies content, and applies the image. | `specs/preinstall-env.md` | P1 | AUDITED (partial; import part, M2: REQ-PE-001 to 010; 005 AUDITED for M2 (DEC-0013; post-M2 OPEN-IMG-F1); OPEN: 010). M3 boot-and-apply part: AUDITED 2026-10-28, REQ-PE-011 to 020 (012 and 017 carry DEC-0018 items 3 and 4 as project rules) | SRC-001, SRC-004, SRC-005, SRC-008, SRC-009, SRC-047, SRC-048, SRC-057, SRC-058, SRC-060, SRC-061, SRC-062, SRC-063, SRC-088, SRC-091, SRC-092, SRC-095 to SRC-097, DEC-0004, DEC-0009, DEC-0011, DEC-0013, DEC-0015, DEC-0018 |
+| PE-1 | Windows installs run from a Windows PE environment that the operator prepares from Microsoft's deployment kit (the product does not ship Microsoft components). M3: the device network boots that environment, which connects back over a protected channel, downloads and verifies content, and applies the image. | `specs/preinstall-env.md` | P1 | AUDITED (partial; import part, M2: REQ-PE-001 to 010; 005 AUDITED for M2 (DEC-0013; post-M2 OPEN-IMG-F1); OPEN: 010). M3 boot-and-apply part: AUDITED 2026-10-28, REQ-PE-011 to 020 (012 and 017 carry DEC-0018 items 3 and 4 as project rules). M3 build: AUDITED 2026-10-28 status notes on 010, 015 and OPEN-PE-6 (DEC-0020) and on 016 (DEC-0021), project rules; 010 stays OPEN as a product question | SRC-001, SRC-004, SRC-005, SRC-008, SRC-009, SRC-047, SRC-048, SRC-057, SRC-058, SRC-060, SRC-061, SRC-062, SRC-063, SRC-088, SRC-091, SRC-092, SRC-095 to SRC-097, DEC-0004, DEC-0009, DEC-0011, DEC-0013, DEC-0015, DEC-0018, DEC-0020, DEC-0021 |
 | PE-2 | The environment is usable at the device: network/Wi-Fi selection, on-screen keyboard, a command shell on error, and optional company branding. | `specs/preinstall-env.md` | P2 | NOT SPECCED | SRC-004, SRC-005, SRC-006 |
 | PE-3 | Access to the environment's shell and administrative functions is protected by operator-set passwords. | `specs/preinstall-env.md` | P2 | NOT SPECCED | SRC-004 |
 | PE-4 | A Linux-based environment is used for Linux installs and Linux image capture. | `specs/preinstall-env.md` | P3 | NOT SPECCED | SRC-004, SRC-006 |
@@ -129,7 +140,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| DISK-1 | The installer selects the target disk at boot; existing partitions are wiped and the disk is partitioned for the OS. | `specs/disk.md` | P1 | AUDITED (M3, 2026-10-28; REQ-DISK-001 to 016; 002, 005, 006, 016 rest on DEC-0018 items 7 and 8, project rules; OPEN-DISK-1 to 4 remain) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-057, SRC-080, SRC-084 to SRC-087, SRC-096, SRC-099, DEC-0004, DEC-0009, DEC-0018 |
+| DISK-1 | The installer selects the target disk at boot; existing partitions are wiped and the disk is partitioned for the OS. | `specs/disk.md` | P1 | AUDITED (M3, 2026-10-28; REQ-DISK-001 to 016; 002, 005, 006, 016 rest on DEC-0018 items 7 and 8, project rules; OPEN-DISK-1 to 4 remain; M3 build: OPEN-DISK-5 added, AUDITED 2026-10-28) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-057, SRC-080, SRC-084 to SRC-087, SRC-096, SRC-099, SRC-110, SRC-130, DEC-0004, DEC-0009, DEC-0018 |
 | DISK-2 | eMMC storage is supported as a target. | `specs/disk.md` | P3 | NOT SPECCED | SRC-006 |
 
 ### CFG — Configuration and answer files
@@ -170,7 +181,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| TGT-1 | For bare metal, operators make deployment packages available on a boot service; the person at the device picks the package and target disk at boot. | `specs/targeting.md` | P1 | AUDITED (partial, M3, 2026-10-28; REQ-TGT-001 to 016; 013, 014, 006, 010, 011, 016 rest on DEC-0018 items 1, 7 and 10, project rules; OPEN: 007) | SRC-001, SRC-004, SRC-006, SRC-009, SRC-057, SRC-087, DEC-0009, DEC-0011, DEC-0018 |
+| TGT-1 | For bare metal, operators make deployment packages available on a boot service; the person at the device picks the package and target disk at boot. | `specs/targeting.md` | P1 | AUDITED (partial, M3, 2026-10-28; REQ-TGT-001 to 016; 013, 014, 006, 010, 011, 016 rest on DEC-0018 items 1, 7 and 10, project rules; OPEN: 007. M3 build: AUDITED 2026-10-28 status note on 012 (DEC-0020, project rule); OPEN-TGT-3 added) | SRC-001, SRC-004, SRC-006, SRC-009, SRC-057, SRC-087, DEC-0009, DEC-0011, DEC-0018, DEC-0020 |
 | TGT-2 | For refreshes, operators target existing managed endpoints individually by name or as an operator-defined set of devices, and can schedule ongoing refreshes. | `specs/targeting.md` | P2 | NOT SPECCED | SRC-004, SRC-007 |
 | TGT-3 | Device identity reported during provisioning includes the hardware serial number (including on virtual machines). | `specs/targeting.md` | P2 | NOT SPECCED | SRC-004 |
 | TGT-4 | An administrator can restrict which endpoints may be targeted, and refresh targeting honours the operator's rights. | `specs/targeting.md` | P2 | NOT SPECCED | SRC-004 |
@@ -316,7 +327,9 @@ decide.
    `specs/standards/uefi-boot-manager.md`** (UEFI 2.10; M3 added §9,
    creating the installed Windows boot entry from Windows PE with
    Microsoft's BCDBoot and its boot-order effect; OPEN-UBM-1; AUDITED
-   2026-10-28).
+   2026-10-28. M3 build added §10: `EFI_LOAD_OPTION`, the global
+   variable GUID and attributes, and the device path header, End,
+   Hard Drive and File Path nodes; OPEN-UBM-2; AUDITED 2026-10-28).
 6. *(conditional)* UEFI Secure Boot and the signed boot chain (UEFI
    specification, Secure Boot chapter; Microsoft public guidance on signing
    requirements). Relates to Secure Boot (Unconfirmed). **Summarised as
@@ -355,7 +368,9 @@ decide.
     read; one secondary Q&A source on redistribution; OPEN-PE-LIC for
     counsel; M3 added §5.1 automatic start, §5.2 networking, §5.3 boot
     information and §9 RAM disk, AUDITED 2026-10-28, with OPEN-WINPE-1; network boot
-    of WinPE is topic 22).
+    of WinPE is topic 22. M3 build added §10, the PE/COFF `Machine`
+    field and the x64 value, from Microsoft's PE format page and UEFI
+    §2.1.1; AUDITED 2026-10-28).
 12. Offline driver injection (DISM driver servicing; INF/CAB packaging).
     For DRV-1, DRV-2.
 13. Offline domain join provisioning (Microsoft Learn `djoin` documentation).
@@ -363,7 +378,12 @@ decide.
     data the open mechanism places on the device.
 14. SMBIOS system identifiers: serial number and chassis type (DMTF SMBIOS
     specification). For TGT-3, DRV-3. *(conditional)* System UUID, only for
-    pre-registration (Unconfirmed).
+    pre-registration (Unconfirmed). **Partly summarised:
+    `specs/standards/smbios.md`** (M3 build, AUDITED 2026-10-28: type 1
+    System UUID
+    location and byte order only, [primary not read] because the DMTF
+    PDF text still could not be extracted; OPEN-SMB-1. Serial number
+    and chassis type not yet summarised).
 15. Secure disk sanitisation (NIST SP 800-88). For RET-1, RET-2.
 16. Bootable ISO and USB layout (ISO 9660 / El Torito; FAT32 for UEFI
     removable media per UEFI specification). For MEDIA-1, MEDIA-4.
@@ -410,3 +430,11 @@ decide.
     OPEN-WPXE-3 and 4 (who builds the BCD, TFTP size limit) settled for
     the project by DEC-0018, labelled [project rule]; walkthrough example
     values labelled in fix round 1).
+23. Windows disk, volume and firmware-variable APIs used from Windows
+    PE (Microsoft Learn: SetupAPI disk interfaces, storage and disk
+    control codes, volume names and mount points, firmware environment
+    variables, token privileges; Windows 4K-sector support policy). For
+    DISK-1, BOOT-5. **Summarised:
+    `specs/standards/windows-storage-firmware-api.md`** (M3 build,
+    AUDITED 2026-10-28; semantics only, no sample code; OPEN-WAPI-1 to
+    3).

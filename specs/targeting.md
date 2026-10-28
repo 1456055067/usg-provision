@@ -236,6 +236,14 @@ gets nothing and is recorded.
 - Status: AUDITED (2026-10-28; what credential the environment presents is a
   clean-side design; the PXE phase itself carries no secrets,
   REQ-BOOT-043)
+- Status note (M3 build, AUDITED 2026-10-28) [project rule]: under
+  DEC-0020, "a provisioning environment it trusts" is met by the
+  server-authenticated TLS channel (`specs/preinstall-env.md`
+  REQ-PE-015) together with the mandatory operator-issued code or
+  operator approval (REQ-TGT-013, REQ-TGT-014; DEC-0018 item 1), which
+  act as the device's credential. The device carries no secret; the
+  environment holds only public configuration, including the trust
+  anchor. Requirement text unchanged.
 
 ### REQ-TGT-013: Session authorised by operator-issued code [project rule]
 
@@ -385,7 +393,20 @@ the session with nothing written to disk.
 - D-3 is settled by DEC-0018 item 1 (REQ-TGT-013, REQ-TGT-014; project
   rule).
 - **OPEN-TGT-1**: does a device left at a choice screen, or waiting for
-  approval, time out, and what happens then?
+  approval, time out, and what happens then? (M3 build, 2026-10-28:
+  the public release notes were checked again with this question and
+  state no expiry or timeout for a device session or for a waiting
+  device. The only time limits they mention concern install steps and
+  refresh deployments, not bare-metal device sessions. Still OPEN;
+  the interim behaviour is clean-side design (fail closed).)
+- **OPEN-TGT-3** (M3 build, Q8): which machine identifier does the
+  product record for a device session? REQ-TGT-016 records the network
+  hardware address and, when the device sends one, the PXE client
+  machine identifier (REQ-BOOT-007). The public release notes say the
+  product gathers a device's hardware serial number, including on some
+  virtual machines (INDEX TGT-3), but not whether it is recorded during
+  a bare-metal install. They do not mention the SMBIOS system UUID.
+  Background on the SMBIOS UUID is in `specs/standards/smbios.md`.
 - **OPEN-TGT-2**: length and lifetime of the operator-issued code and the
   limit on failed attempts (clean-side design).
 - REQ-TGT-007: see its Status line. REQ-TGT-006, 010, 011 and 016 are

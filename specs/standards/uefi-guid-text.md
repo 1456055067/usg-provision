@@ -177,7 +177,9 @@ decides.
 - **Special values.** Whether SMBIOS gives special meanings to an all-FFh
   or an all-00h UUID was **not confirmed** from any source in this run
   (OPEN-GUID-3). The RFC meanings of nil and max (§2) are the only
-  confirmed meanings of those bit patterns.
+  confirmed meanings of those bit patterns. (2026-10-28, SR-4: a new
+  search summary of DSP0134 gives meanings for both; they are recorded
+  in `smbios.md` §3 as [primary not read], so OPEN-GUID-3 stays open.)
 - **Relation to option 97.** **[reading]** If firmware copies the SMBIOS
   2.6+ UUID octets into option 97 without change, then the UEFI text form of
   option 97 (§3) and the SMBIOS-defined text form of the system UUID are

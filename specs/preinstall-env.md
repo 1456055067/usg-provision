@@ -199,6 +199,14 @@ before serving it, and when, is not settled.
 - Standards: `specs/standards/winpe.md` §4, §5
 - Status: OPEN (Does the product change the operator's PE, or must the
   operator's preparation include everything? Limited by OPEN-PE-LIC. M3.)
+- Status note (M3 build, AUDITED 2026-10-28) [project rule], DEC-0020
+  items 1 and 5: the operator adds the product's program and its
+  public configuration (the server address and the trust anchor) to
+  the operator's own Windows PE. The product never modifies the PE,
+  and the device carries no secret; a secret embedded in the
+  environment is not built. The product-behaviour question above
+  (does the vendor's product change the PE?) stays OPEN; DEC-0020 is a
+  project rule, not described product behaviour.
 
 ## Requirements, M3: booting the environment and applying the image
 
@@ -309,6 +317,8 @@ the device and nothing is installed.
 - Status: AUDITED (2026-10-28; how the trust anchor and the session
   credential reach the environment, given that the PXE phase carries no
   secrets, is OPEN-PE-6)
+- Status note (M3 build, AUDITED 2026-10-28): OPEN-PE-6 is settled for
+  the project by DEC-0020 [project rule]; requirement text unchanged.
 
 ### REQ-PE-016: Download and verify content before use
 
@@ -325,6 +335,13 @@ REQ-JOB-008).
 - Standards: `specs/standards/security-baseline.md`
 - Status: AUDITED (2026-10-28; where content is held while waiting, and whether
   download comes before partitioning, is `specs/progress.md` OPEN-JOB-3)
+- Status note (M3 build, AUDITED 2026-10-28) [project rule], DEC-0021
+  item 4: all content for the chosen package is downloaded and
+  verified in full before the wipe (`specs/disk.md` REQ-DISK-007), then
+  discarded. During apply (REQ-PE-017) it is fetched again and
+  verified again. Nothing is staged, and no content is written to the
+  disk before it has been verified. Requirement text unchanged.
+  OPEN-JOB-3 stays open only as a question about the vendor's product.
 
 ### REQ-PE-017: Apply the chosen image
 
@@ -497,6 +514,16 @@ error and installs nothing further.
 - **OPEN-PE-6** (M3): how the environment gets the trust anchor and the
   credential it needs for REQ-PE-015, given that nothing secret may be
   sent over PXE or TFTP (REQ-BOOT-043). Linked to REQ-PE-010 and D-3.
+  Settled for the project (AUDITED 2026-10-28) by DEC-0020 items 1 and
+  5 [project rule]: the operator adds the program and its public
+  configuration (the server address and the trust anchor) to the
+  operator's own PE, and the product never modifies the PE. The device
+  holds no secret credential. The product authenticates the session by the
+  server-authenticated TLS channel of REQ-PE-015 together with the
+  mandatory operator-issued code or operator approval (DEC-0018 item
+  1; `specs/targeting.md` REQ-TGT-013, 014), which together act as the
+  device's credential. How the vendor's product does this is still
+  unknown.
 - **OPEN-WINPE-1** (`winpe.md` §5.1): whether `wpeinit` still runs when a
   replacement shell is configured.
 - REQ-PE-010: see its Status line. REQ-PE-005 after M2:

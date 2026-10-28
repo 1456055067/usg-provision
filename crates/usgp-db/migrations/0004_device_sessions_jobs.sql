@@ -284,7 +284,13 @@ BEGIN
         RAISE EXCEPTION 'a session identity cannot be altered'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
-    -- A final session keeps everything except when it was last seen.
+    -- A final session never changes state ...
+    IF OLD.state IN ('confirmed', 'refused', 'cancelled', 'expired', 'ended')
+       AND NEW.state IS DISTINCT FROM OLD.state THEN
+        RAISE EXCEPTION 'a final session cannot change state'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    -- ... and keeps everything else except when it was last seen.
     IF OLD.state IN ('confirmed', 'refused', 'cancelled', 'expired', 'ended')
        AND (NEW.state, NEW.boot_service_id, NEW.auth_method, NEW.auth_code_id, NEW.approved_by,
             NEW.failed_code_attempts, NEW.chosen_package_id, NEW.chosen_package_revision,

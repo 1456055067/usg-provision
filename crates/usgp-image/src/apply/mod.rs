@@ -59,7 +59,7 @@ use std::io::{Read, Seek};
 
 use usgp_crypto::CryptoProvider;
 
-pub use dir::DirSink;
+pub use dir::{DirSink, DirSinkGap};
 pub use error::ApplyError;
 pub use memory::{MemoryNode, MemoryNodeKind, MemorySink};
 pub use sink::{ApplySink, SinkError, SinkOp, SinkResult};

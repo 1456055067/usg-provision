@@ -31,12 +31,38 @@ use crate::wim::reparse::ReparseBuffer;
 /// Unix epoch): 11644473600 seconds.
 const FILETIME_UNIX_OFFSET: u64 = 11_644_473_600 * 10_000_000;
 
+/// A part of the image `DirSink` records instead of applying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DirSinkGap {
+    /// A named stream (creation and data).
+    NamedStream,
+    /// Reparse data (no link is ever created).
+    Reparse,
+    /// The security descriptor.
+    Security,
+    /// The short name.
+    ShortName,
+    /// The attributes.
+    Attributes,
+    /// The creation time (no portable setter; last access and last write
+    /// are applied).
+    CreationTime,
+    /// All three times of a directory, on Windows only: opening a
+    /// directory there needs the backup-semantics flag (topic 23 §21,
+    /// §23), whose numeric value is not in our standards summaries, so
+    /// this OS-neutral sink does not open directories on Windows. The
+    /// Windows sink (`usgp-winapi`) applies them.
+    DirectoryTimes,
+    /// A time outside what the platform's clock type can hold.
+    UnrepresentableTime,
+}
+
 /// A target directory.
 #[derive(Debug)]
 pub struct DirSink {
     root: PathBuf,
     open: Option<(ImagePath, File)>,
-    unsupported: BTreeSet<(SinkOp, ImagePath)>,
+    unsupported: BTreeSet<(DirSinkGap, ImagePath)>,
 }
 
 fn sink_err(op: SinkOp) -> impl Fn(io::Error) -> SinkError {
@@ -79,7 +105,7 @@ impl DirSink {
 
     /// Operations that were recorded instead of applied, by path.
     #[must_use]
-    pub fn unsupported(&self) -> &BTreeSet<(SinkOp, ImagePath)> {
+    pub fn unsupported(&self) -> &BTreeSet<(DirSinkGap, ImagePath)> {
         &self.unsupported
     }
 
@@ -92,8 +118,8 @@ impl DirSink {
         out
     }
 
-    fn record(&mut self, op: SinkOp, p: &ImagePath) {
-        self.unsupported.insert((op, p.clone()));
+    fn record(&mut self, gap: DirSinkGap, p: &ImagePath) {
+        self.unsupported.insert((gap, p.clone()));
     }
 
     fn close(&mut self) {
@@ -122,7 +148,7 @@ impl ApplySink for DirSink {
     }
 
     fn create_stream(&mut self, p: &ImagePath, _s: &StreamName) -> SinkResult {
-        self.record(SinkOp::CreateStream, p);
+        self.record(DirSinkGap::NamedStream, p);
         Ok(())
     }
 
@@ -134,7 +160,7 @@ impl ApplySink for DirSink {
         data: &[u8],
     ) -> SinkResult {
         if stream.is_some() {
-            self.record(SinkOp::Write, p);
+            self.record(DirSinkGap::NamedStream, p);
             return Ok(());
         }
         let e = sink_err(SinkOp::Write);
@@ -159,17 +185,17 @@ impl ApplySink for DirSink {
     }
 
     fn set_reparse(&mut self, p: &ImagePath, _buf: &ReparseBuffer) -> SinkResult {
-        self.record(SinkOp::SetReparse, p);
+        self.record(DirSinkGap::Reparse, p);
         Ok(())
     }
 
     fn set_security(&mut self, p: &ImagePath, _sd: &[u8]) -> SinkResult {
-        self.record(SinkOp::SetSecurity, p);
+        self.record(DirSinkGap::Security, p);
         Ok(())
     }
 
     fn set_short_name(&mut self, p: &ImagePath, _n: &ShortName) -> SinkResult {
-        self.record(SinkOp::SetShortName, p);
+        self.record(DirSinkGap::ShortName, p);
         Ok(())
     }
 
@@ -177,29 +203,37 @@ impl ApplySink for DirSink {
         self.close();
         let e = sink_err(SinkOp::SetTimes);
         let target = self.join(p);
-        if fs::symlink_metadata(&target).map_err(&e)?.is_dir() && cfg!(windows) {
-            // Opening a directory needs a Windows-only flag; not portable.
-            self.record(SinkOp::SetTimes, p);
+        let is_dir = fs::symlink_metadata(&target).map_err(&e)?.is_dir();
+        if is_dir && cfg!(windows) {
+            self.record(DirSinkGap::DirectoryTimes, p);
             return Ok(());
         }
         let (Some(accessed), Some(modified)) =
             (system_time(t.last_access), system_time(t.last_write))
         else {
-            self.record(SinkOp::SetTimes, p);
+            self.record(DirSinkGap::UnrepresentableTime, p);
             return Ok(());
         };
-        let f = File::open(&target).map_err(&e)?;
+        // Setting times needs write access to the file's attributes
+        // (topic 23 §22: the handle must have the access the change
+        // needs); a read-only open is refused on Windows. Directories are
+        // opened read-only (Unix only, above), which suffices there.
+        let f = if is_dir {
+            File::open(&target)
+        } else {
+            OpenOptions::new().write(true).open(&target)
+        }
+        .map_err(&e)?;
         let times = fs::FileTimes::new()
             .set_accessed(accessed)
             .set_modified(modified);
         f.set_times(times).map_err(&e)?;
-        // Creation time has no portable setter.
-        self.record(SinkOp::SetTimes, p);
+        self.record(DirSinkGap::CreationTime, p);
         Ok(())
     }
 
     fn set_attributes(&mut self, p: &ImagePath, _a: Attributes) -> SinkResult {
-        self.record(SinkOp::SetAttributes, p);
+        self.record(DirSinkGap::Attributes, p);
         Ok(())
     }
 }

@@ -325,6 +325,16 @@ pub(crate) async fn choose_disk(
     Ok(())
 }
 
+/// Session states that never change again (`SessionState::is_final`;
+/// the 0004 guard lists the same set, checked by a unit test).
+pub(crate) const FINAL_STATES: &[SessionState] = &[
+    SessionState::Confirmed,
+    SessionState::Refused,
+    SessionState::Cancelled,
+    SessionState::Expired,
+    SessionState::Ended,
+];
+
 /// Checks a target state for [`set_state`].
 pub(crate) fn check_target(to: SessionState) -> Result<(), DbError> {
     match to {
@@ -348,12 +358,13 @@ pub(crate) async fn set_state(
     check_target(to)?;
     let uid = to_uuid(id.as_bytes());
     let st = texts(from, SessionState::as_str);
+    let finals = texts(FINAL_STATES, SessionState::as_str);
     let ended = (to != SessionState::Confirmed).then(|| at.as_micros());
     let n = tx
         .execute(
             "update device_session state",
             "UPDATE device_session SET state = $2, ended_at_us = $3, end_reason = $4 \
-             WHERE id = $1 AND state = ANY($5) \
+             WHERE id = $1 AND state = ANY($5) AND NOT (state = ANY($6)) \
              AND ($2 <> 'confirmed' OR chosen_disk IS NOT NULL)",
             &[
                 &uid,
@@ -361,6 +372,7 @@ pub(crate) async fn set_state(
                 &ended,
                 &reason.map(ErrorCode::as_str),
                 &st,
+                &finals,
             ],
         )
         .await?;

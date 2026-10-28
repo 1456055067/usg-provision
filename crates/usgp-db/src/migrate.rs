@@ -494,6 +494,8 @@ mod tests {
             "OLD.{}",
             in_list("state", &finals, SessionState::as_str)
         )));
+        assert_eq!(finals.as_slice(), crate::repo::devices::FINAL_STATES);
+        assert!(sql.contains("AND NEW.state IS DISTINCT FROM OLD.state THEN"));
         let finished: Vec<JobState> = JobState::ALL
             .iter()
             .copied()

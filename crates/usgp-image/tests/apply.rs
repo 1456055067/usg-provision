@@ -19,8 +19,8 @@ mod apply {
     use usgp_image::Compression;
     use usgp_image::apply::{
         ApplyContext, ApplyError, ApplyLimits, ApplyPlan, ApplyPreview, ApplyReport, ApplyRoot,
-        ApplySink, DirSink, MemoryNodeKind, MemorySink, ReparseError, SinkOp, XmlCounts, apply,
-        verify_pass,
+        ApplySink, DirSink, DirSinkGap, MemoryNodeKind, MemorySink, ReparseError, SinkOp,
+        XmlCounts, apply, verify_pass,
     };
     use usgp_image::testkit::tree::{
         NodeKind, abs_link_data, descriptor, link_data, rel_link_data,
@@ -416,10 +416,36 @@ mod apply {
             // FILETIME 3 is 300 ns after 1601-01-01; mtime is before 1970.
             assert!(m.mtime() < 0);
         }
+        // Times, on every platform: a file's last write is applied
+        // (TIMES[2] = 2023-01-01 00:00:00.1234567 UTC, OBS-034).
+        let want = std::time::UNIX_EPOCH + std::time::Duration::new(1_672_531_200, 123_456_700);
+        let file_mtime = std::fs::metadata(dir.join("readme.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(file_mtime, want, "file last-write time");
         let u = sink.unsupported();
-        assert!(u.contains(&(SinkOp::SetReparse, p("links\\sym-file-rel.txt"))));
-        assert!(u.contains(&(SinkOp::SetSecurity, ImagePath::root())));
-        assert!(u.contains(&(SinkOp::CreateStream, p("streams.txt"))));
+        assert!(u.contains(&(DirSinkGap::CreationTime, p("readme.txt"))));
+        let links = p("links");
+        if cfg!(windows) {
+            // Directories are not opened on Windows: named gap, recorded.
+            assert!(u.contains(&(DirSinkGap::DirectoryTimes, links.clone())));
+            assert!(u.contains(&(DirSinkGap::DirectoryTimes, ImagePath::root())));
+            assert!(!u.contains(&(DirSinkGap::DirectoryTimes, p("readme.txt"))));
+        } else {
+            // Directory times applied (bottom-up, after the children).
+            let dir_mtime = std::fs::metadata(dir.join("links"))
+                .unwrap()
+                .modified()
+                .unwrap();
+            assert_eq!(dir_mtime, want, "directory last-write time");
+            assert!(!u.iter().any(|(g, _)| *g == DirSinkGap::DirectoryTimes));
+        }
+        assert!(u.contains(&(DirSinkGap::Reparse, p("links\\sym-file-rel.txt"))));
+        assert!(u.contains(&(DirSinkGap::Security, ImagePath::root())));
+        assert!(u.contains(&(DirSinkGap::NamedStream, p("streams.txt"))));
+        assert!(u.contains(&(DirSinkGap::ShortName, p("readme.txt"))));
+        assert!(u.contains(&(DirSinkGap::Attributes, p("ro.txt"))));
         // No symbolic link is ever created.
         let l = std::fs::symlink_metadata(dir.join("links").join("sym-dir-rel")).unwrap();
         assert!(l.is_dir() && !l.file_type().is_symlink());

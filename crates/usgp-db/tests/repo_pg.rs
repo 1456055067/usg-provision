@@ -564,10 +564,11 @@ mod t {
             .batch_execute("ALTER TABLE device_session DISABLE TRIGGER device_session_guard")
             .await
             .unwrap();
-        // Seven characters (passes the column check) but not base32.
+        // Seven characters (passes the column check) but `U` is outside
+        // the base32 alphabet even after look-alike normalisation.
         owner
             .execute(
-                "UPDATE device_session SET display_code = 'IIL-OOO' WHERE id = $1",
+                "UPDATE device_session SET display_code = 'UUU-UUU' WHERE id = $1",
                 &[&id],
             )
             .await

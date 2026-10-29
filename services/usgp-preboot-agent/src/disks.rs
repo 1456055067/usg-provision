@@ -71,11 +71,9 @@ impl fmt::Display for Refusal {
 }
 
 impl Refusal {
-    /// The reason sent in the `no_disk` report.
-    ///
-    /// The two agent-side reasons have no wire value of their own; both are
-    /// sent as the nearest refusal (`boot_media`: the disk could not be
-    /// shown not to hold the boot environment). See impl notes.
+    /// The reason sent in the `no_disk` report. A future eligibility
+    /// reason without a wire value of its own is sent as `boot_media` (the
+    /// disk could not be shown not to hold the boot environment).
     #[must_use]
     pub fn wire(&self) -> DiskRefusal {
         match self {
@@ -88,9 +86,9 @@ impl Refusal {
                 DiskRefusal::UnsupportedSectorSize
             }
             Self::Ineligible(Ineligible::TooSmall { .. }) => DiskRefusal::TooSmall,
-            Self::Ineligible(_) | Self::VolumesUndetermined | Self::Undescribable => {
-                DiskRefusal::BootMedia
-            }
+            Self::VolumesUndetermined => DiskRefusal::VolumesUndetermined,
+            Self::Undescribable => DiskRefusal::PartitionTableUndescribable,
+            Self::Ineligible(_) => DiskRefusal::BootMedia,
         }
     }
 }
@@ -371,6 +369,10 @@ mod tests {
         assert_eq!(report.len(), 4);
         assert_eq!(report.first().unwrap().reason, DiskRefusal::Removable);
         assert_eq!(report.get(1).unwrap().reason, DiskRefusal::BootMedia);
+        assert_eq!(
+            report.get(2).unwrap().reason,
+            DiskRefusal::VolumesUndetermined
+        );
         assert_eq!(report.get(3).unwrap().reason, DiskRefusal::TooSmall);
         let text = r.get(3).unwrap().first().unwrap().to_string();
         assert!(
@@ -411,6 +413,10 @@ mod tests {
         assert_eq!(
             inv.entries().first().unwrap().refusals,
             vec![Refusal::Undescribable]
+        );
+        assert_eq!(
+            inv.refused_report().first().unwrap().reason,
+            DiskRefusal::PartitionTableUndescribable
         );
     }
 }

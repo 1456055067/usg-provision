@@ -63,7 +63,7 @@ use usgp_tftp::{NameRefusal, case_insensitive_collision, normalize_request_name}
 
 use crate::events::{self, Outcome};
 use crate::lock;
-use crate::pe_kit::{self, KIT_STATUS_NAME, PeKit, PeKitShapeError};
+use crate::pe_kit::{self, KIT_STATUS_NAME, PeKitV1};
 use crate::state::{FileStatus, RelayState};
 
 /// A request's verification of a published file did not finish within
@@ -85,7 +85,8 @@ pub enum ContentLoadError {
     /// The manifest file could not be read.
     #[error(transparent)]
     File(#[from] ConfigError),
-    /// The manifest is not a valid v1 manifest.
+    /// The manifest is not a valid v1 manifest (including a `[pe_kit]`
+    /// section with an invalid shape).
     #[error("invalid boot manifest: {0}")]
     Manifest(#[from] ManifestError),
     /// `boot.uefi_x64_program` is not listed in the manifest.
@@ -104,18 +105,6 @@ pub enum ContentLoadError {
         /// The second name.
         second: String,
     },
-    /// The `[pe_kit]` section has an invalid shape.
-    #[error(transparent)]
-    PeKit(#[from] PeKitShapeError),
-}
-
-impl From<pe_kit::ParseError> for ContentLoadError {
-    fn from(e: pe_kit::ParseError) -> Self {
-        match e {
-            pe_kit::ParseError::Manifest(m) => Self::Manifest(m),
-            pe_kit::ParseError::Shape(s) => Self::PeKit(s),
-        }
-    }
 }
 
 /// Why a request name matched no published file.
@@ -193,7 +182,6 @@ impl Fault {
 pub struct ContentStore {
     root: PathBuf,
     manifest: BootManifest,
-    pe_kit: Option<PeKit>,
     manifest_sha256: Sha256Digest,
     program: BootFileName,
     max_file_size: u64,
@@ -230,7 +218,8 @@ impl ContentStore {
         let max = u64::try_from(MAX_MANIFEST_BYTES).unwrap_or(u64::MAX);
         let text = read_trusted(manifest_path, max, trust)?;
         let manifest_sha256 = usgp_crypto::sha256(text.as_bytes());
-        let (manifest, kit) = pe_kit::parse_manifest(&text)?;
+        let manifest = BootManifest::from_toml(&text)?;
+        let kit = manifest.pe_kit.as_ref();
         if manifest.get(program.as_bytes()).is_none() {
             return Err(ContentLoadError::ProgramNotPublished);
         }
@@ -272,16 +261,15 @@ impl ContentStore {
             ("pe_kit", kit.is_some().to_string()),
         ];
         if let Some(k) = &kit {
-            detail.push(("pe_content_sha256", k.pe_content_sha256().to_hex()));
+            detail.push(("pe_content_sha256", k.pe_content_sha256.to_hex()));
         }
         events::emit_simple(events::MANIFEST_LOADED, Outcome::Success, &detail);
-        if let Some(k) = &kit {
+        if let Some(k) = kit {
             record_kit(&state, k, &manifest, program);
         }
         Ok(Self {
             root: root.to_path_buf(),
             manifest,
-            pe_kit: kit,
             manifest_sha256,
             program: program.clone(),
             max_file_size,
@@ -321,8 +309,8 @@ impl ContentStore {
 
     /// The `[pe_kit]` section, if the manifest has one.
     #[must_use]
-    pub fn pe_kit(&self) -> Option<&PeKit> {
-        self.pe_kit.as_ref()
+    pub fn pe_kit(&self) -> Option<&PeKitV1> {
+        self.manifest.pe_kit.as_ref()
     }
 
     /// Whether `name` is a published name (byte-exact; no file access).
@@ -565,19 +553,19 @@ impl ContentStore {
 
 /// Records the kit's completeness under [`KIT_STATUS_NAME`] and emits
 /// `boot.kit.incomplete` when it is not complete (REQ-PE-012).
-fn record_kit(state: &RelayState, kit: &PeKit, manifest: &BootManifest, program: &BootFileName) {
-    let problems = pe_kit::assess(kit, manifest, program);
+fn record_kit(state: &RelayState, kit: &PeKitV1, manifest: &BootManifest, program: &BootFileName) {
+    let problems = kit.assess(manifest, Some(program));
     let status = problems
         .iter()
-        .map(pe_kit::KitProblem::status)
+        .map(pe_kit::problem_status)
         .find(|s| *s == FileStatus::IntegrityFailed)
-        .or_else(|| problems.first().map(pe_kit::KitProblem::status))
+        .or_else(|| problems.first().map(pe_kit::problem_status))
         .unwrap_or(FileStatus::Verified);
     if !problems.is_empty() {
         let reasons: Vec<String> = problems.iter().map(pe_kit::KitProblem::describe).collect();
         let detail = [
             ("reasons", reasons.join(",")),
-            ("pe_content_sha256", kit.pe_content_sha256().to_hex()),
+            ("pe_content_sha256", kit.pe_content_sha256.to_hex()),
             ("action", "no boot program offered".to_owned()),
         ];
         events::emit_simple(events::KIT_INCOMPLETE, Outcome::Failure, &detail);

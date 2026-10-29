@@ -12,7 +12,10 @@
 //!   descriptors and layout reports ([`disk`]), the signed job plan
 //!   ([`job_plan`]), job states and progress reports ([`progress`]), the
 //!   signed boot-policy list ([`boot_policy`]), and the operator API
-//!   additions ([`ops`]).
+//!   additions ([`ops`]), the boot manifest's `[pe_kit]` section
+//!   ([`pe_kit`]), the pre-boot agent's public configuration
+//!   ([`agent_config`]), and a PE/COFF header check for boot programs
+//!   ([`pe_coff`]).
 //!
 //! This crate does no cryptography and no I/O. See docs/ARCHITECTURE.md.
 
@@ -23,6 +26,7 @@
 #[macro_use]
 mod macros;
 
+pub mod agent_config;
 pub mod api;
 pub mod boot_file_name;
 pub mod boot_manifest;
@@ -39,6 +43,8 @@ pub mod limits;
 pub mod names;
 pub mod ops;
 pub mod package_manifest;
+pub mod pe_coff;
+pub mod pe_kit;
 pub mod progress;
 pub mod status;
 
@@ -67,6 +73,7 @@ pub use names::{
     ItemName, NameError, Note, PartitionLabel, WimText,
 };
 pub use package_manifest::{PackageImageV1, PackageManifestV1, PackagePeV1};
+pub use pe_kit::{KitProblem, KitRole, PeKitError, PeKitV1};
 pub use progress::{
     FailureCategory, FailureV1, JobState, ProgressAckV1, ProgressEvent, ProgressV1, Step, StepKind,
     StepState,

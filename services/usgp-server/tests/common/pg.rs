@@ -285,6 +285,41 @@ pub fn listen_addr(line: &str) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
+/// One mirrored audit record from a `serve` stdout line: the top-level
+/// `event` and `interface` fields, and the record fields carried in
+/// `detail`. `detail` is a JSON object rendered as a JSON *string*
+/// (`usgp_common::event::emit`), so its keys (`actor_kind`, `actor_id`,
+/// ...) never appear as literal `"key":"value"` text in the line.
+#[derive(Debug, Clone)]
+pub struct Mirrored {
+    /// Event name.
+    pub event: String,
+    /// Interface (`api`, `device_api`, `relay_feed`, ...).
+    pub interface: String,
+    /// The record fields (`actor_kind`, `actor_id`, `target_id`, ...).
+    pub detail: serde_json::Value,
+}
+
+/// Parses every audit line in `lines` (others are skipped).
+pub fn mirrored(lines: &[String]) -> Vec<Mirrored> {
+    lines
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| {
+            let detail = serde_json::from_str(v.get("detail")?.as_str()?).ok()?;
+            Some(Mirrored {
+                event: v.get("event")?.as_str()?.to_owned(),
+                interface: v
+                    .get("interface")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                detail,
+            })
+        })
+        .collect()
+}
+
 /// The device listener's address from the `server.start` line (its
 /// detail holds `device_listen` = `127.0.0.1:<port>`).
 pub fn device_addr(line: &str) -> SocketAddr {

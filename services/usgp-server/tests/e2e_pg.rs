@@ -65,7 +65,7 @@ mod e2e {
 
     use crate::common::device;
     use crate::common::flow::{self, Expect, Source};
-    use crate::common::pg::{PgSetup, device_addr, text, wait_state};
+    use crate::common::pg::{PgSetup, device_addr, mirrored, text, wait_state};
     use crate::common::stream::{Body, digest_bytes};
     use crate::common::{Fixture, https, json_str};
 
@@ -358,12 +358,41 @@ mod e2e {
             "\"event\":\"job.succeeded\"",
             "\"event\":\"boot_stop.added\"",
             "\"event\":\"boot_policy.read\"",
-            "\"actor_kind\":\"device_session\"",
-            "\"interface\":\"device_api\"",
-            "\"actor_kind\":\"boot_service\"",
-            "\"interface\":\"relay_feed\"",
         ] {
             assert!(all.contains(e), "{e} missing:\n{all}");
+        }
+        // AU-3 on PostgreSQL: device records name the session through the
+        // device listener; relay pulls name the boot service through the
+        // relay feed. The actor fields are inside the mirrored `detail`
+        // (a JSON string), so the lines are parsed, not searched.
+        let recs = mirrored(&lines);
+        let device_recs: Vec<_> = recs
+            .iter()
+            .filter(|r| {
+                [
+                    "device.session.opened",
+                    "device.session.package_chosen",
+                    "device.session.disk_chosen",
+                    "job.succeeded",
+                ]
+                .contains(&r.event.as_str())
+            })
+            .collect();
+        assert_eq!(device_recs.len(), 4, "{device_recs:#?}");
+        for r in device_recs {
+            assert_eq!(r.detail["actor_kind"], "device_session", "{r:?}");
+            assert_eq!(r.detail["actor_id"], out.session_id.as_str(), "{r:?}");
+            assert_eq!(r.interface, "device_api", "{r:?}");
+        }
+        let reads: Vec<_> = recs
+            .iter()
+            .filter(|r| r.event == "boot_policy.read")
+            .collect();
+        assert!(!reads.is_empty());
+        for r in reads {
+            assert_eq!(r.detail["actor_kind"], "boot_service", "{r:?}");
+            assert_eq!(r.detail["actor_id"], bs_id.as_str(), "{r:?}");
+            assert_eq!(r.interface, "relay_feed", "{r:?}");
         }
         assert!(all.contains(&out.job_id) && all.contains(&out.session_id));
         assert!(!all.contains("\"event\":\"content.download.aborted\""));

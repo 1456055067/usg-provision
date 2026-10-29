@@ -278,6 +278,42 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Fails step 1 for a reason outside the engine, before it could
+    /// start: the caller could not prepare the platform, so no disk was
+    /// opened. The failure is the engine's own type (category `local`,
+    /// code `internal`, nothing written), shown on `view` and reported as
+    /// step 1 `failed` (best effort) exactly as a failure inside the
+    /// engine is. `plan` gives the retry policy when the plan verified;
+    /// otherwise [`EngineConfig::unverified_report_retry`] applies.
+    /// `message` is shown on the device and is cleaned for the screen; it
+    /// must hold no secret.
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SI-11 (Error Handling) - one failure type and report
+    //   path for every step-1 failure; fixed wire code, no detail sent.
+    // - NIST 800-53: AU-12 - the server records the failed job.
+    // - SPEC: specs/progress.md#REQ-JOB-005
+    pub fn fail_before_start(
+        &self,
+        job_id: JobId,
+        plan: Option<&VerifiedJobPlan>,
+        message: &str,
+        link: &mut dyn ServerLink,
+        view: &mut dyn JobView,
+    ) -> JobFailure {
+        let f = JobFailure::new(
+            Step::VERIFY_CONTENT,
+            FailureCategory::Local,
+            codes::INTERNAL,
+            message,
+        );
+        view.show(&ViewEvent::Failed(&f));
+        let retry = plan.map_or(&self.config.unverified_report_retry, |p| &p.plan().retry);
+        let mut rep = Reporter::new(job_id, Duration::from_secs(1));
+        // Best effort: the device shows the failure either way.
+        let _ = rep.finish(link, self.clock, retry, None, f.step, Some(f.to_wire()));
+        f
+    }
+
     /// Runs a verified job: steps 1 to 5, stopping at the first failure.
     ///
     /// # Errors

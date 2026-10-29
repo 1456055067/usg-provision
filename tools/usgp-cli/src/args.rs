@@ -80,6 +80,8 @@ pub enum Command {
     Verify(VerifyArgs),
     /// `boot-manifest create --pe-kit`.
     CreateKit(Box<KitCreateArgs>),
+    /// `pe agent-config` (local; no server connection).
+    AgentConfig(Box<AgentConfigArgs>),
     /// An M2 command that talks to the server.
     Api(Box<ApiCommand>),
 }
@@ -262,6 +264,28 @@ pub struct KitCreateArgs {
     pub conn: ConnArgs,
 }
 
+/// Arguments of `pe agent-config`. Values are checked by
+/// [`crate::cmd_agent_config::create`], so a refusal is audited.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AgentConfigArgs {
+    /// `--out DIR`: the directory to create.
+    pub out: PathBuf,
+    /// `--server-url URL`: the device listener, `https://HOST[:PORT]`.
+    pub server_url: String,
+    /// `--server-name NAME`.
+    pub server_name: Option<String>,
+    /// `--trust-anchors FILE`.
+    pub trust_anchors: PathBuf,
+    /// `--plan-key-pub FILE`.
+    pub plan_key_pub: PathBuf,
+    /// `--content-key-pub FILE`.
+    pub content_key_pub: PathBuf,
+    /// `--network-wait-s N`.
+    pub network_wait_s: Option<u64>,
+    /// `--connect-timeout-s N`.
+    pub connect_timeout_s: Option<u64>,
+}
+
 /// A malformed command line. The message is shown with the usage text.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -302,7 +326,11 @@ where
     .iter()
     .any(|g| first == *g)
     {
-        return parse_api(&first, it.collect());
+        let rest: Vec<OsString> = it.collect();
+        if first == "pe" && rest.first().is_some_and(|a| a == "agent-config") {
+            return parse_agent_config(rest.into_iter().skip(1).collect());
+        }
+        return parse_api(&first, rest);
     }
     if first != "boot-manifest" {
         return Err(UsageError(format!("unknown command {first:?}")));
@@ -461,6 +489,64 @@ fn parse_create_kit(rest: Vec<OsString>) -> Result<Command, UsageError> {
         fonts,
         pe,
         conn,
+    })))
+}
+
+/// `pe agent-config ...` (M3 plan WU-13). Shape only. Of the connection
+/// options only `--content-key-pub` is taken (the content key the agent
+/// pins); the others are refused, as no server is contacted.
+fn parse_agent_config(rest: Vec<OsString>) -> Result<Command, UsageError> {
+    let mut s = scan_m2(
+        rest,
+        &[
+            "--out",
+            "--server-url",
+            "--server-name",
+            "--trust-anchors",
+            "--plan-key-pub",
+            "--network-wait-s",
+            "--connect-timeout-s",
+        ],
+        &[],
+        &[],
+    )?;
+    if s.help {
+        return Ok(Command::Help);
+    }
+    if let Some(opt) = [
+        "--config",
+        "--server",
+        "--server-ca",
+        "--client-cert",
+        "--client-key",
+    ]
+    .into_iter()
+    .find(|o| s.values.contains_key(o))
+    {
+        return Err(UsageError(format!(
+            "{opt} is not used by pe agent-config (no server is contacted)"
+        )));
+    }
+    if let Some(extra) = s.positional.first() {
+        return Err(UsageError(format!("unexpected argument {extra:?}")));
+    }
+    let mut path = |opt: &str| {
+        s.path(opt)
+            .ok_or_else(|| UsageError(format!("{opt} is required")))
+    };
+    let out = path("--out")?;
+    let trust_anchors = path("--trust-anchors")?;
+    let plan_key_pub = path("--plan-key-pub")?;
+    let content_key_pub = path("--content-key-pub")?;
+    Ok(Command::AgentConfig(Box::new(AgentConfigArgs {
+        out,
+        server_url: s.required("--server-url")?,
+        server_name: s.text("--server-name")?,
+        trust_anchors,
+        plan_key_pub,
+        content_key_pub,
+        network_wait_s: s.number("--network-wait-s")?,
+        connect_timeout_s: s.number("--connect-timeout-s")?,
     })))
 }
 
@@ -1501,5 +1587,49 @@ mod tests {
             .is_err()
         );
         assert_eq!(pk(&kit_args(&["--help"])), Ok(Command::Help));
+    }
+
+    #[test]
+    fn agent_config_grammar() {
+        let full = [
+            "pe",
+            "agent-config",
+            "--out",
+            "/o",
+            "--server-url",
+            "https://h:8444",
+            "--trust-anchors",
+            "/a.pem",
+            "--plan-key-pub",
+            "/p.pub",
+            "--content-key-pub",
+            "/c.pub",
+            "--network-wait-s",
+            "60",
+        ];
+        let Ok(Command::AgentConfig(a)) = p(&full) else {
+            panic!("not parsed");
+        };
+        assert_eq!(a.out, PathBuf::from("/o"));
+        assert_eq!(a.server_url, "https://h:8444");
+        assert_eq!(a.server_name, None);
+        assert_eq!(a.network_wait_s, Some(60));
+        assert_eq!(a.connect_timeout_s, None);
+        assert_eq!(a.content_key_pub, PathBuf::from("/c.pub"));
+        assert_eq!(p(&["pe", "agent-config", "--help"]), Ok(Command::Help));
+        // A server connection option, a missing option, a stray argument,
+        // a bad number.
+        let mut with_server = full.to_vec();
+        with_server.extend(["--server", "https://x"]);
+        let mut stray = full.to_vec();
+        stray.push("extra");
+        for bad in [
+            with_server,
+            full.get(..full.len() - 4).unwrap().to_vec(),
+            stray,
+            [full.get(..full.len() - 1).unwrap(), &["6x"]].concat(),
+        ] {
+            assert!(p(&bad).is_err(), "{bad:?}");
+        }
     }
 }

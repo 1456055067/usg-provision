@@ -17,10 +17,10 @@
 #![cfg(not(windows))]
 
 mod common;
+mod proc;
 
-use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use usgp_common::Sha256Digest;
@@ -95,6 +95,42 @@ fn device(tag: &str, n: u8) -> Device {
 
 type AgentThread = std::thread::JoinHandle<(Ending, SimHost)>;
 type EchoLog = std::sync::Arc<std::sync::Mutex<Vec<bool>>>;
+
+/// The agent and simulation files for running the binary against `s`.
+fn binary_files(s: &Server, d: &Device) -> (std::path::PathBuf, std::path::PathBuf) {
+    let anchors = d.dir.join("anchors.pem");
+    std::fs::write(&anchors, s.pki.root.cert_pem().unwrap()).unwrap();
+    std::fs::write(d.dir.join("plan.pub"), s.plan_pub.to_spki_pem().unwrap()).unwrap();
+    std::fs::write(
+        d.dir.join("content.pub"),
+        s.content_pub.to_spki_pem().unwrap(),
+    )
+    .unwrap();
+    let cfg = d.dir.join("agent.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "server_url = \"https://127.0.0.1:{}\"\nserver_name = \"localhost\"\n\
+             trust_anchors = \"anchors.pem\"\nplan_key_pub = \"plan.pub\"\n\
+             content_key_pub = \"content.pub\"\nnetwork_wait_s = 10\n",
+            s.dev_addr.port()
+        ),
+    )
+    .unwrap();
+    let sim = d.dir.join("sim.toml");
+    std::fs::write(
+        &sim,
+        format!(
+            "work_dir = {:?}\nfirmware_file = {:?}\ndhcp_addresses = [\"192.0.2.10\"]\n\
+             firmware = \"uefi\"\narch = \"x64\"\nsecure_boot = \"on\"\nmemory_bytes = 8589934592\n\
+             macs = [\"02:00:00:00:10:05\"]\n\n[[disk]]\npath = {:?}\nbus = \"nvme\"\n\
+             model = \"Sim Target\"\nserial = \"SIM-0\"\nlogical_sector = 512\nphysical_sector = 4096\n",
+            d.host.work_dir, d.host.firmware_file, d.target
+        ),
+    )
+    .unwrap();
+    (cfg, sim)
+}
 
 /// Runs `app::run` on its own thread.
 fn start(cfg: AgentConfig, mut host: SimHost) -> (AgentThread, Driver, EchoLog) {
@@ -368,54 +404,11 @@ fn the_binary_runs_the_simulation_from_scripted_input() {
     s.ready_package();
     let code = s.issue_code();
     let d = device("binary", 5);
-    let anchors = d.dir.join("anchors.pem");
-    std::fs::write(&anchors, s.pki.root.cert_pem().unwrap()).unwrap();
-    std::fs::write(d.dir.join("plan.pub"), s.plan_pub.to_spki_pem().unwrap()).unwrap();
-    std::fs::write(
-        d.dir.join("content.pub"),
-        s.content_pub.to_spki_pem().unwrap(),
-    )
-    .unwrap();
-    let cfg = d.dir.join("agent.toml");
-    std::fs::write(
-        &cfg,
-        format!(
-            "server_url = \"https://127.0.0.1:{}\"\nserver_name = \"localhost\"\n\
-             trust_anchors = \"anchors.pem\"\nplan_key_pub = \"plan.pub\"\n\
-             content_key_pub = \"content.pub\"\nnetwork_wait_s = 10\n",
-            s.dev_addr.port()
-        ),
-    )
-    .unwrap();
-    let sim = d.dir.join("sim.toml");
-    std::fs::write(
-        &sim,
-        format!(
-            "work_dir = {:?}\nfirmware_file = {:?}\ndhcp_addresses = [\"192.0.2.10\"]\n\
-             firmware = \"uefi\"\narch = \"x64\"\nsecure_boot = \"on\"\nmemory_bytes = 8589934592\n\
-             macs = [\"02:00:00:00:10:05\"]\n\n[[disk]]\npath = {:?}\nbus = \"nvme\"\n\
-             model = \"Sim Target\"\nserial = \"SIM-0\"\nlogical_sector = 512\nphysical_sector = 4096\n",
-            d.host.work_dir, d.host.firmware_file, d.target
-        ),
-    )
-    .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_usgp-preboot-agent"))
-        .arg("--config")
-        .arg(&cfg)
-        .arg("--sim")
-        .arg(&sim)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(format!("{code}\n1\n1\nWIPE\n").as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
+    let (cfg, sim) = binary_files(&s, &d);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_usgp-preboot-agent"));
+    cmd.arg("--config").arg(&cfg).arg("--sim").arg(&sim);
+    let script = format!("{code}\n1\n1\nWIPE\n");
+    let out = proc::run(cmd, Some(script.as_bytes()), proc::LIMIT);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         out.status.code(),
@@ -427,4 +420,27 @@ fn the_binary_runs_the_simulation_from_scripted_input() {
     assert!(stdout.contains("power: Restart"), "{stdout}");
     assert!(!stdout.contains(&code));
     assert_eq!(s.jobs()[0].state, JobState::Succeeded);
+}
+
+#[test]
+fn the_binary_with_no_input_cancels_and_exits() {
+    let s = Server::start();
+    s.ready_package();
+    let d = device("eof", 6);
+    let before = ends_digest(&d.target, 4 << 20);
+    let (cfg, sim) = binary_files(&s, &d);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_usgp-preboot-agent"));
+    cmd.arg("--config").arg(&cfg).arg("--sim").arg(&sim);
+    // Standard input is null: EOF at the authorisation screen.
+    let out = proc::run(cmd, None, proc::LIMIT);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(6), "{stdout}");
+    assert!(stdout.contains("Cancelled"), "{stdout}");
+    assert!(
+        !stdout.contains("power:"),
+        "no power action on EOF: {stdout}"
+    );
+    assert_eq!(ends_digest(&d.target, 4 << 20), before);
+    assert!(!s.events("device.session.cancelled").is_empty());
+    assert!(s.jobs().is_empty());
 }

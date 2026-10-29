@@ -1245,6 +1245,13 @@ closed_enum!(
         ReadOnly => "read_only",
         /// A sector size other than 512 or 4096.
         UnsupportedSectorSize => "unsupported_sector_size",
+        /// Agent only: the volumes on the disk could not all be identified,
+        /// so the disk cannot be shown not to hold the running boot
+        /// environment (REQ-DISK-005; fail closed).
+        VolumesUndetermined => "volumes_undetermined",
+        /// Agent only: the disk's partition table could not be described
+        /// for the operator (REQ-DISK-006 needs the partitions shown).
+        PartitionTableUndescribable => "partition_table_undescribable",
     }
 );
 

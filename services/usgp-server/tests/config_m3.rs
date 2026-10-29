@@ -487,6 +487,22 @@ mod config_m3 {
             !stdout.contains(&hex) && !stdout.contains("key id:"),
             "{stdout}"
         );
+        // The mirrored record in the shape e2e_pg parses: `event` and
+        // `interface` at top level, the record fields inside `detail`,
+        // which is a JSON string (so `"actor_kind":"..."` is not literal
+        // text in the line).
+        let lines: Vec<String> = stdout.lines().map(str::to_owned).collect();
+        let recs = crate::common::pg::mirrored(&lines);
+        let rec = recs
+            .iter()
+            .find(|r| r.event == "key.generated")
+            .unwrap_or_else(|| panic!("no key.generated: {stdout}"));
+        assert_eq!(rec.interface, "server-cli");
+        assert_eq!(rec.detail["actor_kind"], "local_user");
+        assert!(
+            !stdout.contains("\"actor_kind\":\"local_user\""),
+            "{stdout}"
+        );
         // Never overwritten.
         let out = server(&args);
         assert_eq!(out.status.code(), Some(1));

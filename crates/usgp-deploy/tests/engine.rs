@@ -846,3 +846,35 @@ fn in_memory_disk_never_touched_by_a_refused_plan_is_all_zero() {
     let d: &MemBlockDevice = &dev.0.borrow();
     assert!(d.nonzero_lbas().is_empty());
 }
+
+#[test]
+fn failure_before_start_is_the_engines_own_step_1_failure() {
+    let fx = Fixture::new(small_wim());
+    let mut link = link_for(&fx);
+    let clock = Rc::clone(&link.clock);
+    let engine = usgp_deploy::Engine::new(crypto(), &*clock, EngineConfig::default());
+    let verified = fx.verified();
+    for plan in [None, Some(&verified)] {
+        let mut view = RecordingView::default();
+        let f = engine.fail_before_start(
+            fx.plan.job_id,
+            plan,
+            "The disk platform could not be prepared: no\u{7} access",
+            &mut link,
+            &mut view,
+        );
+        let o = Outcome {
+            result: Err(f.clone()),
+            view,
+        };
+        // Shown last and reported as `failed` with the same fields.
+        assert_eq!(failure(&o, &link), f);
+        assert_eq!(f.step, Step::VERIFY_CONTENT);
+        assert_eq!(f.category, FailureCategory::Local);
+        assert_eq!(f.code.as_str(), "internal");
+        assert!(!f.disk_written);
+        assert!(!f.message.contains('\u{7}'), "screen text is cleaned");
+        assert_eq!(link.states().last(), Some(&(1, ProgressEvent::Failed)));
+    }
+    assert!(link.fetches.is_empty());
+}

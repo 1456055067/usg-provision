@@ -6,8 +6,9 @@
 //! (`limits`, `image ...`, `pe ...`, `package ...`). See
 //! docs/ARCHITECTURE.md.
 //! M3 (plan WU-13): device codes, device sessions, jobs, boot services and
-//! boot stops (`code`, `session`, `job`, `boot-service`, `boot-stop`), and
-//! `boot-manifest create --pe-kit`.
+//! boot stops (`code`, `session`, `job`, `boot-service`, `boot-stop`),
+//! `boot-manifest create --pe-kit`, and `pe agent-config` (local: writes
+//! the pre-boot agent's public configuration).
 //!
 //! Process contract (plan section 3.6):
 //!
@@ -16,6 +17,7 @@
 //! | `usgp-cli` (no args) | FIPS check, usage on stdout, 0 (1 if FIPS is inactive) |
 //! | `usgp-cli --help` | usage on stdout, 0 |
 //! | `usgp-cli boot-manifest create\|verify ...` | 0 ok, 1 failure, 2 usage |
+//! | `usgp-cli pe agent-config ...` | 0 ok, 1 failure, 2 usage |
 //! | `usgp-cli limits\|image\|pe\|package ...` | 0 ok, 1 failure, 2 usage |
 //! | `usgp-cli code\|session\|job\|boot-service\|boot-stop ...` | 0 ok, 1 failure, 2 usage |
 //!
@@ -32,6 +34,7 @@
 mod client;
 mod args;
 mod boot_manifest;
+mod cmd_agent_config;
 mod cmd_boot_service;
 mod cmd_code;
 mod cmd_content;
@@ -74,6 +77,9 @@ usage: usgp-cli [-h | --help]
        usgp-cli pe import FILE --name NAME --arch A --kit-version V [CONN]
        usgp-cli pe list | view ID | delete ID [--yes] [CONN]
        usgp-cli pe download ID --out FILE [CONN]
+       usgp-cli pe agent-config --out DIR --server-url https://HOST[:PORT]
+                [--server-name NAME] --trust-anchors FILE --plan-key-pub FILE
+                --content-key-pub FILE [--network-wait-s N] [--connect-timeout-s N]
        usgp-cli package create --name N [--description D] --image ID --index N --pe ID [CONN]
        usgp-cli package edit ID [--name N] [--description D] [--image ID] [--index N] [--pe ID] [CONN]
        usgp-cli package list | view ID | clone ID --name N | delete ID [--yes] [CONN]
@@ -104,6 +110,9 @@ image declare         declare an edition's release (windows-11, windows-10,
 image|pe download     verify the signed manifest with --content-key-pub, then
                       each 8 MiB chunk, before writing FILE (never overwrites)
 package manifest      verify the signed package manifest, then write it to FILE
+pe agent-config       write a new directory DIR with the pre-boot agent's
+                      agent.toml, trust anchors and plan/content public keys
+                      (no secret; no server contact; never modifies a PE)
 delete                warns and asks for confirmation unless --yes is given
 create --pe-kit       also hash the kit files (the BCD is the operator's own
                       file, never generated), check that the boot program is
@@ -150,6 +159,7 @@ fn main() -> ExitCode {
         Command::Create(a) => with_audit(|| boot_manifest::run_create(&a)),
         Command::Verify(a) => with_audit(|| boot_manifest::run_verify(&a)),
         Command::CreateKit(a) => with_audit(|| run_create_kit(&a)),
+        Command::AgentConfig(a) => with_audit(|| cmd_agent_config::run(&a)),
         Command::Api(cmd) => ExitCode::from(run_api(*cmd)),
     }
 }

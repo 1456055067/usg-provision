@@ -32,6 +32,7 @@ use usgp_proto::{DisplayCode, JobId};
 use zeroize::Zeroizing;
 
 use crate::disks::{DiskEntry, Inventory, gb};
+use crate::host::PowerAction;
 
 /// Longest console line accepted; longer lines are refused whole.
 pub const MAX_LINE_BYTES: usize = 256;
@@ -61,6 +62,36 @@ pub trait Console {
     /// A fixed reason if echo cannot be turned off; the caller must then
     /// not ask for a code.
     fn set_echo(&mut self, on: bool) -> Result<(), &'static str>;
+}
+
+/// The longest the agent waits for the person at any screen, including
+/// the authorisation wait and every persistent error screen. When it runs
+/// out, or the console input ends (EOF), the agent takes the safe choice:
+/// before the wipe confirmation it cancels; at a persistent screen it ends
+/// with no restart or shutdown. It never wipes and never restarts on its
+/// own. (Design value.)
+pub const MAX_IDLE_WAIT: Duration = Duration::from_secs(2 * 3600);
+
+/// Waits for the person's `R` (restart) or `S` (shut down) at a persistent
+/// screen, at most `limit` in all (REQ-JOB-005 item 4: the screen stays
+/// until the person acts). `None` on EOF or when the limit runs out: no
+/// power action.
+pub fn wait_for_choice(console: &mut dyn Console, limit: Duration) -> Option<PowerAction> {
+    let t0 = std::time::Instant::now();
+    loop {
+        let left = limit.saturating_sub(t0.elapsed());
+        if left.is_zero() {
+            return None;
+        }
+        match console.line(left) {
+            Ok(Some(l)) => match Input::parse(&l) {
+                Input::Restart => return Some(PowerAction::Restart),
+                Input::Shutdown => return Some(PowerAction::Shutdown),
+                _ => {}
+            },
+            Ok(None) | Err(ConsoleClosed) => return None,
+        }
+    }
 }
 
 /// What a line means.

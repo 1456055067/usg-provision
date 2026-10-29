@@ -2,9 +2,9 @@
 //! decision 0018 item 6). Lab MT-2 records its output in Windows PE; the
 //! Windows CI job runs it on the runner.
 //!
-//! It passes (exit 0) only if the module reports FIPS mode, a SHA-256
-//! known answer matches, and the DRBG returns bytes. It needs no
-//! configuration and no network.
+//! It prints the module's version and passes (exit 0) only if the module
+//! reports FIPS mode, a SHA-256 known answer matches, and the DRBG returns
+//! bytes. It needs no configuration and no network.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-13 (Cryptographic Protection), SI-6 (Security and
@@ -45,8 +45,14 @@ pub fn run(crypto: &dyn CryptoProvider) -> SelfTest {
             Err(e) => format!("NOT ACTIVE ({e})"),
         }
     );
-    // POAM: the FIPS module's version is not exposed by usgp-crypto; the
-    // lab record (MT-2) takes it from the build's pinned module version.
+    // The module's identification for the lab record (MT-2). Informational:
+    // it does not decide the result ("version unavailable" if the build
+    // does not report a FIPS module version).
+    let _ = writeln!(
+        report,
+        "fips module: {}",
+        usgp_crypto::fips_module_version()
+    );
     let kat = crypto.sha256(b"abc").to_hex() == ABC_SHA256;
     let _ = writeln!(
         report,
@@ -70,5 +76,6 @@ mod tests {
         let t = run(usgp_crypto::provider());
         assert!(t.passed, "{}", t.report);
         assert!(t.report.contains("fips mode: active"));
+        assert!(t.report.contains("fips module: AWS-LC "), "{}", t.report);
     }
 }

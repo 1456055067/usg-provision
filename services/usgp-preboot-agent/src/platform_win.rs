@@ -600,6 +600,16 @@ impl WinVolumes {
                 "formatted file system",
             ));
         }
+        // The label is read back too (topic 23 §15). Compared ignoring
+        // ASCII case: whether a FAT32 label keeps its letter case is not in
+        // the standards summaries, and the labels are fixed ASCII words.
+        let label = volume::label(&vol).map_err(|e| perr(win_kind(&e), "read the volume label"))?;
+        if !label.eq_ignore_ascii_case(spec.label) {
+            return Err(perr(
+                PlatformErrorKind::IdentityMismatch,
+                "formatted volume label",
+            ));
+        }
         let again =
             volume::disk_extents(&vol).map_err(|e| perr(win_kind(&e), "read volume extents"))?;
         if !matches!(again.as_slice(), [x] if x.disk_number == n
@@ -641,8 +651,7 @@ impl WinVolumes {
                 FileSystem::Fat32 => FileSystem::Fat32,
                 _ => FileSystem::Ntfs,
             },
-            // POAM: usgp-winapi has no volume-label query; the label is
-            // the one DiskPart was told to set, not one read back.
+            // Read back and checked above; reported in the plan's spelling.
             label: spec.label.to_owned(),
             locator,
             root,

@@ -32,7 +32,7 @@ use usgp_deploy::SystemClock;
 
 use crate::client::{ApiFailure, DeviceClient};
 use crate::config::AgentConfig;
-use crate::host::Host;
+use crate::host::{Host, PowerAction};
 use crate::http::{HttpClient, HttpLimits};
 use crate::session::{Agent, Ending, Outcome};
 use crate::ui::{self, Console};
@@ -120,8 +120,13 @@ pub fn run(
     agent.run(&facts)
 }
 
-/// A persistent screen before any session exists.
-fn stop_early(console: &mut dyn Console, title: &str, line: &str, outcome: Outcome) -> Ending {
+/// A start-up refusal after the configuration loaded (FIPS, device facts,
+/// network, trust anchors, server unreachable): a persistent error screen
+/// that stays until the person restarts or shuts down (REQ-PE-014,
+/// REQ-PE-015, REQ-JOB-005). The wait is bounded by [`ui::MAX_IDLE_WAIT`];
+/// EOF or the limit ends it with no power action. Nothing is ever written.
+#[must_use]
+pub fn refuse(console: &mut dyn Console, title: &str, line: &str) -> Option<PowerAction> {
     console.show(&ui::stop_screen(
         title,
         &[
@@ -129,17 +134,11 @@ fn stop_early(console: &mut dyn Console, title: &str, line: &str, outcome: Outco
             "Nothing was written to any disk.".to_owned(),
         ],
     ));
-    let action = loop {
-        match console.line(Duration::from_secs(3600)) {
-            Ok(Some(l)) => match ui::Input::parse(&l) {
-                ui::Input::Restart => break Some(crate::host::PowerAction::Restart),
-                ui::Input::Shutdown => break Some(crate::host::PowerAction::Shutdown),
-                _ => {}
-            },
-            Ok(None) => {}
-            Err(_) => break None,
-        }
-    };
+    ui::wait_for_choice(console, ui::MAX_IDLE_WAIT)
+}
+
+fn stop_early(console: &mut dyn Console, title: &str, line: &str, outcome: Outcome) -> Ending {
+    let action = refuse(console, title, line);
     Ending { outcome, action }
 }
 

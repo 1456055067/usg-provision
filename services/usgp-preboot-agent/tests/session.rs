@@ -272,12 +272,57 @@ fn approval_without_any_typing() {
         SessionState::Authorised,
     ]);
     let mut h = host("approve");
-    let (end, screens, _) = run(&mut api, &mut h, &[]);
-    // Approved, then the console closed at the package list: cancelled.
+    let facts = {
+        use usgp_preboot_agent::host::Host;
+        h.facts().unwrap()
+    };
+    let (mut con, mut drv, _) = console();
+    let keys = keys();
+    let clock = usgp_deploy::SystemClock::new();
+    let end = std::thread::scope(|sc| {
+        let agent = sc.spawn(|| {
+            Agent {
+                api: &mut api,
+                host: &mut h,
+                console: &mut con,
+                keys: &keys,
+                crypto: usgp_crypto::provider(),
+                clock: &clock,
+            }
+            .run(&facts)
+        });
+        // Nothing is typed while waiting: the approval arrives by polling.
+        drv.wait_for("Display code:   ABC-DEF");
+        drv.wait_for("Choose what to install");
+        drv.send("c");
+        drv.wait_for("Cancelled");
+        drv.send("s");
+        agent.join().unwrap()
+    });
     assert_eq!(end.outcome, Outcome::Cancelled);
+    assert_eq!(end.action, Some(PowerAction::Shutdown));
     assert_eq!(api.calls, ["open", "packages", "cancel"]);
-    assert!(screens.contains("Display code:   ABC-DEF"));
-    assert!(screens.contains("Choose what to install"));
+}
+
+#[test]
+fn eof_while_waiting_for_authorisation_cancels() {
+    let mut api = fake();
+    let mut h = host("eofauth");
+    let (end, screens, _) = run(&mut api, &mut h, &[]);
+    assert_eq!(end.outcome, Outcome::Cancelled);
+    assert_eq!(end.action, None, "EOF never restarts or shuts down");
+    assert_eq!(api.calls, ["open", "cancel"]);
+    assert!(screens.contains("Nothing was written to any disk."));
+}
+
+#[test]
+fn eof_at_a_persistent_screen_ends_with_no_power_action() {
+    let mut api = fake();
+    api.packages.clear();
+    let mut h = host("eofstop");
+    let (end, _, _) = run(&mut api, &mut h, &["0123456789"]);
+    assert_eq!(end.outcome, Outcome::Stopped(StopReason::NothingToOffer));
+    assert_eq!(end.action, None);
 }
 
 #[test]

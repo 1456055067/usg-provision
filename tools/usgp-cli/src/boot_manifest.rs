@@ -74,9 +74,7 @@ use usgp_proto::{BootFileName, BootFileNameError, BootManifest, ManifestEntry, M
 
 use crate::args::{CreateArgs, KitCreateArgs, VerifyArgs};
 use crate::display::esc;
-use crate::pe_kit::{
-    self, KitManifestError, KitShapeError, PeCoffError, PeKit, check_boot_program, memory_required,
-};
+use crate::pe_kit::{PeCoffError, PeKit, PeKitError, check_boot_program, memory_required};
 
 /// Component name in audit events.
 pub const COMPONENT: &str = "usgp-cli";
@@ -169,7 +167,7 @@ pub enum CliError {
     },
     /// The `[pe_kit]` section breaks a shape rule.
     #[error(transparent)]
-    KitShape(#[from] KitShapeError),
+    KitShape(#[from] PeKitError),
     /// A `--boot-program`, `--bcd`, `--sdi`, `--wim` or `--font` value is
     /// not a valid boot file name.
     #[error("--{role} ({shown}) is not a valid boot file name: {reason}")]
@@ -207,15 +205,6 @@ pub enum CliError {
         /// Why.
         reason: String,
     },
-}
-
-impl From<KitManifestError> for CliError {
-    fn from(e: KitManifestError) -> Self {
-        match e {
-            KitManifestError::Manifest(m) => Self::Manifest(m),
-            KitManifestError::Shape(s) => Self::KitShape(s),
-        }
-    }
 }
 
 impl CliError {
@@ -577,7 +566,7 @@ pub fn create_kit(args: &KitCreateArgs, lookup: &mut PeLookup<'_>) -> Result<Kit
         // Replaced by the WIM's digest once it is hashed.
         pe_content_sha256: usgp_crypto::sha256(b""),
     };
-    kit.check_shape()?;
+    kit.validate()?;
     if fs::symlink_metadata(&c.out).is_ok() {
         return Err(CliError::OutputExists(c.out.clone()));
     }
@@ -615,8 +604,8 @@ pub fn create_kit(args: &KitCreateArgs, lookup: &mut PeLookup<'_>) -> Result<Kit
     }
     let (wim_sha256, wim_size) = wim.ok_or(CliError::KitMismatch(1))?;
     kit.pe_content_sha256 = wim_sha256;
-    let manifest = BootManifest::new(files)?;
-    let problems = pe_kit::assess(&kit, &manifest);
+    let manifest = BootManifest::new(files)?.with_pe_kit(kit.clone())?;
+    let problems = kit.assess(&manifest, None);
     if !problems.is_empty() {
         return Err(CliError::KitMismatch(problems.len()));
     }
@@ -624,13 +613,11 @@ pub fn create_kit(args: &KitCreateArgs, lookup: &mut PeLookup<'_>) -> Result<Kit
     let view = lookup(pe_id).map_err(CliError::PeLookup)?;
     check_pe(pe_id, &view, &wim_sha256, wim_size)?;
 
-    let text = pe_kit::to_toml(&manifest, &kit);
+    let text = manifest.to_toml();
     // Self-check: the text reads back as exactly what was built, through
-    // the same rules the relay applies.
-    match pe_kit::parse_manifest(&text) {
-        Ok((m, Some(k))) if m == manifest && k == kit => {}
-        Ok(_) => return Err(CliError::KitMismatch(1)),
-        Err(e) => return Err(e.into()),
+    // the parser the relay uses.
+    if BootManifest::from_toml(&text)? != manifest {
+        return Err(CliError::KitMismatch(1));
     }
     let manifest_sha256 = usgp_crypto::sha256(text.as_bytes());
     write_new(&c.out, text.as_bytes())?;
@@ -686,14 +673,17 @@ pub fn verify(args: &VerifyArgs) -> Result<Verified, CliError> {
     let limit = u64::try_from(MAX_MANIFEST_BYTES).unwrap_or(u64::MAX);
     let text = read_bounded(&args.manifest, limit)?;
     let manifest_sha256 = usgp_crypto::sha256(text.as_bytes());
-    let (manifest, kit) = pe_kit::parse_manifest(&text)?;
+    let manifest = BootManifest::from_toml(&text)?;
     ensure_root(&args.root)?;
     let entries: Vec<_> = manifest
         .files
         .iter()
         .map(|entry| (entry.name.clone(), check_entry(&args.root, entry)))
         .collect();
-    let kit_problems = kit.map(|k| kit_problems(&args.root, &k, &manifest, &entries));
+    let kit_problems = manifest
+        .pe_kit
+        .as_ref()
+        .map(|k| kit_problems(&args.root, k, &manifest, &entries));
     Ok(Verified {
         manifest_sha256,
         entries,
@@ -702,7 +692,7 @@ pub fn verify(args: &VerifyArgs) -> Result<Verified, CliError> {
 }
 
 /// The kit checks of `verify`: completeness and the WIM binding
-/// ([`pe_kit::assess`]), then the boot program's architecture if its file
+/// ([`PeKit::assess`]), then the boot program's architecture if its file
 /// matched the manifest (a file that did not is already a failure).
 fn kit_problems(
     root: &Path,
@@ -710,7 +700,8 @@ fn kit_problems(
     manifest: &BootManifest,
     entries: &[(BootFileName, Result<(), EntryFailure>)],
 ) -> Vec<String> {
-    let mut out: Vec<String> = pe_kit::assess(kit, manifest)
+    let mut out: Vec<String> = kit
+        .assess(manifest, None)
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -762,7 +753,7 @@ fn env_user_claimed() -> String {
 
 /// "Who" fields for a cli audit record: kernel uids plus the claimed
 /// environment user name.
-fn who() -> Vec<(&'static str, String)> {
+pub(crate) fn who() -> Vec<(&'static str, String)> {
     let uid = |v: Option<u32>| v.map_or_else(|| "unknown".to_owned(), |u| u.to_string());
     vec![
         (
@@ -778,7 +769,8 @@ fn join_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
     names.collect::<Vec<_>>().join(",")
 }
 
-fn audit(event: &str, outcome: Outcome, detail: &[(&str, String)]) {
+/// Emits one cli audit event.
+pub(crate) fn audit(event: &str, outcome: Outcome, detail: &[(&str, String)]) {
     emit(&AuditEvent {
         detail,
         ..AuditEvent::new(event, outcome, COMPONENT)
@@ -1250,8 +1242,8 @@ mod tests {
     // --pe-kit (M3 plan WU-13)
     // -----------------------------------------------------------------
 
-    use crate::pe_kit::tests::{pe_header, x64_efi};
-    use crate::pe_kit::{MACHINE_X64, MAGIC_PE32_PLUS};
+    use usgp_proto::pe_coff::sample::{header as pe_header, uefi_x64 as x64_efi};
+    use usgp_proto::pe_coff::{MACHINE_X64, MAGIC_PE32_PLUS};
 
     const PE_ID: &str = "0b7c2f4e-9a1d-4c3b-8e6f-1a2b3c4d5e6f";
     const WIM: &[u8] = b"pretend boot.wim bytes";
@@ -1311,8 +1303,8 @@ mod tests {
             k.created.manifest_sha256,
             usgp_crypto::sha256(text.as_bytes())
         );
-        let (m, kit) = pe_kit::parse_manifest(&text).unwrap();
-        let kit = kit.unwrap();
+        let m = BootManifest::from_toml(&text).unwrap();
+        let kit = m.pe_kit.clone().unwrap();
         assert_eq!(m.files.len(), 5);
         assert_eq!(kit.pe_content_sha256, usgp_crypto::sha256(WIM));
         assert_eq!(kit.fonts.len(), 1);
@@ -1501,14 +1493,14 @@ mod tests {
         let mut a = kit_args(&t, &["Boot/BCD"]);
         assert!(matches!(
             refused(&a, ready_pe(), 0),
-            CliError::KitShape(KitShapeError::DuplicateRole)
+            CliError::KitShape(PeKitError::DuplicateRole)
         ));
         a.fonts = (0..=32)
             .map(|i| OsString::from(format!("f{i}.ttf")))
             .collect();
         assert!(matches!(
             refused(&a, ready_pe(), 0),
-            CliError::KitShape(KitShapeError::TooManyFonts)
+            CliError::KitShape(PeKitError::TooManyFonts)
         ));
         let mut a = kit_args(&t, &[]);
         a.bcd = "../BCD".into();
@@ -1551,7 +1543,7 @@ mod tests {
             pe_content_sha256: usgp_crypto::sha256(b"another wim"),
         };
         let path = t.0.join("kit.toml");
-        fs::write(&path, pe_kit::to_toml(&m, &kit)).unwrap();
+        fs::write(&path, m.with_pe_kit(kit).unwrap().to_toml()).unwrap();
         let v = verify(&VerifyArgs {
             root: t.root(),
             manifest: path,

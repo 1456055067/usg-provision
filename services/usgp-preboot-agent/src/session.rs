@@ -48,7 +48,6 @@ use usgp_proto::device::{
     EndSessionV1, FirmwareKind, SCHEMA_V1, SessionOpenedV1, SessionState, WipeConfirmation,
 };
 use usgp_proto::job_plan::{JobPlanV1, PlanExpectation};
-use usgp_proto::progress::{FailureCategory, FailureV1, ProgressEvent, ProgressV1, Step};
 use usgp_proto::{AgentNonce, AgentVersion, AuthCode, DiskToken, JobId, MacList, codes};
 
 use crate::client::{ApiFailure, DeviceApi};
@@ -57,8 +56,7 @@ use crate::host::{Host, HostFacts, PowerAction, WaitBudget};
 use crate::link::ApiLink;
 use crate::ui::{self, Console, ConsoleClosed, ConsoleView, Input};
 
-/// How long one wait for a choice lasts before it is simply repeated.
-const CHOICE_WAIT: Duration = Duration::from_secs(3600);
+pub use crate::ui::MAX_IDLE_WAIT;
 /// Poll interval bounds (the server suggests `poll_ms`).
 const POLL_MS: (u64, u64) = (500, 10_000);
 /// Design caps on the job's own I/O waits (below the plan's limits).
@@ -174,19 +172,10 @@ impl Agent<'_> {
         Ending { outcome, action }
     }
 
-    /// Waits for `R` or `S`. `None` if the console closed.
+    /// Waits for `R` or `S`, at most [`MAX_IDLE_WAIT`] in all. `None` if
+    /// the console closed (EOF) or the wait ran out: no power action.
     fn wait_for_person(&mut self) -> Option<PowerAction> {
-        loop {
-            match self.console.line(CHOICE_WAIT) {
-                Ok(Some(l)) => match Input::parse(&l) {
-                    Input::Restart => return Some(PowerAction::Restart),
-                    Input::Shutdown => return Some(PowerAction::Shutdown),
-                    _ => {}
-                },
-                Ok(None) => {}
-                Err(ConsoleClosed) => return None,
-            }
-        }
+        ui::wait_for_choice(self.console, MAX_IDLE_WAIT)
     }
 
     /// Runs the session with an already reachable server.
@@ -360,7 +349,7 @@ impl Agent<'_> {
              device."
                 .to_owned()
         });
-        let mut console_open = true;
+        let started = std::time::Instant::now();
         loop {
             match self.api.status() {
                 Ok(st) => match st.state {
@@ -385,18 +374,14 @@ impl Agent<'_> {
                 service.as_deref(),
                 note.as_deref(),
             ));
-            if !console_open {
-                std::thread::sleep(poll);
-                continue;
+            if started.elapsed() >= MAX_IDLE_WAIT {
+                return Err(self.cancel());
             }
             let line = match self.console.line(poll) {
                 Ok(Some(l)) => l,
                 Ok(None) => continue,
-                Err(ConsoleClosed) => {
-                    // Approval can still arrive.
-                    console_open = false;
-                    continue;
-                }
+                // EOF: nobody can type a code or act on a later screen.
+                Err(ConsoleClosed) => return Err(self.cancel()),
             };
             // The newline was not echoed.
             match Input::parse(&line) {
@@ -469,10 +454,10 @@ impl Agent<'_> {
             loop {
                 self.console
                     .show(&ui::packages_screen(&packages, note.as_deref()));
-                let line = match self.console.line(CHOICE_WAIT) {
+                // Idle past the limit, or EOF: cancel (nothing written).
+                let line = match self.console.line(MAX_IDLE_WAIT) {
                     Ok(Some(l)) => l,
-                    Ok(None) => continue,
-                    Err(ConsoleClosed) => return Err(self.cancel()),
+                    Ok(None) | Err(ConsoleClosed) => return Err(self.cancel()),
                 };
                 match Input::parse(&line) {
                     Input::Cancel => return Err(self.cancel()),
@@ -578,10 +563,10 @@ impl Agent<'_> {
         loop {
             self.console
                 .show(&ui::disks_screen(pkg.name.as_str(), &inv, note.as_deref()));
-            let line = match self.console.line(CHOICE_WAIT) {
+            // Idle past the limit, or EOF: cancel (nothing written).
+            let line = match self.console.line(MAX_IDLE_WAIT) {
                 Ok(Some(l)) => l,
-                Ok(None) => continue,
-                Err(ConsoleClosed) => return Err(self.cancel()),
+                Ok(None) | Err(ConsoleClosed) => return Err(self.cancel()),
             };
             match Input::parse(&line) {
                 Input::Cancel => return Err(self.cancel()),
@@ -614,10 +599,10 @@ impl Agent<'_> {
     fn confirm_wipe(&mut self, pkg: &DevicePackageV1, e: &DiskEntry) -> Result<Flow<()>, Ending> {
         loop {
             self.console.show(&ui::wipe_screen(pkg, e));
-            let line = match self.console.line(CHOICE_WAIT) {
+            // Idle past the limit, or EOF: cancel (nothing written).
+            let line = match self.console.line(MAX_IDLE_WAIT) {
                 Ok(Some(l)) => l,
-                Ok(None) => continue,
-                Err(ConsoleClosed) => return Err(self.cancel()),
+                Ok(None) | Err(ConsoleClosed) => return Err(self.cancel()),
             };
             match Input::parse(&line) {
                 Input::Wipe => return Ok(Flow::Next(())),
@@ -722,11 +707,23 @@ impl Agent<'_> {
         });
         let job_id = confirmed.job_id;
         let result = match self.host.platform(e, budget) {
-            Err(err) => Err(format!("The disk platform could not be prepared: {err}")),
+            // The engine could not start: it reports its own step-1
+            // failure (local, internal, nothing written) and shows it.
+            Err(err) => {
+                let mut link = ApiLink::new(&mut *self.api);
+                let mut view = ConsoleView::new(&mut *self.console);
+                Err(engine.fail_before_start(
+                    job_id,
+                    verified.as_ref(),
+                    &format!("The disk platform could not be prepared: {err}"),
+                    &mut link,
+                    &mut view,
+                ))
+            }
             Ok(mut platform) => {
                 let mut link = ApiLink::new(&mut *self.api);
                 let mut view = ConsoleView::new(&mut *self.console);
-                Ok(match &verified {
+                match &verified {
                     Some(v) => engine.run(v, &mut *platform, &mut link, &mut view),
                     None => engine.verify_and_run(
                         &SignedJob {
@@ -739,25 +736,7 @@ impl Agent<'_> {
                         &mut link,
                         &mut view,
                     ),
-                })
-            }
-        };
-        let result = match result {
-            Ok(r) => r,
-            Err(why) => {
-                report_local_failure(&mut *self.api, job_id);
-                return self.stop(
-                    "INSTALL FAILED",
-                    &[
-                        "Failed step: 1 - Download and verify the content".to_owned(),
-                        why,
-                        "Nothing was written to any disk.".to_owned(),
-                    ],
-                    Outcome::JobFailed {
-                        written: false,
-                        code: codes::INTERNAL.as_str().to_owned(),
-                    },
-                );
+                }
             }
         };
         match result {
@@ -820,28 +799,4 @@ pub fn budgets(p: &JobPlanV1) -> (Duration, Duration, WaitBudget) {
             volume_arrival,
         },
     )
-}
-
-/// Reports a step-1 local failure when the engine could not be started
-/// (best effort; the device shows the failure either way).
-fn report_local_failure(api: &mut dyn DeviceApi, job: JobId) {
-    let failure = FailureV1 {
-        step: Step::VERIFY_CONTENT,
-        category: FailureCategory::Local,
-        code: codes::INTERNAL,
-        files: Vec::new(),
-        count: 0,
-        attempts: 1,
-    };
-    let report = ProgressV1 {
-        seq: 1,
-        step: Step::VERIFY_CONTENT,
-        event: ProgressEvent::Failed,
-        bytes_done: None,
-        bytes_total: None,
-        item: None,
-        layout: None,
-        failure: Some(failure),
-    };
-    let _ = api.report(job, &report);
 }

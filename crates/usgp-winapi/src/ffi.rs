@@ -359,6 +359,36 @@ pub(crate) fn volume_file_system_name(root: &[u16]) -> io::Result<Vec<u16>> {
     until_nul(&fs_name)
 }
 
+/// The label of the volume whose root is `root` (UTF-16, without NUL;
+/// empty if the volume has none). Topic 23 §15.
+pub(crate) fn volume_label(root: &[u16]) -> io::Result<Vec<u16>> {
+    check_wide(root)?;
+    let units = usize::try_from(MAX_PATH).unwrap_or(260) + 1;
+    let mut label = vec![0u16; units];
+    let cap = len_u32(units)?;
+    // SAFETY: `root` is live and NUL-terminated (checked above). `label`
+    // is a live, writable buffer of `cap` units (MAX_PATH + 1, the most
+    // the function writes, §15). The serial, component and flags out
+    // parameters are null and the file-system name buffer is null with
+    // size 0, all of which the function accepts as "not requested".
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            label.as_mut_ptr(),
+            cap,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    until_nul(&label)
+}
+
 // ---------------------------------------------------------------------------
 // Privileges (spec §10)
 // ---------------------------------------------------------------------------

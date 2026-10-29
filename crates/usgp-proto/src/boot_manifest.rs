@@ -13,6 +13,10 @@
 //! sha256 = "<64 lowercase hex>"
 //! ```
 //!
+//! M3: an optional `[pe_kit]` section names the Windows PE network-boot
+//! files among the published files ([`crate::pe_kit`]). A manifest without
+//! it is exactly the format above.
+//!
 //! Parsing is strict: unknown keys are rejected at every level, and
 //! [`BootManifest::validate`] runs on every parse.
 //!
@@ -43,6 +47,7 @@ use usgp_common::Sha256Digest;
 use usgp_common::config::{ConfigError, parse_toml};
 
 use crate::boot_file_name::BootFileName;
+use crate::pe_kit::{PeKitError, PeKitV1};
 
 /// The only supported `schema_version`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -100,6 +105,9 @@ pub struct BootManifest {
     /// Published files (TOML `[[file]]` tables), in manifest order.
     #[serde(rename = "file", default)]
     pub files: Vec<ManifestEntry>,
+    /// The optional `[pe_kit]` section (M3; [`crate::pe_kit`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pe_kit: Option<PeKitV1>,
 }
 
 /// Manifest parse or validation errors.
@@ -133,10 +141,14 @@ pub enum ManifestError {
         /// Declared size.
         size: u64,
     },
+    /// The `[pe_kit]` section breaks a shape rule.
+    #[error(transparent)]
+    PeKit(#[from] PeKitError),
 }
 
 impl BootManifest {
-    /// A validated version-1 SHA-256 manifest of `files`.
+    /// A validated version-1 SHA-256 manifest of `files`, without a
+    /// `[pe_kit]` section.
     ///
     /// # Errors
     ///
@@ -146,9 +158,22 @@ impl BootManifest {
             schema_version: SCHEMA_VERSION,
             algorithm: DigestName::Sha256,
             files,
+            pe_kit: None,
         };
         m.validate()?;
         Ok(m)
+    }
+
+    /// This manifest with `kit` as its `[pe_kit]` section, validated.
+    /// Completeness ([`PeKitV1::assess`]) is not a validation rule.
+    ///
+    /// # Errors
+    ///
+    /// As [`BootManifest::validate`].
+    pub fn with_pe_kit(mut self, kit: PeKitV1) -> Result<Self, ManifestError> {
+        self.pe_kit = Some(kit);
+        self.validate()?;
+        Ok(self)
     }
 
     /// Parses and validates manifest text.
@@ -168,8 +193,9 @@ impl BootManifest {
     }
 
     /// Checks the manifest rules: schema version 1, 1 to 256 entries,
-    /// unique names, and each size at most 4 GiB. (The algorithm and name
-    /// rules are enforced by the types.)
+    /// unique names, each size at most 4 GiB, and the `[pe_kit]` shape
+    /// rules ([`PeKitV1::validate`]) if the section is present. (The
+    /// algorithm, name and key rules are enforced by the types.)
     ///
     /// # Errors
     ///
@@ -196,11 +222,15 @@ impl BootManifest {
                 });
             }
         }
+        if let Some(kit) = &self.pe_kit {
+            kit.validate()?;
+        }
         Ok(())
     }
 
     /// Canonical TOML text (the format in the module docs, entries in
-    /// order). [`BootManifest::from_toml`] reads it back unchanged.
+    /// order, then `[pe_kit]` if present). [`BootManifest::from_toml`]
+    /// reads it back unchanged.
     ///
     /// Written by hand rather than through a serializer so the output is
     /// stable and has no failure path: names are restricted to characters
@@ -218,6 +248,9 @@ impl BootManifest {
                 entry.size,
                 entry.sha256.to_hex()
             );
+        }
+        if let Some(kit) = &self.pe_kit {
+            kit.write_toml(&mut out);
         }
         out
     }
@@ -396,6 +429,7 @@ sha256 = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"
             schema_version: 1,
             algorithm: DigestName::Sha256,
             files: over,
+            pe_kit: None,
         }
         .to_toml();
         assert!(matches!(
@@ -512,6 +546,7 @@ sha256 = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"
             schema_version: 2,
             algorithm: DigestName::Sha256,
             files: vec![entry("a", 1, D1)],
+            pe_kit: None,
         };
         assert!(matches!(
             m.validate(),

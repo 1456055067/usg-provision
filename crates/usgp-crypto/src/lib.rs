@@ -139,9 +139,60 @@ pub fn sha256(data: &[u8]) -> Sha256Digest {
     provider().sha256(data)
 }
 
+/// Identification of the validated cryptographic module, for self-test and
+/// start-up output (SC-13 evidence). Neither field says anything about
+/// certification status; [`fips_status`] is the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FipsModuleVersion {
+    /// Release of the linked AWS-LC library, read from the library at run
+    /// time (for example `"3.0.0"`).
+    pub library: &'static str,
+    /// The FIPS module version the build corresponds to, resolved from the
+    /// module's headers at build time. `None` when the build does not
+    /// correspond to a FIPS release branch, so the module version is
+    /// unavailable.
+    pub fips_module: Option<u32>,
+}
+
+impl std::fmt::Display for FipsModuleVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AWS-LC {}, FIPS module ", self.library)?;
+        match self.fips_module {
+            Some(v) => write!(f, "{v}"),
+            None => f.write_str("version unavailable"),
+        }
+    }
+}
+
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SC-13 (Cryptographic Protection) - the module in use is
+//   identified in self-test output.
+// - NIST 800-53: CM-8 (System Component Inventory)
+// - DECISION: docs/decisions/0001-fips-validated-crypto.md
+
+/// The validated module's version (decision 0001), as far as `aws-lc-rs`
+/// reports it.
+#[must_use]
+pub fn fips_module_version() -> FipsModuleVersion {
+    FipsModuleVersion {
+        library: aws_lc_rs::awslc_version(),
+        fips_module: aws_lc_rs::fips_version(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_version_reported() {
+        let v = fips_module_version();
+        assert!(!v.library.is_empty());
+        assert!(v.library.bytes().all(|b| b.is_ascii_graphic()), "{v}");
+        let shown = v.to_string();
+        assert!(shown.starts_with("AWS-LC "), "{shown}");
+        assert!(shown.contains("FIPS module "), "{shown}");
+    }
 
     #[test]
     fn fips_status_is_ok_on_build_host() {

@@ -8,7 +8,7 @@
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-10 (Information Input Validation) - names validated
 //   before use; CM-7 (Least Functionality) - query-only volume handles
-// - SPEC: specs/standards/windows-storage-firmware-api.md §7, §8
+// - SPEC: specs/standards/windows-storage-firmware-api.md §7, §8, §15
 // - DECISION: docs/decisions/0019-windows-api-binding.md
 
 use std::fs::{File, OpenOptions};
@@ -171,6 +171,14 @@ pub fn file_system_name(volume: &VolumeGuidPath) -> Result<String> {
     let units = ffi::volume_file_system_name(&wide(volume.as_str())?)
         .map_err(|e| WinApiError::os("get volume information", e))?;
     from_wide(&units).map_err(|e| WinApiError::malformed("file system name", e))
+}
+
+/// The label of `volume` (empty if it has none), used to check a format
+/// result (plan §1.2(c) step 5; topic 23 §15 `GetVolumeInformation`).
+pub fn label(volume: &VolumeGuidPath) -> Result<String> {
+    let units = ffi::volume_label(&wide(volume.as_str())?)
+        .map_err(|e| WinApiError::os("get volume label", e))?;
+    from_wide(&units).map_err(|e| WinApiError::malformed("volume label", e))
 }
 
 /// A volume locked for exclusive use and dismounted. The lock lasts while

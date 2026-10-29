@@ -33,6 +33,14 @@ env:
   AWS_LC_FIPS_SYS_USE_SYSTEM: "0"
   AWS_LC_SYS_USE_SYSTEM: "0"
   AWS_LC_FIPS_SYS_STATIC: "1"
+  # Smaller dev/test builds (CI run 40815815025 ran out of disk): no
+  # incremental state, and line tables only (backtraces keep file:line).
+  # The release profile is not changed, so shipped artifacts and their
+  # reproducibility are unaffected. When these change, bump the "v2" in the
+  # cache keys of every job that builds the dev profile, or a restored cache
+  # holds stale artifacts that are never replaced.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   gates:
@@ -42,18 +50,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Free runner disk (unused preinstalled toolchains; df -h before and after)
+        run: scripts/ci-free-disk.sh
       - uses: ./.github/actions/fips-toolchain
         with:
           extra-packages: ripgrep
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install && rustup show
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Restore and save are split so the save holds dependency artifacts
+      # only (scripts/ci-prune-target.sh, last steps). A warm target cuts
+      # this job from about 17 to 3 minutes (runs 40776984780, 40776468136).
+      - name: Restore the cargo cache (registry, git, dependency artifacts)
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: gates-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: gates-v2-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Clippy with the test-only features (lint only, never run here)
@@ -80,7 +95,10 @@ jobs:
             local log=$1 t line passed ignored
             shift
             for t in "$@"; do
-              line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }')"
+              # awk reads the log itself and strips the colour codes: no
+              # pipe, so its early exit cannot SIGPIPE a writer (run
+              # 40815815025). \033 in a regex is POSIX and mawk-supported.
+              line="$(awk -v t="tests/$t.rs" '{ gsub(/\033\[[0-9;]*m/, "") } $1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
               passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
               ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
               if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
@@ -153,6 +171,18 @@ jobs:
               exit 1
             fi
           done
+      - name: Keep only dependency artifacts for the cache
+        if: ${{ steps.cargo-cache.outputs.cache-hit != 'true' }}
+        run: scripts/ci-prune-target.sh debug
+      - name: Save the cargo cache
+        if: ${{ steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   fips-linkage:
     # Decision 0001 Amendment 1: shipped binaries link the FIPS module, do not
@@ -164,6 +194,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Free runner disk (unused preinstalled toolchains; df -h before and after)
+        run: scripts/ci-free-disk.sh
       - uses: ./.github/actions/fips-toolchain
       - name: Install Rust (product and testing toolchain files)
         run: |
@@ -251,7 +283,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-agent-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          key: windows-agent-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
       - name: FIPS module build toolchain (Windows; recorded, not yet pinned)
         # AWS-LC FIPS on Windows needs Go, Perl, CMake, Ninja, NASM, MSVC and
         # libclang (bindgen; no pre-generated Windows bindings ship).
@@ -411,6 +443,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Free runner disk (unused preinstalled toolchains; df -h before and after)
+        run: scripts/ci-free-disk.sh
       - name: Install Rust from the testing/*/rust-toolchain.toml files
         run: |
           set -euo pipefail
@@ -422,7 +456,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/testing
-          key: testing-${{ runner.os }}-${{ hashFiles('testing/*/Cargo.lock', 'testing/*/rust-toolchain.toml', 'testing/*/.cargo/config.toml') }}
+          key: testing-v2-${{ runner.os }}-${{ hashFiles('testing/*/Cargo.lock', 'testing/*/rust-toolchain.toml', 'testing/*/.cargo/config.toml') }}
       - name: uefi-payload format
         working-directory: testing/uefi-payload
         run: cargo fmt --all --check
@@ -593,16 +627,22 @@ jobs:
             exit 1
           fi
           echo "ok: tests run as $(id -un) (uid $uid)"
+      - name: Free runner disk (unused preinstalled toolchains; df -h before and after)
+        run: scripts/ci-free-disk.sh
       - uses: ./.github/actions/fips-toolchain
       - name: Install Rust from rust-toolchain.toml
         run: rustup toolchain install && rustup show
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Split restore and save, as in gates: the save holds dependency
+      # artifacts only (scripts/ci-prune-target.sh).
+      - name: Restore the cargo cache (registry, git, dependency artifacts)
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: pg-integration-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: pg-integration-v2-${{ runner.os }}-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: Build the pg-integration tests
         run: cargo test --workspace --locked --features pg-integration --no-run
       - name: Without the database variables the pg tests fail, not skip
@@ -661,7 +701,8 @@ jobs:
           bad=0
           for entry in $PG_REQUIRED_TESTS; do
             t="${entry#*:}"
-            line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk -v t="tests/$t.rs" '$1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }')"
+            # No pipe: see the note in the gates job (run 40815815025).
+            line="$(awk -v t="tests/$t.rs" '{ gsub(/\033\[[0-9;]*m/, "") } $1 == "Running" && $2 == t { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
             passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
             ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
             if [ -z "$line" ] || [ "${passed:-0}" -eq 0 ] || [ "${ignored:-1}" -ne 0 ]; then
@@ -681,6 +722,18 @@ jobs:
       - name: Remove the container and the test keys
         if: ${{ always() }}
         run: scripts/pg-test-setup.sh down
+      - name: Keep only dependency artifacts for the cache
+        if: ${{ steps.cargo-cache.outputs.cache-hit != 'true' }}
+        run: scripts/ci-prune-target.sh debug
+      - name: Save the cargo cache
+        if: ${{ steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   large-upload:
     # Plan WU-10 and section 10 "Large": the M2 exit-1 flow on a synthetic
@@ -722,6 +775,8 @@ jobs:
             echo "::error title=large-upload NOT RUN::services/usgp-server/tests/large_upload_pg.rs does not exist yet (plan WU-10). The large upload did not run. This is not a PASS."
             exit 1
           fi
+      - name: Free runner disk (unused preinstalled toolchains; df -h before and after)
+        run: scripts/ci-free-disk.sh
       - name: Free-disk preflight (too little space is NOT RUN, which fails)
         # Content root: the larger of the $RUNNER_TEMP file system and /mnt
         # (plan WU-10). Exported as TMPDIR, where the test puts its source
@@ -794,7 +849,8 @@ jobs:
           status=0
           cargo test -p usgp-server --release --locked --features pg-integration,large-tests \
             --test large_upload_pg -- --nocapture 2>&1 | tee "$log" || status=$?
-          line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk '$1 == "Running" && $2 == "tests/large_upload_pg.rs" { f = 1; next } f && /^test result:/ { print; exit }')"
+          # No pipe: see the note in the gates job (run 40815815025).
+          line="$(awk '{ gsub(/\033\[[0-9;]*m/, "") } $1 == "Running" && $2 == "tests/large_upload_pg.rs" { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
           passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
           ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
           {
@@ -899,7 +955,7 @@ jobs:
             ~/.cargo/bin/cargo-fuzz
             ~/.cargo/registry
             target/fuzz
-          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml', 'fuzz/.cargo/config.toml') }}
+          key: fuzz-v2-${{ runner.os }}-cargo-fuzz-0.13.2-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml', 'fuzz/.cargo/config.toml') }}
       - name: Install cargo-fuzz
         run: command -v cargo-fuzz || cargo install --locked cargo-fuzz@0.13.2
       - name: Check fuzz/Cargo.lock is up to date (REL-008)
@@ -993,7 +1049,7 @@ jobs:
             ~/.cargo/bin/cargo-fuzz
             ~/.cargo/registry
             target/fuzz
-          key: fuzz-${{ runner.os }}-cargo-fuzz-0.13.2-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml', 'fuzz/.cargo/config.toml') }}
+          key: fuzz-v2-${{ runner.os }}-cargo-fuzz-0.13.2-go${{ env.EXPECT_GO }}-cmake${{ env.EXPECT_CMAKE }}-clang${{ env.EXPECT_CLANG }}-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock', 'fuzz/rust-toolchain.toml', 'fuzz/.cargo/config.toml') }}
       - name: Install cargo-fuzz
         run: command -v cargo-fuzz || cargo install --locked cargo-fuzz@0.13.2
       - name: Fuzz ${{ matrix.target }} for ${{ matrix.secs }} s
@@ -1045,6 +1101,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Free runner disk (unused preinstalled toolchains; df -h before and after)
+        run: scripts/ci-free-disk.sh
       - uses: ./.github/actions/fips-toolchain
         with:
           extra-packages: qemu-system-x86 ovmf iproute2

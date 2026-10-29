@@ -461,7 +461,10 @@ jobs:
           # any dism-refused rows are printed by passing tests; they are
           # evidence for the OBS records, so they go to the summary.
           cargo test -p usgp-image --features dism-samples --locked -- --show-output 2>&1 | tee "$log" || status=$?
-          line="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | awk '$1 == "Running" && $2 == "tests/dism_samples.rs" { f = 1; next } f && /^test result:/ { print; exit }')"
+          # awk reads the log itself and strips the colour codes: no pipe,
+          # so its early exit cannot SIGPIPE a writer (ci run 40815815025).
+          # \033 in a regex is POSIX and mawk-supported.
+          line="$(awk '{ gsub(/\033\[[0-9;]*m/, "") } $1 == "Running" && $2 == "tests/dism_samples.rs" { f = 1; next } f && /^test result:/ { print; exit }' "$log")"
           passed="$(echo "$line" | sed -n 's/.* \([0-9][0-9]*\) passed;.*/\1/p')"
           ignored="$(echo "$line" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')"
           # BOOT-015: keep the S11/S12 observation results (observe and

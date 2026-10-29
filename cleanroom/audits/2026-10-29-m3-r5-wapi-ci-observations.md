@@ -27,3 +27,25 @@ Counts: BLOCKER 0, MAJOR 0, MINOR 3, INFO 0.
 - The OPEN-WAPI-11 and 16 notes and the CI-WAPI-1 row are marked AUDITED. All items stay OPEN. No contamination.
 
 Final verdict: PASS. Open findings: BLOCKER 0, MAJOR 0, MINOR 0.
+
+## Re-check 2 (2026-10-29): OPEN-WAPI-11 rewording
+Incident: the earlier pass accepted the claim "0x12 on a directory" based on the test input. The project's code (crates/usgp-winapi/src/fs.rs, SETTABLE_ATTRIBUTES) sends only the settable bits, so DIRECTORY never reached the call. The claim was not backed. The auditor's earlier confirmation of it is withdrawn.
+
+The new wording is accurate and matches the log: the attribute step stopped with InvalidInput, and the item, the value and the raw code were not logged. The CI-WAPI-1 row description is fixed to match.
+
+### CR-R5-004 (MINOR) Unbacked sentence
+"A later run logs these details." cites no run. Fix: delete it, or cite the run ID once that run exists.
+
+### CR-R5-005 (MINOR) Status overstates the evidence
+The note establishes nothing about how the call treats any bit. Decision: the OPEN-WAPI-11 status line should drop "observed" and read "Status: OPEN, not documented; the CI note is inconclusive". The CI-WAPI-1 "Used for" column ("all left OPEN, observed, not documented") should likewise stop calling WAPI-11 observed.
+
+Not marked AUDITED. The OPEN-WAPI-11 note and the CI-WAPI-1 row are pending CR-R5-004 and 005. The CI-WAPI-1 row's earlier AUDITED mark is withdrawn until then, because the row cites WAPI-11. OPEN-WAPI-9 and 16 stay AUDITED. Open findings: BLOCKER 0, MAJOR 0, MINOR 2.
+
+## Re-check 3 (2026-10-29): run 40962201434
+- The run's head SHA is eb81658 (the run itself concluded failure). Runner image windows-2025-vs2026, version 20261021.278.1, the same image as the earlier runs.
+- The windows-agent log line beginning "OPEN-WAPI-11 observed:" names "dir-with-stream" and shows stored 0x10, current 0x30, and dir true. It also shows the project rule chose Err("directory attributes cannot be cleared to none") and then SinkError SetAttributes InvalidInput. The stream on that directory is set up in winsink.rs at line 255.
+- This backs each claim in the OPEN-WAPI-11 note: ARCHIVE was set on the directory after the stream write, the refusal was the project's own, no OS attribute call was made, and nothing was observed about how the OS treats the bits.
+- The OPEN-WAPI-12 note claims nothing beyond the open question, and the status lines are now accurate.
+- CR-R5-004 and CR-R5-005 are resolved. The OPEN-WAPI-11 and 12 notes and the CI-WAPI-1 row are marked AUDITED. All items stay OPEN. No contamination.
+
+Final verdict: PASS. Open findings: BLOCKER 0, MAJOR 0, MINOR 0.

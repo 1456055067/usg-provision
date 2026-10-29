@@ -527,7 +527,8 @@ jobs:
           USGP_WIN_VHD: "1"
           VHD_TESTS: >-
             vhd_raw_io_update_and_volume_letters synthetic_wim_applies_to_a_vhd_volume
-            links_and_junctions_are_applied_byte_for_byte short_names_disabled_fail_by_name
+            links_and_junctions_are_applied_byte_for_byte short_names_set_with_8dot3_generation_disabled
+            probe_normal_on_directory_with_named_stream
         run: |
           $ErrorActionPreference = 'Stop'
           function Note([string]$s) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $s -Encoding utf8 }

@@ -367,18 +367,31 @@ Microsoft facts, not product behaviour.
 - **OPEN-WAPI-11** (SR-3c, AUDITED): whether `SetFileInformationByHandle` with
   basic information accepts, ignores or rejects attribute bits that
   Microsoft says are set by other means (compressed, sparse, reparse,
-  encrypted, directory, device, virtual) (§22). Status: OPEN, observed,
-  not documented.
+  encrypted, directory, device, virtual) (§22). Status: OPEN, not
+  documented; the CI note shows ARCHIVE set on a directory after a
+  named-stream write; the call's handling of bits not observed.
   - [observed, project CI run 40958577980] Applying a project-made
     synthetic WIM to an NTFS VHD stopped at the attribute-setting step
     with Rust error kind `InvalidInput`. The item, the value sent and
     the raw Win32 code were not logged, and the log does not show
     whether the error came from the OS or from the project's own
     refusal, so this note does not establish what the call does with
-    any particular bit. A later run logs these details. One OS build;
-    not documentation.
+    any particular bit. One OS build; not documentation.
+  - [observed, project CI run 40962201434] The same apply, now logged:
+    the image stored only DIRECTORY (0x10) for one directory; after the
+    project wrote a named data stream on it, the directory carried
+    0x30 (DIRECTORY plus ARCHIVE). The `InvalidInput` came from the
+    project's own refusal, not from the OS; no attribute call was made
+    for this item, so nothing about how the OS treats any bit was
+    observed. One OS build; not documentation. (Notes AUDITED
+    2026-10-29, CR-R5.)
 - **OPEN-WAPI-12** (SR-3c, AUDITED): whether `FILE_ATTRIBUTE_NORMAL` is valid on
   a directory (§22).
+  - [observed, project CI run 40962201434] The run above showed ARCHIVE
+    set on a directory after a named-stream write. How to clear ARCHIVE
+    on a directory (NORMAL, or another value) remains the open question
+    this raises; nothing was observed about it. (Note AUDITED
+    2026-10-29, CR-R5.)
 - **OPEN-WAPI-13** (SR-7, AUDITED): the handle access and open flags
   that `FSCTL_GET_REPARSE_POINT` needs, the largest output buffer, and
   its errors for a file without a reparse point or a buffer that is

@@ -91,8 +91,12 @@ pub const DROPPED_OTHER_MEANS: u32 = ATTR_SPARSE | ATTR_COMPRESSED;
 /// - None wanted, a file: send `NORMAL` (valid alone, clears the others).
 /// - None wanted, a directory that has none set: nothing to send (0 means
 ///   "unchanged"; `NORMAL` is never sent to a directory, OPEN-WAPI-12).
-/// - None wanted, a directory that has some set: `Err`, because a
-///   directory never gets `NORMAL` and 0 would leave them (fail closed).
+/// - None wanted, a directory whose only extra settable bit is
+///   `ARCHIVE` (a named-stream write sets it): nothing to send, the bit is
+///   tolerated ([`tolerated_dir_extra`]).
+/// - None wanted, a directory with any other settable bit set: `Err`,
+///   because a directory never gets `NORMAL` and 0 would leave them (fail
+///   closed).
 ///
 /// Never returns `Some(0)` and never a value with a non-settable bit.
 // COMPLIANCE MAPPING:
@@ -123,10 +127,32 @@ pub fn attributes_to_send(
     if !is_dir {
         return Ok(Some(ATTR_NORMAL));
     }
-    if current & SETTABLE == 0 {
+    if tolerated_dir_extra(current, stored, is_dir) == current & SETTABLE {
         Ok(None)
     } else {
         Err("directory attributes cannot be cleared to none")
+    }
+}
+
+/// The settable bits a read-back may find on an applied item beyond the
+/// stored ones: `ARCHIVE` on a directory whose stored settable bits are
+/// empty, when `current` has it set; zero in every other case. The only
+/// tolerated attribute difference (round 6, owner decision).
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-7, SI-10
+// - SPEC: specs/standards/windows-storage-firmware-api.md §22 (topic 23;
+//   OPEN-WAPI-11: CI run 40962201434 showed a named-stream write set
+//   ARCHIVE on a directory stored with no settable bit; OPEN-WAPI-12:
+//   `NORMAL` on a directory is not relied on, so it cannot be cleared)
+// POAM: directory ARCHIVE left set when the image stores no settable bits
+// and a named-stream write set it; OPEN-WAPI-12; harmless metadata
+// difference, content hash-verified
+#[must_use]
+pub fn tolerated_dir_extra(current: u32, stored: u32, is_dir: bool) -> u32 {
+    if is_dir && stored & SETTABLE == 0 {
+        current & ATTR_ARCHIVE
+    } else {
+        0
     }
 }
 
@@ -179,6 +205,23 @@ mod tests {
         assert_eq!(attributes_to_send(0x10, 0x10, true), Ok(None));
         assert_eq!(attributes_to_send(0x10, 0x90, true), Ok(None));
         assert!(attributes_to_send(0x12, 0x10, true).is_err());
+        // OPEN-WAPI-11 (CI run 40962201434): ARCHIVE alone set on a
+        // directory stored with no settable bit is tolerated, no call.
+        assert_eq!(attributes_to_send(0x30, 0x10, true), Ok(None));
+        assert_eq!(attributes_to_send(0x30, 0x90, true), Ok(None));
+        assert_eq!(attributes_to_send(0x30, 0x810, true), Ok(None));
+        // Any other extra bit, alone or with ARCHIVE, stays refused.
+        assert!(attributes_to_send(0x32, 0x10, true).is_err());
+        assert!(attributes_to_send(0x11, 0x10, true).is_err());
+        assert!(attributes_to_send(0x2010, 0x10, true).is_err());
+        // Files are unchanged: NORMAL whatever is set.
+        assert_eq!(attributes_to_send(0x20, 0, false), Ok(Some(0x80)));
+        // The tolerance applies only to that case.
+        assert_eq!(tolerated_dir_extra(0x30, 0x10, true), ATTR_ARCHIVE);
+        assert_eq!(tolerated_dir_extra(0x32, 0x10, true), ATTR_ARCHIVE);
+        assert_eq!(tolerated_dir_extra(0x10, 0x10, true), 0);
+        assert_eq!(tolerated_dir_extra(0x32, 0x12, true), 0);
+        assert_eq!(tolerated_dir_extra(0x20, 0, false), 0);
         // Refused: reserved, encrypted, unnamed bits.
         for bad in [
             ATTR_DEVICE,
@@ -202,7 +245,14 @@ mod tests {
     fn attribute_output_is_settable_and_never_zero() {
         let normal_ok = |v: u32, d: bool| !d && v == ATTR_NORMAL;
         for stored in 0u32..0x0004_0000 {
-            for (current, d) in [(0, false), (0x10, true), (0x12, true), (0x20, false)] {
+            for (current, d) in [
+                (0, false),
+                (0x10, true),
+                (0x12, true),
+                (0x30, true),
+                (0x32, true),
+                (0x20, false),
+            ] {
                 if let Ok(Some(v)) = attributes_to_send(current, stored, d) {
                     assert_ne!(v, 0);
                     assert!(
@@ -210,6 +260,46 @@ mod tests {
                         "{stored:#x} -> {v:#x}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Every directory `current` (settable bits and the directory bit)
+    /// against stored values with and without settable bits: no call only
+    /// when the stored settable bits are empty and the extra bits are none
+    /// or exactly `ARCHIVE`; files never get `None`.
+    #[test]
+    fn directory_tolerance_is_exactly_archive() {
+        let mut currents = Vec::new();
+        let mut c = 0u32;
+        loop {
+            currents.push(c | ATTR_DIRECTORY);
+            // Next subset of SETTABLE.
+            c = (c.wrapping_sub(SETTABLE)) & SETTABLE;
+            if c == 0 {
+                break;
+            }
+        }
+        for current in currents {
+            for stored in [
+                ATTR_DIRECTORY,
+                ATTR_DIRECTORY | ATTR_NORMAL,
+                0x810,
+                0x12,
+                0x30,
+            ] {
+                let r = attributes_to_send(current, stored, true);
+                let extra = current & SETTABLE & !stored;
+                if stored & SETTABLE != 0 {
+                    assert_eq!(r, Ok(Some(stored & SETTABLE)), "{current:#x} {stored:#x}");
+                } else if extra == 0 || extra == ATTR_ARCHIVE {
+                    assert_eq!(r, Ok(None), "{current:#x} {stored:#x}");
+                } else {
+                    assert!(r.is_err(), "{current:#x} {stored:#x}");
+                }
+                let file =
+                    attributes_to_send(current & !ATTR_DIRECTORY, stored & !ATTR_DIRECTORY, false);
+                assert_ne!(file, Ok(None), "{current:#x} {stored:#x}");
             }
         }
     }

@@ -46,8 +46,9 @@ use usgp_image::wim::metadata::{Attributes, FileTimes, attr};
 use usgp_image::wim::names::{ImagePath, ShortName, StreamName};
 use usgp_image::{Compression, NoProgress};
 use usgp_winapi::fs::SETTABLE_ATTRIBUTES;
+use usgp_winapi::fs::TreeWriter;
 use usgp_winapi::fsquery;
-use usgp_winapi::fsvalues::attributes_to_send;
+use usgp_winapi::fsvalues::{ATTR_ARCHIVE, attributes_to_send, tolerated_dir_extra};
 use usgp_winapi::manifest::{ManifestOptions, tree_rows};
 use usgp_winapi::manifest_text::{Field, Kind, Row};
 use usgp_winapi::paths::DriveLetter;
@@ -398,6 +399,14 @@ fn synthetic_wim_applies_to_a_vhd_volume() {
         assert_eq!(value(&r.sddl), dir_sddl, "{p}");
     }
     assert_eq!(row("links").attributes & SETTABLE_ATTRIBUTES, attr::HIDDEN);
+    // OPEN-WAPI-11 (round 6): the directory with a named stream stores no
+    // settable bit; ARCHIVE set by the stream write is the one tolerated
+    // difference (`tolerated_dir_extra`), and nothing else may differ.
+    for p in ["empty-dir", "dir-with-stream", "links\\sub"] {
+        let r = row(p);
+        let extra = tolerated_dir_extra(r.attributes, attr::DIRECTORY, true);
+        assert_eq!(r.attributes & SETTABLE_ATTRIBUTES & !extra, 0, "{p}");
+    }
     let l = row("links");
     assert_eq!([l.creation, l.last_access, l.last_write], T1);
     // One hard-link group of three names.
@@ -448,14 +457,23 @@ impl ApplySink for Traced<'_> {
         self.0.set_times(p, t)
     }
     fn set_attributes(&mut self, p: &ImagePath, a: Attributes) -> SinkResult {
+        use std::os::windows::fs::MetadataExt;
+        let rel: Vec<&str> = p.components().iter().map(|c| c.as_str()).collect();
+        let md = std::fs::symlink_metadata(self.1.join(rel.join("\\")));
+        let (current, is_dir) = md
+            .map(|m| (m.file_attributes(), m.is_dir()))
+            .unwrap_or((0, false));
         let r = self.0.set_attributes(p, a);
+        if r.is_ok() && tolerated_dir_extra(current, a.0, is_dir) == ATTR_ARCHIVE {
+            println!(
+                "OPEN-WAPI-11 tolerated: {:?}: stored {:#x}, current {current:#x}, dir \
+                 {is_dir}: ARCHIVE left set (a named-stream write set it; NORMAL is not \
+                 sent to a directory, OPEN-WAPI-12; POAM)",
+                rel.join("\\"),
+                a.0,
+            );
+        }
         if let Err(e) = &r {
-            use std::os::windows::fs::MetadataExt;
-            let rel: Vec<&str> = p.components().iter().map(|c| c.as_str()).collect();
-            let md = std::fs::symlink_metadata(self.1.join(rel.join("\\")));
-            let (current, is_dir) = md
-                .map(|m| (m.file_attributes(), m.is_dir()))
-                .unwrap_or((0, false));
             println!(
                 "OPEN-WAPI-11 observed: set attributes failed on {:?}: stored {:#x}, \
                  current {current:#x}, dir {is_dir}, rule chose {:?}, error {e:?}",
@@ -632,4 +650,35 @@ fn short_names_set_with_8dot3_generation_disabled() {
     );
     r.expect("apply succeeds with 8.3 generation disabled");
     assert!(vol.root().join("readme-long-name.txt").is_file());
+}
+
+/// CI probe (round 6, OPEN-WAPI-12): what Windows answers when `NORMAL`
+/// (0x80) is set on a directory whose named-stream write set `ARCHIVE`.
+/// Records only; passes whatever the answer. Product code never sends
+/// `NORMAL` to a directory (`fsvalues::attributes_to_send`).
+#[test]
+#[ignore = "needs administrator rights and USGP_WIN_VHD=1; run by the windows-agent CI job with --ignored"]
+fn probe_normal_on_directory_with_named_stream() {
+    use std::os::windows::fs::MetadataExt;
+    require_env();
+    let vol = VhdVolume::create("probe").expect("VHD volume");
+    let root = vol.root();
+    let dir = root.join("probe-dir");
+    std::fs::create_dir(&dir).expect("create directory");
+    std::fs::write(root.join("probe-dir:usgp-probe"), b"probe\n").expect("named stream");
+    let attrs = || {
+        std::fs::symlink_metadata(&dir)
+            .map(|m| format!("{:#x}", m.file_attributes()))
+            .unwrap_or_else(|e| format!("unreadable ({e})"))
+    };
+    let before = attrs();
+    let mut w = TreeWriter::new(&root).expect("writer");
+    let outcome = match w.probe_set_attributes_raw(&["probe-dir"], 0x80) {
+        Ok(Ok(())) => "Ok".to_owned(),
+        Ok(Err(e)) => format!("Err(raw OS code {:?}: {e})", e.raw_os_error()),
+        Err(e) => format!("Err(writer: {e})"),
+    };
+    drop(w);
+    let after = attrs();
+    println!("OPEN-WAPI-12 probe: before {before}, set NORMAL -> {outcome}, after {after}");
 }

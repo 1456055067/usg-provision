@@ -442,6 +442,29 @@ impl TreeWriter {
         }
     }
 
+    /// CI probe only (feature `sink-testkit`): sends `value` unmasked in a
+    /// basic-information set on `components` and returns the raw OS
+    /// result, so a test can record what Windows answers (e.g. `NORMAL`
+    /// on a directory, OPEN-WAPI-12). Product code never calls this and
+    /// never sends `NORMAL` to a directory.
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SA-11 (Developer Testing and Evaluation)
+    // - SPEC: specs/standards/windows-storage-firmware-api.md §22
+    //   (OPEN-WAPI-12 probe)
+    #[cfg(feature = "sink-testkit")]
+    pub fn probe_set_attributes_raw(
+        &mut self,
+        components: &[&str],
+        value: u32,
+    ) -> Result<io::Result<()>> {
+        Self::not_root(components)?;
+        let f = self.open_meta(
+            components,
+            FILE_WRITE_ATTRIBUTES | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
+        )?;
+        Ok(ffi::update_attributes(&f, |_| value))
+    }
+
     /// Closes any open data handle.
     pub fn finish(&mut self) {
         self.open = None;

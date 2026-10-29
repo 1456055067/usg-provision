@@ -355,14 +355,28 @@ Microsoft facts, not product behaviour.
   speaks only of a root directory with a trailing backslash (§25).
 - **OPEN-WAPI-9** (SR-3c, AUDITED): what `SetFileShortNameW` does, and
   which error it returns, on a volume where 8.3 short names are
-  disabled. Not stated (§21).
+  disabled. Not stated (§21). Status: OPEN, observed, not documented.
+  - [observed, project CI run 40958577980] On an NTFS volume of a
+    project-made VHD, after `fsutil 8dot3name set <vol> 1` reported
+    short-name generation disabled, `SetFileShortNameW` on a new file
+    succeeded. One OS build; not documentation. (Note AUDITED
+    2026-10-29, CR-R5.)
 - **OPEN-WAPI-10** (SR-3c, AUDITED): the handle access and error codes
   for `FSCTL_SET_REPARSE_POINT`. The Win32 page names only the
   privilege (§24).
 - **OPEN-WAPI-11** (SR-3c, AUDITED): whether `SetFileInformationByHandle` with
   basic information accepts, ignores or rejects attribute bits that
   Microsoft says are set by other means (compressed, sparse, reparse,
-  encrypted, directory, device, virtual) (§22).
+  encrypted, directory, device, virtual) (§22). Status: OPEN, observed,
+  not documented.
+  - [observed, project CI run 40958577980] Applying a project-made
+    synthetic WIM to an NTFS VHD stopped at the attribute-setting step
+    with Rust error kind `InvalidInput`. The item, the value sent and
+    the raw Win32 code were not logged, and the log does not show
+    whether the error came from the OS or from the project's own
+    refusal, so this note does not establish what the call does with
+    any particular bit. A later run logs these details. One OS build;
+    not documentation.
 - **OPEN-WAPI-12** (SR-3c, AUDITED): whether `FILE_ATTRIBUTE_NORMAL` is valid on
   a directory (§22).
 - **OPEN-WAPI-13** (SR-7, AUDITED): the handle access and open flags
@@ -380,7 +394,19 @@ Microsoft facts, not product behaviour.
 - **OPEN-WAPI-16** (SR-8, AUDITED): what `SetVolumeMountPoint` does, and
   which error it reports, when the volume already has a drive letter
   and a different drive letter is given; and whether a volume may hold
-  more than one drive letter (§29).
+  more than one drive letter (§29). Status: OPEN, observed, not
+  documented.
+  - [observed, project CI run 40928612312] On an attached project-made
+    VHD, `SetVolumeMountPoint` with a drive letter failed with error
+    87; the volume's existing letters were not logged.
+  - [observed, project CI run 40958577980] A new basic data GPT
+    partition got drive letter E: automatically. E: was then removed
+    with `DeleteVolumeMountPoint` [inferred from the project's own
+    procedure; not logged], and `SetVolumeMountPoint` with a different
+    letter succeeded. The EFI system partition and the recovery
+    partition (attributes 0x8000000000000001) got no automatic letter,
+    consistent with §29. (Notes AUDITED 2026-10-29, CR-R5.)
+  - Both runs: one OS build (Windows Server runner); not documentation.
 - **OPEN-WAPI-17** (SR-8, AUDITED): whether automatic mounting in Windows
   PE gives drive letters to partitions that are not basic data
   partitions (for example the EFI system partition), and whether the

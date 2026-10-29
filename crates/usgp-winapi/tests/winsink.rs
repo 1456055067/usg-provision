@@ -11,8 +11,9 @@
 //! The descriptors in the tree are real ones read from the new volume
 //! (the testkit's synthetic descriptors are not valid Windows
 //! descriptors). A relative link, a re-based absolute link and a
-//! re-based junction are read back and compared byte for byte; a volume
-//! with 8.3 names disabled fails by name.
+//! re-based junction are read back and compared byte for byte. On a
+//! volume with 8.3 generation disabled a short name is still set
+//! (OPEN-WAPI-9, observed in CI run 40958577980).
 //!
 //! The VHD is made with a DiskPart script run by `diskpart /s`: `create
 //! vdisk file= maximum= type=expandable`, `attach vdisk`, `convert gpt`,
@@ -36,13 +37,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use usgp_image::apply::{ApplyError, ApplyLimits, ApplyRoot, SinkOp, apply};
+use usgp_image::apply::{
+    ApplyError, ApplyLimits, ApplyRoot, ApplySink, ReparseBuffer, SinkResult, apply,
+};
 use usgp_image::testkit::tree::{abs_link_data, link_data, rel_link_data};
 use usgp_image::testkit::{MemoryChunks, NodeSpec, TreeSpec, WimBuilder};
-use usgp_image::wim::metadata::attr;
+use usgp_image::wim::metadata::{Attributes, FileTimes, attr};
+use usgp_image::wim::names::{ImagePath, ShortName, StreamName};
 use usgp_image::{Compression, NoProgress};
 use usgp_winapi::fs::SETTABLE_ATTRIBUTES;
 use usgp_winapi::fsquery;
+use usgp_winapi::fsvalues::attributes_to_send;
 use usgp_winapi::manifest::{ManifestOptions, tree_rows};
 use usgp_winapi::manifest_text::{Field, Kind, Row};
 use usgp_winapi::paths::DriveLetter;
@@ -281,13 +286,21 @@ fn synthetic_wim_applies_to_a_vhd_volume() {
         &mut MemoryChunks::new(wim),
         1,
         &vol.apply_root(),
-        &mut sink,
+        &mut Traced(&mut sink, root.clone()),
         &ApplyLimits::new(1 << 28),
         &mut NoProgress,
         usgp_crypto::provider(),
     )
     .expect("apply");
     println!("{report:?}");
+    println!(
+        "OPEN-WAPI-11 observed: CI run 40958577980 (before round 5) failed this apply \
+         with SinkError {{ op: SetAttributes, kind: InvalidInput }} on this tree (a \
+         directory stored DIRECTORY|HIDDEN, a directory with a named stream, sparse and \
+         compressed files); that run did not record the item or whether the OS or the \
+         writer's own refusal produced it. This run applied the tree with only the \
+         settable bits sent (topic 23 §22)."
+    );
     drop(sink);
 
     let opts = ManifestOptions {
@@ -393,6 +406,66 @@ fn synthetic_wim_applies_to_a_vhd_volume() {
         assert!(links.contains(n), "{links}");
     }
     assert_eq!(links.matches('|').count(), 2, "{links}");
+}
+
+/// A pass-through sink that reports which item a set-attributes failure
+/// hit, with the stored value, the item's current attributes and what the
+/// pure rule chose to send (OPEN-WAPI-11 evidence; test only).
+struct Traced<'a>(&'a mut WinSink, PathBuf);
+
+impl ApplySink for Traced<'_> {
+    fn create_dir(&mut self, p: &ImagePath) -> SinkResult {
+        self.0.create_dir(p)
+    }
+    fn create_file(&mut self, p: &ImagePath) -> SinkResult {
+        self.0.create_file(p)
+    }
+    fn create_stream(&mut self, p: &ImagePath, s: &StreamName) -> SinkResult {
+        self.0.create_stream(p, s)
+    }
+    fn write(
+        &mut self,
+        p: &ImagePath,
+        s: Option<&StreamName>,
+        off: u64,
+        data: &[u8],
+    ) -> SinkResult {
+        self.0.write(p, s, off, data)
+    }
+    fn hard_link(&mut self, e: &ImagePath, n: &ImagePath) -> SinkResult {
+        self.0.hard_link(e, n)
+    }
+    fn set_reparse(&mut self, p: &ImagePath, b: &ReparseBuffer) -> SinkResult {
+        self.0.set_reparse(p, b)
+    }
+    fn set_security(&mut self, p: &ImagePath, sd: &[u8]) -> SinkResult {
+        self.0.set_security(p, sd)
+    }
+    fn set_short_name(&mut self, p: &ImagePath, n: &ShortName) -> SinkResult {
+        self.0.set_short_name(p, n)
+    }
+    fn set_times(&mut self, p: &ImagePath, t: &FileTimes) -> SinkResult {
+        self.0.set_times(p, t)
+    }
+    fn set_attributes(&mut self, p: &ImagePath, a: Attributes) -> SinkResult {
+        let r = self.0.set_attributes(p, a);
+        if let Err(e) = &r {
+            use std::os::windows::fs::MetadataExt;
+            let rel: Vec<&str> = p.components().iter().map(|c| c.as_str()).collect();
+            let md = std::fs::symlink_metadata(self.1.join(rel.join("\\")));
+            let (current, is_dir) = md
+                .map(|m| (m.file_attributes(), m.is_dir()))
+                .unwrap_or((0, false));
+            println!(
+                "OPEN-WAPI-11 observed: set attributes failed on {:?}: stored {:#x}, \
+                 current {current:#x}, dir {is_dir}, rule chose {:?}, error {e:?}",
+                rel.join("\\"),
+                a.0,
+                attributes_to_send(current, a.0, is_dir),
+            );
+        }
+        r
+    }
 }
 
 fn apply_tree(vol: &VhdVolume, spec: TreeSpec) -> Result<(), ApplyError> {
@@ -521,9 +594,15 @@ fn links_and_junctions_are_applied_byte_for_byte() {
     );
 }
 
+/// OPEN-WAPI-9 (topic 23 §21): CI run 40958577980 showed that with
+/// `fsutil 8dot3name set L: 1` ("Successfully DISABLED"),
+/// `SetFileShortNameW` still succeeds. Disabling 8.3 generation does not
+/// stop an explicit set, so the apply succeeds. The crate has no
+/// short-name read-back (no query in topic 23 is implemented for it), so
+/// the name `README~1.TXT` is not read back here; that is recorded below.
 #[test]
 #[ignore = "needs administrator rights and USGP_WIN_VHD=1; run by the windows-agent CI job with --ignored"]
-fn short_names_disabled_fail_by_name() {
+fn short_names_set_with_8dot3_generation_disabled() {
     require_env();
     let vol = VhdVolume::create("8dot3").expect("VHD volume");
     let root = vol.root();
@@ -544,11 +623,13 @@ fn short_names_disabled_fail_by_name() {
             .security(1),
     ]);
     spec.security = sds;
-    match apply_tree(&vol, spec) {
-        Err(ApplyError::Sink(e)) => {
-            assert_eq!(e.op, SinkOp::SetShortName);
-            assert_eq!(e.kind, std::io::ErrorKind::Unsupported);
-        }
-        other => panic!("expected a named short-name failure, got {other:?}"),
-    }
+    let r = apply_tree(&vol, spec);
+    println!(
+        "OPEN-WAPI-9 observed: with 8dot3name generation disabled on the volume, \
+         setting short name README~1.TXT gave {r:?} (CI run 40958577980: Ok). \
+         Read-back of the short name is not implemented in usgp-winapi, so it is not \
+         checked here."
+    );
+    r.expect("apply succeeds with 8.3 generation disabled");
+    assert!(vol.root().join("readme-long-name.txt").is_file());
 }

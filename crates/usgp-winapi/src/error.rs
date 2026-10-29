@@ -54,9 +54,10 @@ pub enum WinApiError {
     /// Stored reparse data was refused (topic 24; only relative symbolic
     /// links are applied, OPEN-WIM-12).
     Reparse(ReparseRefusal),
-    /// A short name could not be set. A likely cause is that 8.3 names are
-    /// disabled on the target volume; the OS code is kept. Persistent: the
-    /// apply stops and does not continue without the name.
+    /// A short name could not be set; the OS code is kept. Disabled 8.3
+    /// generation is not by itself a cause: CI run 40958577980 saw an
+    /// explicit set succeed on such a volume (OPEN-WAPI-9, topic 23 §21).
+    /// Persistent: the apply stops and does not continue without the name.
     ShortNameNotSet {
         /// OS error code, if any.
         os_code: Option<i32>,
@@ -102,7 +103,7 @@ impl fmt::Display for WinApiError {
             Self::Reparse(r) => write!(f, "reparse data refused: {r}"),
             Self::ShortNameNotSet { os_code } => write!(
                 f,
-                "short name could not be set on the target volume (8.3 names may be disabled; OS code {os_code:?})"
+                "short name could not be set on the target volume (OS code {os_code:?})"
             ),
             Self::Refused { reason } => write!(f, "refused: {reason}"),
         }

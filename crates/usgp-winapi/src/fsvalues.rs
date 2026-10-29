@@ -22,30 +22,108 @@ pub fn filetime_to_system_time(ft: u64) -> Option<SystemTime> {
     }
 }
 
+// Attribute values from topic 23 §22 (the "File Attribute Constants" and
+// `SetFileAttributes` pages). Plain numbers so the rules below are pure
+// and tested on every target.
+/// `FILE_ATTRIBUTE_READONLY`.
+pub const ATTR_READONLY: u32 = 0x0001;
+/// `FILE_ATTRIBUTE_HIDDEN`.
+pub const ATTR_HIDDEN: u32 = 0x0002;
+/// `FILE_ATTRIBUTE_SYSTEM`.
+pub const ATTR_SYSTEM: u32 = 0x0004;
+/// `FILE_ATTRIBUTE_DIRECTORY` (structural; never set).
+pub const ATTR_DIRECTORY: u32 = 0x0010;
+/// `FILE_ATTRIBUTE_ARCHIVE`.
+pub const ATTR_ARCHIVE: u32 = 0x0020;
+/// `FILE_ATTRIBUTE_DEVICE` (reserved for the system).
+pub const ATTR_DEVICE: u32 = 0x0040;
+/// `FILE_ATTRIBUTE_NORMAL` (valid only alone).
+pub const ATTR_NORMAL: u32 = 0x0080;
+/// `FILE_ATTRIBUTE_TEMPORARY`.
+pub const ATTR_TEMPORARY: u32 = 0x0100;
+/// `FILE_ATTRIBUTE_SPARSE_FILE` (set by `FSCTL_SET_SPARSE`).
+pub const ATTR_SPARSE: u32 = 0x0200;
+/// `FILE_ATTRIBUTE_REPARSE_POINT` (structural; `FSCTL_SET_REPARSE_POINT`).
+pub const ATTR_REPARSE_POINT: u32 = 0x0400;
+/// `FILE_ATTRIBUTE_COMPRESSED` (set by `FSCTL_SET_COMPRESSION`).
+pub const ATTR_COMPRESSED: u32 = 0x0800;
+/// `FILE_ATTRIBUTE_OFFLINE`.
+pub const ATTR_OFFLINE: u32 = 0x1000;
+/// `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`.
+pub const ATTR_NOT_CONTENT_INDEXED: u32 = 0x2000;
+/// `FILE_ATTRIBUTE_ENCRYPTED` (created encrypted or `EncryptFile`).
+pub const ATTR_ENCRYPTED: u32 = 0x4000;
+/// `FILE_ATTRIBUTE_VIRTUAL` (reserved for the system).
+pub const ATTR_VIRTUAL: u32 = 0x0001_0000;
+
+/// The bits written through a basic-information set: the `SetFileAttributes`
+/// settable list of topic 23 §22 without `NORMAL`, which is valid only
+/// alone and is handled by [`attributes_to_send`].
+pub const SETTABLE: u32 = ATTR_READONLY
+    | ATTR_HIDDEN
+    | ATTR_SYSTEM
+    | ATTR_ARCHIVE
+    | ATTR_TEMPORARY
+    | ATTR_OFFLINE
+    | ATTR_NOT_CONTENT_INDEXED;
+
+/// Bits already realised by how the item was created (a directory) or by
+/// the reparse set (§24); dropped silently from the attribute write.
+pub const STRUCTURAL: u32 = ATTR_DIRECTORY | ATTR_REPARSE_POINT;
+
+/// Bits set by other means this writer does not implement, dropped from
+/// the write. The content itself is hash-verified and written in full;
+/// only the on-disk storage form differs.
+// POAM: sparse and NTFS-compressed storage (FSCTL_SET_SPARSE,
+// FSCTL_SET_COMPRESSION, topic 23 §22) are not reproduced; such files are
+// written as ordinary files with verified content.
+pub const DROPPED_OTHER_MEANS: u32 = ATTR_SPARSE | ATTR_COMPRESSED;
+
 /// What to send in a basic-information set for the stored attribute
-/// value (topic 23 §22): only the `settable` bits; never 0 to mean "clear
-/// all", because 0 means "unchanged".
+/// value (topic 23 §22). Pure, so the rules are tested on every target.
 ///
-/// - Some settable bits wanted: send exactly them.
-/// - None wanted, a file: send `normal` (valid alone, clears the others).
-/// - None wanted, a directory that has none set: nothing to send.
+/// - `DEVICE`, `VIRTUAL` (system-reserved), `ENCRYPTED` (not implemented;
+///   the apply engine refuses it first, decision 0006) and any bit §22
+///   does not name: `Err` (fail closed).
+/// - `DIRECTORY`, `REPARSE_POINT`: never sent (structural).
+/// - `SPARSE`, `COMPRESSED`: never sent ([`DROPPED_OTHER_MEANS`]).
+/// - Some [`SETTABLE`] bits wanted: send exactly them.
+/// - None wanted, a file: send `NORMAL` (valid alone, clears the others).
+/// - None wanted, a directory that has none set: nothing to send (0 means
+///   "unchanged"; `NORMAL` is never sent to a directory, OPEN-WAPI-12).
 /// - None wanted, a directory that has some set: `Err`, because a
-///   directory never gets `normal` and 0 would leave them (fail closed).
+///   directory never gets `NORMAL` and 0 would leave them (fail closed).
+///
+/// Never returns `Some(0)` and never a value with a non-settable bit.
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-7 (Software, Firmware, and Information Integrity),
+//   SI-10 (Information Input Validation)
+// - SPEC: specs/standards/windows-storage-firmware-api.md §22
+//   (OPEN-WAPI-11: only the settable set is ever sent, so whether the
+//   call accepts other bits is never relied on; OPEN-WAPI-12)
 pub fn attributes_to_send(
     current: u32,
     stored: u32,
     is_dir: bool,
-    settable: u32,
-    normal: u32,
 ) -> Result<Option<u32>, &'static str> {
-    let want = stored & settable;
+    if stored & (ATTR_DEVICE | ATTR_VIRTUAL) != 0 {
+        return Err("system-reserved attribute bit");
+    }
+    if stored & ATTR_ENCRYPTED != 0 {
+        return Err("encrypted attribute not supported");
+    }
+    let named = SETTABLE | ATTR_NORMAL | STRUCTURAL | DROPPED_OTHER_MEANS;
+    if stored & !named != 0 {
+        return Err("unknown attribute bit");
+    }
+    let want = stored & SETTABLE;
     if want != 0 {
         return Ok(Some(want));
     }
     if !is_dir {
-        return Ok(Some(normal));
+        return Ok(Some(ATTR_NORMAL));
     }
-    if current & settable == 0 {
+    if current & SETTABLE == 0 {
         Ok(None)
     } else {
         Err("directory attributes cannot be cleared to none")
@@ -80,29 +158,59 @@ mod tests {
 
     #[test]
     fn attribute_rules() {
-        let settable = 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x2000;
-        // Sparse/compressed/directory bits in the stored value are not sent.
+        // Sparse/compressed/directory/reparse bits are not sent.
         assert_eq!(
-            attributes_to_send(0x20, 0x01 | 0x200, false, settable, 0x80),
+            attributes_to_send(0x20, 0x01 | 0x200, false),
             Ok(Some(0x01))
         );
+        assert_eq!(attributes_to_send(0x10, 0x16, true), Ok(Some(0x06)));
+        assert_eq!(attributes_to_send(0x410, 0x412, true), Ok(Some(0x02)));
+        // The CI tree's hidden directory sends HIDDEN only.
         assert_eq!(
-            attributes_to_send(0x10, 0x16, true, settable, 0x80),
-            Ok(Some(0x06))
+            attributes_to_send(ATTR_DIRECTORY, ATTR_DIRECTORY | ATTR_HIDDEN, true),
+            Ok(Some(ATTR_HIDDEN))
         );
+        // Temporary and offline are settable.
+        assert_eq!(attributes_to_send(0, 0x1100, false), Ok(Some(0x1100)));
         // Files with nothing settable get NORMAL, never 0.
-        assert_eq!(
-            attributes_to_send(0x20, 0x800, false, settable, 0x80),
-            Ok(Some(0x80))
-        );
-        // Directories never get NORMAL.
-        assert_eq!(
-            attributes_to_send(0x10, 0x10, true, settable, 0x80),
-            Ok(None)
-        );
-        assert!(attributes_to_send(0x12, 0x10, true, settable, 0x80).is_err());
-        for (c, st, d) in [(0x20, 0, false), (0x10, 0x10, true), (0x16, 0x2, true)] {
-            assert_ne!(attributes_to_send(c, st, d, settable, 0x80), Ok(Some(0)));
+        assert_eq!(attributes_to_send(0x20, 0x800, false), Ok(Some(0x80)));
+        assert_eq!(attributes_to_send(0x20, 0x80, false), Ok(Some(0x80)));
+        // Directories never get NORMAL; masked 0 stays "unchanged".
+        assert_eq!(attributes_to_send(0x10, 0x10, true), Ok(None));
+        assert_eq!(attributes_to_send(0x10, 0x90, true), Ok(None));
+        assert!(attributes_to_send(0x12, 0x10, true).is_err());
+        // Refused: reserved, encrypted, unnamed bits.
+        for bad in [
+            ATTR_DEVICE,
+            ATTR_VIRTUAL,
+            ATTR_ENCRYPTED,
+            0x0002_0000,
+            0x8000,
+        ] {
+            assert!(
+                attributes_to_send(0, bad | ATTR_ARCHIVE, false).is_err(),
+                "{bad:#x}"
+            );
+            assert!(
+                attributes_to_send(0x10, bad | 0x10, true).is_err(),
+                "{bad:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn attribute_output_is_settable_and_never_zero() {
+        let normal_ok = |v: u32, d: bool| !d && v == ATTR_NORMAL;
+        for stored in 0u32..0x0004_0000 {
+            for (current, d) in [(0, false), (0x10, true), (0x12, true), (0x20, false)] {
+                if let Ok(Some(v)) = attributes_to_send(current, stored, d) {
+                    assert_ne!(v, 0);
+                    assert!(
+                        v & !SETTABLE == 0 || normal_ok(v, d),
+                        "{stored:#x} -> {v:#x}"
+                    );
+                }
+            }
         }
     }
 

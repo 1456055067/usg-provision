@@ -120,6 +120,10 @@ impl ApplySink for WinSink {
             .map_err(map(SinkOp::SetTimes))
     }
 
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SI-7, SI-10
+    // - SPEC: specs/standards/windows-storage-firmware-api.md §22
+    //   (OPEN-WAPI-11; the mask is `fsvalues::attributes_to_send`)
     fn set_attributes(&mut self, p: &ImagePath, a: Attributes) -> SinkResult {
         self.w
             .set_attributes(&parts(p), a.0)

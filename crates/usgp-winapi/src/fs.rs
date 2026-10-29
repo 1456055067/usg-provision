@@ -25,7 +25,8 @@
 //! Semantics: topic 23 §20 to §24 (SR-3c, DRAFT, audit pending) and
 //! topic 24. Still open there: OPEN-WAPI-7 (protected and auto-inherited
 //! bits after a set; checked by `tests/winsink.rs`), OPEN-WAPI-9 (short
-//! names with 8.3 off; a named failure here) and OPEN-WAPI-10 (reparse
+//! names with 8.3 generation off: observed to succeed in CI; any failure
+//! is still a named error here) and OPEN-WAPI-10 (reparse
 //! set details; any unexpected error fails the apply).
 
 // COMPLIANCE MAPPING:
@@ -50,9 +51,7 @@ use windows_sys::Win32::Security::{
     SACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_SYSTEM, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, READ_CONTROL,
     WRITE_DAC, WRITE_OWNER,
 };
@@ -61,16 +60,33 @@ use windows_sys::Win32::System::SystemServices::ACCESS_SYSTEM_SECURITY;
 use crate::error::{Result, WinApiError};
 use crate::ffi;
 use crate::fsquery;
-use crate::fsvalues::{attributes_to_send, filetime_to_system_time, is_safe_component};
+use crate::fsvalues::{self, attributes_to_send, filetime_to_system_time, is_safe_component};
 use crate::parse::to_wide_nul;
 use crate::privilege::{self, EnabledPrivilege, Privilege};
 
-/// The attribute bits the writer sets; the rest are never set directly.
-pub const SETTABLE_ATTRIBUTES: u32 = FILE_ATTRIBUTE_READONLY
-    | FILE_ATTRIBUTE_HIDDEN
-    | FILE_ATTRIBUTE_SYSTEM
-    | FILE_ATTRIBUTE_ARCHIVE
-    | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+/// The attribute bits the writer sets (topic 23 §22; see
+/// [`crate::fsvalues::SETTABLE`]); the rest are never set directly.
+pub const SETTABLE_ATTRIBUTES: u32 = fsvalues::SETTABLE;
+
+// The pure rules use plain numbers; they must equal the platform values.
+const _: () = {
+    use windows_sys::Win32::Storage::FileSystem as fs;
+    assert!(fsvalues::ATTR_READONLY == fs::FILE_ATTRIBUTE_READONLY);
+    assert!(fsvalues::ATTR_HIDDEN == fs::FILE_ATTRIBUTE_HIDDEN);
+    assert!(fsvalues::ATTR_SYSTEM == fs::FILE_ATTRIBUTE_SYSTEM);
+    assert!(fsvalues::ATTR_DIRECTORY == fs::FILE_ATTRIBUTE_DIRECTORY);
+    assert!(fsvalues::ATTR_ARCHIVE == fs::FILE_ATTRIBUTE_ARCHIVE);
+    assert!(fsvalues::ATTR_DEVICE == fs::FILE_ATTRIBUTE_DEVICE);
+    assert!(fsvalues::ATTR_NORMAL == fs::FILE_ATTRIBUTE_NORMAL);
+    assert!(fsvalues::ATTR_TEMPORARY == fs::FILE_ATTRIBUTE_TEMPORARY);
+    assert!(fsvalues::ATTR_SPARSE == fs::FILE_ATTRIBUTE_SPARSE_FILE);
+    assert!(fsvalues::ATTR_REPARSE_POINT == fs::FILE_ATTRIBUTE_REPARSE_POINT);
+    assert!(fsvalues::ATTR_COMPRESSED == fs::FILE_ATTRIBUTE_COMPRESSED);
+    assert!(fsvalues::ATTR_OFFLINE == fs::FILE_ATTRIBUTE_OFFLINE);
+    assert!(fsvalues::ATTR_NOT_CONTENT_INDEXED == fs::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED);
+    assert!(fsvalues::ATTR_ENCRYPTED == fs::FILE_ATTRIBUTE_ENCRYPTED);
+    assert!(fsvalues::ATTR_VIRTUAL == fs::FILE_ATTRIBUTE_VIRTUAL);
+};
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 /// Topic 23 §26: open-reparse-point opens a reparse point itself, never
@@ -399,11 +415,18 @@ impl TreeWriter {
     }
 
     /// Sets the settable bits of the stored attribute value
-    /// ([`SETTABLE_ATTRIBUTES`], topic 23 §22). Other bits (directory,
-    /// reparse, sparse, compressed) are never sent and never cause a
-    /// failure (the `ApplySink::set_attributes` contract). Zero is never
+    /// ([`SETTABLE_ATTRIBUTES`], topic 23 §22, by the pure
+    /// [`attributes_to_send`]). Structural bits (directory, reparse) and
+    /// bits set by other means that are not implemented (sparse,
+    /// compressed; POAM there) are never sent. System-reserved (device,
+    /// virtual), encrypted and unnamed bits are refused. Zero is never
     /// sent (it means "unchanged"); a file with no settable bit gets
-    /// `NORMAL`, a directory never does.
+    /// `NORMAL`, a directory never does (OPEN-WAPI-12).
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SI-7, SI-10
+    // - SPEC: specs/standards/windows-storage-firmware-api.md §22
+    //   (OPEN-WAPI-11: CI showed a basic-information set failing with
+    //   InvalidInput on the WU-5 tree; only settable bits are sent)
     pub fn set_attributes(&mut self, components: &[&str], stored: u32) -> Result<()> {
         Self::not_root(components)?;
         let f = self.open_meta(
@@ -411,14 +434,8 @@ impl TreeWriter {
             FILE_WRITE_ATTRIBUTES | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
         )?;
         let md = f.metadata().map_err(os("read attributes"))?;
-        let send = attributes_to_send(
-            md.file_attributes(),
-            stored,
-            md.is_dir(),
-            SETTABLE_ATTRIBUTES,
-            FILE_ATTRIBUTE_NORMAL,
-        )
-        .map_err(|reason| WinApiError::Refused { reason })?;
+        let send = attributes_to_send(md.file_attributes(), stored, md.is_dir())
+            .map_err(|reason| WinApiError::Refused { reason })?;
         match send {
             None => Ok(()),
             Some(v) => ffi::update_attributes(&f, |_| v).map_err(os("set attributes")),

@@ -67,7 +67,7 @@ use std::net::Ipv4Addr;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use usgp_crypto::CryptoProvider;
 use usgp_deploy::platform::{
@@ -84,7 +84,9 @@ use usgp_winapi::WinApiError;
 use usgp_winapi::disk::{
     self, DeviceDescriptor, DiskInfo, DiskInterface, MediaType, RawDisk, TableId, Writability,
 };
+use usgp_winapi::diskpart::{self, FsKind, ToolError};
 use usgp_winapi::firmware::{self, FirmwareMode, FirmwareVars};
+use usgp_winapi::format::{self, FormatEnv, FormatError, FormatTarget};
 use usgp_winapi::paths::{DriveLetter, VolumeGuidPath};
 use usgp_winapi::privilege::{self, Privilege};
 use usgp_winapi::vars::{
@@ -95,10 +97,8 @@ use usgp_winapi::{net, system};
 
 use crate::disks::{Discriminator, DiskEntry, FoundDisk, TableIdentity};
 use crate::host::{Host, HostError, HostFacts, PowerAction, WaitBudget};
-use crate::wintools::{self, ToolError, VolumeMatch};
+use crate::wintools;
 
-/// How often a new volume is looked for.
-const VOLUME_POLL: Duration = Duration::from_millis(500);
 /// Most time `wpeutil` may take to accept a restart or shutdown.
 const POWER_LIMIT: Duration = Duration::from_secs(60);
 
@@ -393,7 +393,7 @@ impl Host for WinHost {
         // (CR-SR7-001).
         let mut cmd = Command::new(self.system_dir.join("wpeutil.exe"));
         cmd.arg(wintools::wpeutil_command(action));
-        wintools::run_bounded(cmd, POWER_LIMIT).map_err(|e| HostError(format!("wpeutil: {e:?}")))
+        diskpart::run_bounded(cmd, POWER_LIMIT).map_err(|e| HostError(format!("wpeutil: {e:?}")))
     }
 }
 
@@ -568,54 +568,27 @@ struct WinVolumes {
     budget: WaitBudget,
 }
 
-/// Every volume's extents (volumes whose extents cannot be read are left
-/// out: they cannot match).
-fn all_extents() -> Result<(Vec<VolumeGuidPath>, Vec<Vec<wintools::Extent>>), WinApiError> {
-    let vols = volume::volumes()?;
-    let ext = vols
-        .iter()
-        .map(|v| {
-            volume::disk_extents(v)
-                .map(|e| {
-                    e.iter()
-                        .map(|x| (x.disk_number, x.starting_offset, x.length))
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .collect();
-    Ok((vols, ext))
+/// The `usgp-winapi` format target for `spec` on disk `n`.
+fn target_of(n: u32, spec: &VolumeSpec) -> FormatTarget<'_> {
+    FormatTarget {
+        disk: n,
+        start: spec.start_bytes,
+        len: spec.size_bytes,
+        fs: match spec.fs {
+            FileSystem::Fat32 => FsKind::Fat32,
+            _ => FsKind::Ntfs,
+        },
+        label: spec.label,
+    }
 }
 
-/// The one volume at exactly `start`/`len` on disk `n`, waited for up to
-/// `limit`.
-fn wait_for_volume(
-    n: u32,
-    start: u64,
-    len: u64,
-    limit: Duration,
-) -> Result<VolumeGuidPath, PlatformError> {
-    const WHAT: &str = "resolve volume from extents";
-    let t0 = Instant::now();
-    loop {
-        if let Ok((vols, ext)) = all_extents() {
-            match wintools::match_volume(&ext, n, start, len) {
-                VolumeMatch::One(i) => {
-                    return vols
-                        .get(i)
-                        .cloned()
-                        .ok_or(perr(PlatformErrorKind::NotFound, WHAT));
-                }
-                VolumeMatch::None => {}
-                VolumeMatch::Ambiguous => {
-                    return Err(perr(PlatformErrorKind::IdentityMismatch, WHAT));
-                }
-            }
-        }
-        if t0.elapsed() >= limit {
-            return Err(perr(PlatformErrorKind::NotFound, WHAT));
-        }
-        std::thread::sleep(VOLUME_POLL);
+fn format_err(e: &FormatError, what: &'static str) -> PlatformError {
+    match e {
+        FormatError::NotFound => perr(PlatformErrorKind::NotFound, what),
+        FormatError::Tool(t) => tool_err(*t, what),
+        FormatError::Script(k) => perr(PlatformErrorKind::Io(*k), what),
+        FormatError::Os(w) => perr(win_kind(w), what),
+        _ => perr(PlatformErrorKind::IdentityMismatch, what),
     }
 }
 
@@ -633,12 +606,13 @@ fn used_letters() -> Result<Vec<char>, PlatformError> {
 
 impl WinVolumes {
     fn format_one(&self, n: u32, spec: &VolumeSpec) -> Result<FormattedVolume, PlatformError> {
-        let vol = wait_for_volume(
-            n,
-            spec.start_bytes,
-            spec.size_bytes,
-            self.budget.volume_arrival,
-        )?;
+        // The volume search, the script, the check of the letter just
+        // before DiskPart (BOOT-001), DiskPart and the read-back are
+        // `usgp_winapi::format`, shared with the Windows VHD tests
+        // (BOOT-004). The letter policy stays here.
+        let target = target_of(n, spec);
+        let vol = format::wait_for_volume(&target, self.budget.volume_arrival)
+            .map_err(|e| format_err(&e, "resolve volume from extents"))?;
         let letter = if spec.role == PartRole::Windows {
             self.assign_windows_letter(&vol)?
         } else {
@@ -652,103 +626,28 @@ impl WinVolumes {
                 .map_err(|e| perr(win_kind(&e), "assign a drive letter"))?;
             letter
         };
-        // SEC-008: a new file with a random name (create-new: an existing
-        // or planted file of that name is never reused or followed).
+        // SEC-008: the script's name comes from the DRBG.
         let mut random = [0u8; 16];
         usgp_crypto::provider()
             .fill_random(&mut random)
             .map_err(|_| perr(PlatformErrorKind::Refused, "random script name"))?;
-        let script = wintools::write_script_new(
-            &std::env::temp_dir(),
-            random,
-            &wintools::diskpart_script(letter.letter(), spec.fs, spec.label),
-        )
-        .map_err(|e| perr(PlatformErrorKind::Io(e.kind()), "write the format script"))?;
-        // BOOT-001: immediately before DiskPart starts, the letter must
-        // still name the volume resolved above, at exactly the planned
-        // extent on the chosen disk (REQ-DISK-015).
-        // POAM: BOOT-001 residual - DiskPart opens the volume itself, so
-        // our lock cannot be held across its start; a change in the few
-        // milliseconds between this check and DiskPart's `select volume`
-        // is caught only by the read-back below (file system, label,
-        // extent), after the format.
-        let at_letter = volume::volume_at(letter).ok();
-        let extents: Vec<wintools::Extent> = volume::disk_extents(&vol)
-            .map(|e| {
-                e.iter()
-                    .map(|x| (x.disk_number, x.starting_offset, x.length))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !wintools::letter_still_names(
-            at_letter.as_ref().map(VolumeGuidPath::as_str),
-            vol.as_str(),
-            &extents,
-            (n, spec.start_bytes, spec.size_bytes),
-        ) {
-            let _ = std::fs::remove_file(&script);
-            return Err(perr(
-                PlatformErrorKind::IdentityMismatch,
-                "volume at the drive letter before formatting",
-            ));
-        }
-        // `winpe.md` §11 (SR-7): DiskPart runs a command file with
-        // `diskpart /s <file>` in Microsoft's deployment samples, though
-        // the "diskpart" page does not describe `/s` (OPEN-WINPE-2), and
-        // the exit-code values are not documented (OPEN-WINPE-3). The exit
-        // status is therefore only a first filter: the real check is the
-        // read-back below (file system, label, extent).
-        let mut cmd = Command::new(self.system_dir.join("diskpart.exe"));
-        cmd.arg("/s").arg(&script);
-        let ran = wintools::run_bounded(cmd, self.budget.tool);
-        // Best effort: the script holds only our letter, fs and label.
-        let _ = std::fs::remove_file(&script);
-        ran.map_err(|e| tool_err(e, "format volume"))?;
-        // Read back: the file system, and that the volume is still the one
-        // at our extent.
-        let fs = volume::file_system_name(&vol)
-            .map_err(|e| perr(win_kind(&e), "read the file system"))?;
-        if !fs.eq_ignore_ascii_case(wintools::fs_name(spec.fs)) {
-            return Err(perr(
-                PlatformErrorKind::IdentityMismatch,
-                "formatted file system",
-            ));
-        }
-        // The label is read back too (topic 23 §15). Compared ignoring
-        // ASCII case: whether a FAT32 label keeps its letter case is not in
-        // the standards summaries, and the labels are fixed ASCII words.
-        let label = volume::label(&vol).map_err(|e| perr(win_kind(&e), "read the volume label"))?;
-        if !label.eq_ignore_ascii_case(spec.label) {
-            return Err(perr(
-                PlatformErrorKind::IdentityMismatch,
-                "formatted volume label",
-            ));
-        }
-        let again =
-            volume::disk_extents(&vol).map_err(|e| perr(win_kind(&e), "read volume extents"))?;
-        if !matches!(again.as_slice(), [x] if x.disk_number == n
-            && x.starting_offset == spec.start_bytes
-            && x.length == spec.size_bytes)
-        {
-            return Err(perr(
-                PlatformErrorKind::IdentityMismatch,
-                "formatted volume extents",
-            ));
-        }
-        let locator = vol.as_str().to_owned();
-        let root = if spec.role == PartRole::Recovery {
-            None
-        } else {
-            let now = volume::drive_letters(&vol)
-                .map_err(|e| perr(win_kind(&e), "read the volume's drive letters"))?;
-            if !now.contains(&letter) {
-                return Err(perr(
-                    PlatformErrorKind::IdentityMismatch,
-                    "volume drive letter",
-                ));
-            }
-            Some(letter.root())
+        let script_dir = std::env::temp_dir();
+        let env = FormatEnv {
+            system_dir: &self.system_dir,
+            script_dir: &script_dir,
+            tool_limit: self.budget.tool,
         };
+        // POAM: BOOT-004 - if Windows will not format a partition that
+        // already carries the recovery type and attributes, this fails
+        // closed (the job stops after the wipe). The fallback (write it as
+        // basic data, format, then rewrite the GPT entry with the recovery
+        // type, backup first, with read-back) waits for the CI evidence
+        // from `vhd_disk.rs` `boot004_recovery_typed_partition_formats`.
+        format::format_at_letter(&target, &vol, letter, &env, random)
+            .map_err(|e| format_err(&e, "format volume"))?;
+        let locator = vol.as_str().to_owned();
+        // `format_at_letter` read back the letter for every role.
+        let root = (spec.role != PartRole::Recovery).then(|| letter.root());
         if spec.role == PartRole::Recovery {
             // The recovery volume keeps no letter (plan section 1.2(c)).
             volume::remove_letter(letter)
@@ -896,7 +795,7 @@ impl BootFiles for WinBootFiles {
         }
         let mut cmd = Command::new(program);
         cmd.args(args);
-        wintools::run_bounded(cmd, self.budget.tool).map_err(|e| tool_err(e, "BCDBoot"))?;
+        diskpart::run_bounded(cmd, self.budget.tool).map_err(|e| tool_err(e, "BCDBoot"))?;
         let manager = Path::new(&e.root())
             .join("EFI")
             .join("Microsoft")

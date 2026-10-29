@@ -78,7 +78,9 @@ pub const FS_OVERHEAD_MIN_BYTES: u64 = 1024 * MIB;
 pub const MAX_RECOVERY_IMAGE_BYTES: u64 = 64 * 1024 * MIB;
 /// Room reserved at the end of the disk in [`minimum_disk_bytes`]: the
 /// backup GPT (16 KiB array + one header block) plus up to 1 MiB lost to
-/// aligning the recovery start down. 2 MiB covers both for 512 and 4096.
+/// aligning the recovery start down to 1 MiB (`gpt.md` §8). 2 MiB covers
+/// both for 512 and 4096. Design value; the 64 GB floor it is added to is
+/// `gpt.md` §13 (CR-RV1-001).
 const TAIL_RESERVE_BYTES: u64 = 2 * MIB;
 
 /// FORMAT: gpt.md §9, §5 - attribute bit 0, platform required.

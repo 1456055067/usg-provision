@@ -35,13 +35,19 @@ fn bs_id(ctx: &RequestCtx) -> Result<BootServiceId, ApiError> {
     BootServiceId::parse(ctx.params.get(0)).map_err(|_| ApiError::not_found("boot service"))
 }
 
-/// The `ETag` of an assignment list: SHA-256 over the sorted package ids.
+/// The `ETag` of an assignment list: the first 128 bits of the SHA-256
+/// over the sorted package ids, `"bsp-<32 hex>"` (38 bytes). It must fit
+/// [`usgp_proto::api::MAX_IF_MATCH_BYTES`] (64): clients drop a longer
+/// tag rather than echo it, so a full 64-hex digest (70 bytes) could
+/// never come back in `If-Match` (boot-smoke S9). 128 bits is ample for
+/// an optimistic-concurrency check on one boot service.
 #[must_use]
 pub fn assignment_etag(ids: &[PackageId]) -> String {
     let mut sorted: Vec<String> = ids.iter().map(ToString::to_string).collect();
     sorted.sort();
     let text = format!("bsp-v1\n{}", sorted.join("\n"));
-    format!("\"bsp-{}\"", usgp_crypto::sha256(text.as_bytes()).to_hex())
+    let hex = usgp_crypto::sha256(text.as_bytes()).to_hex();
+    format!("\"bsp-{}\"", hex.get(..32).unwrap_or(&hex))
 }
 
 /// The view of a boot service and the `ETag` of its assignments.
@@ -204,5 +210,12 @@ mod tests {
         assert_ne!(assignment_etag(&[a]), assignment_etag(&[a, b]));
         assert_ne!(assignment_etag(&[]), assignment_etag(&[a]));
         assert!(assignment_etag(&[]).starts_with("\"bsp-"));
+        // Boot-smoke S9: the tag fits the protocol's If-Match limit and is
+        // visible ASCII, so a client can send it back.
+        for ids in [vec![], vec![a], vec![a, b]] {
+            let t = assignment_etag(&ids);
+            assert!(t.len() <= usgp_proto::api::MAX_IF_MATCH_BYTES, "{t}");
+            assert!(t.bytes().all(|c| c.is_ascii_graphic()), "{t}");
+        }
     }
 }

@@ -109,6 +109,7 @@ pub(crate) async fn dispatch<S: Store + 'static>(
         RouteId::JobList => jobs::list(api, ctx, &req).await,
         RouteId::JobGet => jobs::get(api, ctx).await,
         RouteId::JobAcknowledge => jobs::acknowledge(api, ctx).await,
+        RouteId::JobFail => jobs::fail(api, ctx, req).await,
         RouteId::BootServiceList => boot_services::list(api, ctx).await,
         RouteId::BootServiceGet => boot_services::get(api, ctx).await,
         RouteId::BootServicePackages => boot_services::set_packages(api, ctx, req).await,

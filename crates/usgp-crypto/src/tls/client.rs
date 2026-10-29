@@ -7,9 +7,9 @@
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-8, SC-8(1) - TLS on the CLI and database channels.
-// - NIST 800-53: IA-3 (Device Identification and Authentication) - server
-//   identity verified by name against configured anchors.
-// - NIST 800-53: IA-5(2) - client certificate for database login (0012).
+// - NIST 800-53: IA-5(2) (Public Key-Based Authentication) - server
+//   identity verified by its chain to the configured anchors and by name
+//   (with SC-8 above); client certificate for database login (0012).
 // - NIST 800-53: SC-13 - `ClientConfig::fips()` asserted at build time.
 // - SPEC: plan M2 section 5.4 ("PostgreSQL client TLS"), section 3.5.
 // POAM: the server certificate's revocation is not checked by clients

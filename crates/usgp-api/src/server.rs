@@ -164,10 +164,13 @@ impl<S: Store + 'static> Api<S> {
         // `jobs.lost_after_s`.
         let sessions = self.expire_device_sessions().await.map(|_| ());
         let jobs = self.mark_lost_jobs().await.map(|_| ());
+        // Finding SEC-012: running jobs past their plan's timeouts fail.
+        let timeouts = self.fail_overdue_jobs().await.map(|_| ());
         for (sweep, r) in [
             ("upload_expiry", uploads),
             ("device_session_expiry", sessions),
             ("lost_jobs", jobs),
+            ("job_timeouts", timeouts),
         ] {
             if let Err(e) = r {
                 self.sweep_failed(sweep, &e);

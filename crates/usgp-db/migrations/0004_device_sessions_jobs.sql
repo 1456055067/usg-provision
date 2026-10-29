@@ -196,6 +196,12 @@ CREATE TABLE job (
     wipe_record_hash    bytea    NOT NULL CHECK (length(wipe_record_hash) = 32),
     plan_sha256         bytea    NOT NULL CHECK (length(plan_sha256) = 32),
     plan_key_id         bytea    NOT NULL CHECK (length(plan_key_id) = 32),
+    -- The signed plan's step timeouts (steps 1 to 5) and stall timeout,
+    -- enforced by the server (finding SEC-012).
+    step_timeouts_s     integer[] NOT NULL
+        CHECK (cardinality(step_timeouts_s) = 5 AND array_position(step_timeouts_s, NULL) IS NULL
+               AND 0 < ALL (step_timeouts_s)),
+    stall_timeout_s     integer  NOT NULL CHECK (stall_timeout_s > 0),
     acknowledged_by     uuid     NULL REFERENCES operator (id),
     acknowledged_at_us  bigint   NULL,
     FOREIGN KEY (wipe_audit_seq, wipe_record_hash) REFERENCES audit_record (seq, record_hash)
@@ -316,12 +322,12 @@ BEGIN
     IF (NEW.id, NEW.session_id, NEW.boot_service_id, NEW.package_id, NEW.package_revision,
         NEW.image_content_id, NEW.edition_index, NEW.disk, NEW.macs, NEW.previous_job_id,
         NEW.wipe_audit_seq, NEW.wipe_record_hash, NEW.plan_sha256, NEW.plan_key_id,
-        NEW.started_at_us)
+        NEW.started_at_us, NEW.step_timeouts_s, NEW.stall_timeout_s)
        IS DISTINCT FROM
        (OLD.id, OLD.session_id, OLD.boot_service_id, OLD.package_id, OLD.package_revision,
         OLD.image_content_id, OLD.edition_index, OLD.disk, OLD.macs, OLD.previous_job_id,
         OLD.wipe_audit_seq, OLD.wipe_record_hash, OLD.plan_sha256, OLD.plan_key_id,
-        OLD.started_at_us) THEN
+        OLD.started_at_us, OLD.step_timeouts_s, OLD.stall_timeout_s) THEN
         RAISE EXCEPTION 'a job identity and its wipe authorisation cannot be altered'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;

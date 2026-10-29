@@ -957,8 +957,12 @@ pub struct PackageList {
 // Entity tags
 // ---------------------------------------------------------------------------
 
-/// Longest `If-Match` value parsed, in bytes.
-pub const MAX_IF_MATCH_BYTES: usize = 64;
+/// Longest entity tag a client keeps and sends back in `If-Match`, and the
+/// longest `If-Match` value parsed, in bytes. Every tag the server issues
+/// must fit: the content tag [`content_etag`] is 73 bytes (`"sha256:"`
+/// plus 64 hex digits, quoted). It was 64, which silently dropped content
+/// tags in the CLI (M3 review, boot-smoke S9).
+pub const MAX_IF_MATCH_BYTES: usize = 128;
 
 /// `ETag` of a package revision: `"r<revision>"` (strong).
 #[must_use]
@@ -1029,6 +1033,22 @@ mod tests {
             );
         }
         assert_eq!(if_match_revision(&[b'"'; 100]), None);
+        // Over the cap: refused before parsing.
+        let mut long = b"\"r1".to_vec();
+        long.extend(std::iter::repeat_n(b'0', MAX_IF_MATCH_BYTES));
+        long.push(b'"');
+        assert_eq!(if_match_revision(&long), None);
+    }
+
+    /// Every entity tag the server issues fits [`MAX_IF_MATCH_BYTES`], so
+    /// a client can send it back (the full-digest content tag included).
+    #[test]
+    fn issued_etags_fit_if_match() {
+        let c = content_etag(&Sha256Digest([0xab; 32]));
+        assert_eq!(c.len(), 73);
+        assert!(c.contains(&"ab".repeat(32)), "names the full digest");
+        assert!(c.len() <= MAX_IF_MATCH_BYTES);
+        assert!(package_etag(u64::MAX).len() <= MAX_IF_MATCH_BYTES);
         let d = Sha256Digest([0xab; 32]);
         assert_eq!(content_etag(&d), format!("\"sha256:{}\"", "ab".repeat(32)));
     }

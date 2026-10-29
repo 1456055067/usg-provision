@@ -80,6 +80,8 @@ pub enum RouteId {
     JobGet,
     /// `POST /v1/jobs/{id}/acknowledge`
     JobAcknowledge,
+    /// `POST /v1/jobs/{id}/fail` (finding SEC-012)
+    JobFail,
     /// `GET /v1/boot-services`
     BootServiceList,
     /// `GET /v1/boot-services/{id}`
@@ -484,6 +486,16 @@ pub const ROUTES: &[RouteSpec] = &[
         refused_event: "job.acknowledge_refused",
         target_kind: "job",
         json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::JobFail,
+        method: "POST",
+        pattern: "/v1/jobs/{id}/fail",
+        access: Access::One(Permission::JobFail),
+        events: &["job.failed"],
+        refused_event: "job.fail_refused",
+        target_kind: "job",
+        json_body: true,
     },
     RouteSpec {
         id: RouteId::BootServiceList,

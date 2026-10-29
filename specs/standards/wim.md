@@ -1107,6 +1107,22 @@ own limits before using it.
     and M-20 for applying a volume-root capture: content, streams,
     times and non-root descriptors as stored. At the apply root, see
     §6.1 "Root entry" and OPEN-WIM-14.
+  - **M-04, names in an image (DRAFT, 2026-10-29) [project rule,
+    DEC-0021 item 4; REQ-JOB-008]:** the
+    product refuses an image entry whose name breaks the Windows
+    naming rules of `windows-storage-firmware-api.md` §27:
+    - a reserved character (`< > : " / \ | ? *`);
+    - NUL;
+    - a control character (values 1 to 31) in a file or short name
+      (such characters are allowed in stream names, §27);
+    - a reserved device name (with or without an extension);
+    - a trailing space or period.
+
+    Those rules are Win32-level; which of them NTFS itself enforces is
+    OPEN-WAPI-14, so the refusal is a project rule, not a format fact.
+    It exists so that everything is verified before the wipe and a
+    failure is found before anything is written (DEC-0021 item 4,
+    REQ-JOB-008).
 - **OPEN-WIM-8**: the content of `NAME`, `DESCRIPTION`, `FLAGS` and
   `WINDOWS` in the XML data, in particular where edition, architecture,
   version and languages are recorded (§7).

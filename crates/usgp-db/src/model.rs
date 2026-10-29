@@ -641,6 +641,34 @@ impl DeviceSession {
     }
 }
 
+/// The timeouts a job's signed plan carries (finding SEC-012: the server
+/// enforces them too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobTimeouts {
+    /// Per step, steps 1 to 5, seconds (each at least 1).
+    pub steps_s: [u32; 5],
+    /// Seconds without an accepted report before the job is stalled.
+    pub stall_s: u32,
+}
+
+impl JobTimeouts {
+    /// The timeout of `step`, seconds.
+    #[must_use]
+    pub fn step_s(&self, step: Step) -> u32 {
+        let i = usize::from(step.get().saturating_sub(1));
+        self.steps_s.get(i).copied().unwrap_or(1)
+    }
+
+    /// True if every value is at least 1 and fits an `i32`.
+    #[must_use]
+    pub fn valid(&self) -> bool {
+        self.steps_s
+            .iter()
+            .chain([&self.stall_s])
+            .all(|v| *v >= 1 && i32::try_from(*v).is_ok())
+    }
+}
+
 /// A new job (state `running`, step 1 running), written in the same
 /// transaction as its `job.created` and `disk.wipe.authorised` records
 /// (plan section 3.1, confirm).
@@ -673,6 +701,8 @@ pub struct NewJob {
     pub plan_sha256: Sha256Digest,
     /// The plan signing key.
     pub plan_key_id: KeyId,
+    /// The plan's timeouts.
+    pub timeouts: JobTimeouts,
     /// Bytes the job will move, if known.
     pub bytes_total: Option<u64>,
     /// Start time.
@@ -730,6 +760,8 @@ pub struct Job {
     pub plan_sha256: Sha256Digest,
     /// Plan signing key.
     pub plan_key_id: KeyId,
+    /// The plan's timeouts.
+    pub timeouts: JobTimeouts,
     /// Who acknowledged the failure, and when.
     pub acknowledged: Option<(OperatorId, UnixMicros)>,
 }

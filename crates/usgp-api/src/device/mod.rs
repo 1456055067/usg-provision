@@ -32,10 +32,11 @@
 // - SPEC: specs/targeting.md#REQ-TGT-012 to #REQ-TGT-016
 // - Decisions 0018, 0020
 
+pub mod admission;
 pub mod auth;
 mod confirm;
 mod handlers;
-mod job;
+pub(crate) mod job;
 pub mod limits;
 mod offer;
 pub mod router;
@@ -48,7 +49,7 @@ use std::sync::{Mutex, PoisonError};
 use usgp_proto::{BootServiceId, JobId};
 
 use crate::context::AlarmGate;
-use limits::{DeviceConfig, GlobalRate, PerSourceRate};
+use limits::{DeviceConfig, GlobalRate, PerServiceRate, PerSourceRate};
 
 pub use limits::JobSettings;
 pub use server::serve_device;
@@ -66,6 +67,12 @@ pub(crate) struct DeviceState {
     pub(crate) opens: PerSourceRate,
     /// Session opens from all sources (finding SEC-001).
     pub(crate) opens_total: GlobalRate,
+    /// Session opens per boot service (finding SEC-011).
+    pub(crate) opens_per_service: PerServiceRate,
+    /// The served-subnet table of the accept loop (finding SEC-001).
+    pub(crate) served: admission::ServedSubnets,
+    /// Connections per boot service (finding SEC-001).
+    pub(crate) connections: admission::ServiceConnections,
     /// Code attempts per source.
     pub(crate) code_attempts: PerSourceRate,
     /// Chunk requests in progress per job.
@@ -81,6 +88,9 @@ impl DeviceState {
         Self {
             opens: PerSourceRate::new(c.session_opens_per_ip_per_min),
             opens_total: GlobalRate::new(c.session_opens_per_min),
+            opens_per_service: PerServiceRate::new(c.session_opens_per_boot_service_per_min),
+            served: admission::ServedSubnets::default(),
+            connections: admission::ServiceConnections::default(),
             code_attempts: PerSourceRate::new(c.code_attempts_per_ip_per_min),
             chunk_slots: Mutex::new(HashMap::new()),
             content_reads: Mutex::new(HashSet::new()),

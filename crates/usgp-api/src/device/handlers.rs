@@ -229,20 +229,58 @@ pub(crate) async fn open<S: Store + 'static>(
                 "macs,firmware,arch,secure_boot,memory_bytes,agent_version",
             )
     };
-    if !api.inner.device.opens.admit(ctx.ip, Instant::now()) {
+    // Finding SEC-011: the boot service is resolved first; a source no
+    // single active boot service serves is refused before any limiter
+    // counts it, so it cannot use up another network's budget.
+    let no_service = |resolution: &'static str| {
         let d = ctx
             .draft("device.session.open_refused", Outcome::Refused)
+            .reason(NO_BOOT_SERVICE)
+            .detail(
+                claims()
+                    .with("boot_service_resolution", resolution)
+                    .with("source_ip", &ctx.ip.to_string()),
+            );
+        let e = ApiError::new(
+            StatusCode::FORBIDDEN,
+            codes::FORBIDDEN,
+            "no boot service serves this network; ask an operator",
+        );
+        (d, e)
+    };
+    let mut tx = api.store().begin().await?;
+    let resolved = resolve_boot_service(&mut tx, ctx.ip).await;
+    tx.rollback().await;
+    let (first, resolution) = resolved?;
+    let Some(service) = first else {
+        let (d, e) = no_service(resolution);
+        return Err(api.capped_refusal(ctx.ip, NO_BOOT_SERVICE, d, e).await);
+    };
+    let rate_refusal = |limit: &'static str| {
+        ctx.draft("device.session.open_refused", Outcome::Refused)
             .reason(codes::RATE_LIMITED.as_str())
-            .detail(claims());
+            .detail(
+                claims()
+                    .with("limit", limit)
+                    .with("boot_service_id", &service.id.to_string()),
+            )
+    };
+    let now = Instant::now();
+    if !api.inner.device.opens.admit(ctx.ip, now) {
+        let d = rate_refusal("session_opens_per_ip_per_min");
         let e = rate_limited("too many sessions were opened from this address; try again later");
         return Err(api.capped_refusal(ctx.ip, "rate_limited", d, e).await);
     }
-    // Finding SEC-001: a ceiling on opens from every source together.
-    if !api.inner.device.opens_total.admit(Instant::now()) {
-        let d = ctx
-            .draft("device.session.open_refused", Outcome::Refused)
-            .reason(codes::RATE_LIMITED.as_str())
-            .detail(claims().with("limit", "session_opens_per_min"));
+    // Finding SEC-011: a ceiling per boot service, so one network's
+    // devices cannot use up another's.
+    if !api.inner.device.opens_per_service.admit(service.id, now) {
+        let d = rate_refusal("session_opens_per_boot_service_per_min");
+        let e = rate_limited("too many sessions are being opened on this network; try again later");
+        return Err(api.capped_refusal(ctx.ip, "rate_limited", d, e).await);
+    }
+    // A server-wide ceiling above that (finding SEC-001).
+    if !api.inner.device.opens_total.admit(now) {
+        let d = rate_refusal("session_opens_per_min");
         let e = rate_limited("too many sessions are being opened; try again later");
         return Err(api.capped_refusal(ctx.ip, "rate_limited", d, e).await);
     }
@@ -255,24 +293,12 @@ pub(crate) async fn open<S: Store + 'static>(
         drop(raw);
         let display_code = DisplayCode::from_random_bytes(random::<4>()?);
         let mut tx = api.store().begin().await?;
-        // Finding SEC-001: no session unless exactly one active boot
-        // service serves the source address (403, capped record).
+        // Re-checked in the session's transaction: still exactly the
+        // boot service resolved above (finding SEC-001).
         let (bs, resolution) = resolve_boot_service(&mut tx, ctx.ip).await?;
-        let Some(bs) = bs else {
+        let Some(bs) = bs.filter(|b| b.id == service.id) else {
             tx.rollback().await;
-            let d = ctx
-                .draft("device.session.open_refused", Outcome::Refused)
-                .reason(NO_BOOT_SERVICE)
-                .detail(
-                    claims()
-                        .with("boot_service_resolution", resolution)
-                        .with("source_ip", &ctx.ip.to_string()),
-                );
-            let e = ApiError::new(
-                StatusCode::FORBIDDEN,
-                codes::FORBIDDEN,
-                "no boot service serves this network; ask an operator",
-            );
+            let (d, e) = no_service(resolution);
             return Err(api.capped_refusal(ctx.ip, NO_BOOT_SERVICE, d, e).await);
         };
         tx.lock_device_session_quota().await?;

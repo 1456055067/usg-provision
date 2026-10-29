@@ -42,8 +42,9 @@
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SA-11 (Developer Testing and Evaluation)
-// - NIST 800-53: CM-7 (Least Functionality) - test-only; regular files
-//   only; only the chosen file reaches the engine.
+// - NIST 800-53: CM-7 (Least Functionality) - sim-only on non-Windows;
+//   that build is not a release artifact. Regular files only; only the
+//   chosen file reaches the engine.
 // - SPEC: specs/disk.md#REQ-DISK-015
 
 use std::net::Ipv4Addr;

@@ -1618,6 +1618,7 @@ impl RepoTx for MemoryTx {
         if i64::try_from(j.wipe_audit_seq).is_err()
             || i64::try_from(j.package.revision).is_err()
             || j.bytes_total.is_some_and(|b| i64::try_from(b).is_err())
+            || !j.timeouts.valid()
         {
             return Err(DbError::InvalidArgument { what: "job" });
         }
@@ -1666,6 +1667,7 @@ impl RepoTx for MemoryTx {
             wipe_record_hash: j.wipe_record_hash,
             plan_sha256: j.plan_sha256,
             plan_key_id: j.plan_key_id,
+            timeouts: j.timeouts,
             acknowledged: None,
         });
         for step in Step::ALL {
@@ -1728,6 +1730,11 @@ impl RepoTx for MemoryTx {
             .collect();
         v.sort_by_key(|s| s.step);
         Ok(v)
+    }
+
+    async fn lock_mac_claims(&mut self) -> Result<(), DbError> {
+        // Transactions on the memory store are already serialised.
+        self.check()
     }
 
     async fn running_jobs_for_macs(&mut self, macs: &MacList) -> Result<Vec<JobId>, DbError> {

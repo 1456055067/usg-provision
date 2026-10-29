@@ -190,6 +190,12 @@ mod t {
     }
 
     #[tokio::test]
+    async fn m3_job_timeouts_checked() {
+        let (s, a) = setup().await;
+        m3::flow_job_timeouts_checked(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
     async fn m3_raise_generation() {
         let (s, a) = setup().await;
         m3::flow_raise_generation(&s, &s, &a).await;

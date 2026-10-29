@@ -56,7 +56,7 @@
 // GUID. A holder of a code can still claim MACs of devices that have no
 // stop and no running job. Target: M5.
 
-// POAM: CA-5 (SMBIOS identifier, finding NIST-015) - the session and the
+// POAM: AU-3/IA-3 (SMBIOS identifier, finding NIST-015) - the session and the
 // job identify the device only by claimed MACs; the SMBIOS machine
 // identifier is not collected or recorded. Target: M5, with the stop
 // keying above.
@@ -66,13 +66,14 @@ use hyper::header::{self, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use usgp_audit::{Detail, Outcome};
 use usgp_common::Sha256Digest;
-use usgp_db::{DbError, Job, NewBootStop, RepoTx, Store};
+use usgp_db::{DbError, Job, JobStep, NewBootStop, RepoTx, Store};
 use usgp_proto::content_manifest::chunk_count;
 use usgp_proto::device::SessionState;
 use usgp_proto::ops::BootServiceStatus;
+use usgp_proto::progress::FailureCategory;
 use usgp_proto::{
-    BootStopId, ContentState, JobId, JobState, ProgressAckV1, ProgressEvent, ProgressV1, Step,
-    StepState, codes,
+    BootStopId, ContentState, ErrorCode, FailureV1, JobId, JobState, ProgressAckV1, ProgressEvent,
+    ProgressV1, Step, StepState, UnixMicros, codes,
 };
 
 use super::auth::{DeviceCtx, require};
@@ -292,6 +293,109 @@ fn step_history(steps: &[usgp_db::JobStep]) -> String {
         .join(",")
 }
 
+/// Why a running job is past its signed plan's timeouts (finding
+/// SEC-012; REQ-JOB-011).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Overdue {
+    /// The step it fails at (the current step).
+    pub step: Step,
+    /// `step_timeout` or `stall_timeout`.
+    pub reason: &'static str,
+    /// The timeout exceeded, seconds.
+    pub timeout_s: u32,
+}
+
+/// `t` plus `secs` seconds (saturating).
+fn plus_s(t: UnixMicros, secs: u32) -> UnixMicros {
+    UnixMicros::new(
+        t.as_micros()
+            .saturating_add(i64::from(secs).saturating_mul(1_000_000)),
+    )
+    .unwrap_or(t)
+}
+
+/// `Some` if `job` is running and past its plan's step timeout (the
+/// current step has run for longer than its timeout) or stall timeout (no
+/// accepted report for that long) at `at`.
+pub(crate) fn overdue(job: &Job, steps: &[JobStep], at: UnixMicros) -> Option<Overdue> {
+    if job.state != JobState::Running {
+        return None;
+    }
+    let step = job.current_step;
+    let t = job.timeouts.step_s(step);
+    let started = steps
+        .iter()
+        .find(|s| s.step == step && s.state == StepState::Running)
+        .and_then(|s| s.started_at);
+    if let Some(started) = started
+        && at >= plus_s(started, t)
+    {
+        return Some(Overdue {
+            step,
+            reason: STEP_TIMEOUT,
+            timeout_s: t,
+        });
+    }
+    let heard = job
+        .last_report_at
+        .unwrap_or(job.started_at)
+        .max(job.started_at);
+    (at >= plus_s(heard, job.timeouts.stall_s)).then_some(Overdue {
+        step,
+        reason: STALL_TIMEOUT,
+        timeout_s: job.timeouts.stall_s,
+    })
+}
+
+/// Reason of a server-side step-timeout failure.
+pub(crate) const STEP_TIMEOUT: &str = "step_timeout";
+/// Reason of a server-side stall-timeout failure.
+pub(crate) const STALL_TIMEOUT: &str = "stall_timeout";
+
+/// A failure the server records itself (no files, one attempt).
+pub(crate) fn server_failure(
+    step: Step,
+    category: FailureCategory,
+    code: &'static str,
+) -> Result<FailureV1, ApiError> {
+    Ok(FailureV1 {
+        step,
+        category,
+        code: ErrorCode::new(code).map_err(ApiError::internal_error)?,
+        files: Vec::new(),
+        count: 0,
+        attempts: 1,
+    })
+}
+
+/// Fails `job` from one of `from` in `tx`: its current step (if running)
+/// becomes failed, then the job, with `failure`. Returns the step history
+/// after the change. [`DbError::Conflict`] becomes 409 `wrong_state`.
+pub(crate) async fn fail_in_tx<T: RepoTx>(
+    tx: &mut T,
+    job: &Job,
+    from: &[JobState],
+    failure: &FailureV1,
+    at: UnixMicros,
+) -> Result<String, ApiError> {
+    let steps = tx.job_steps(job.id).await?;
+    if state_of(&steps, job.current_step) == Some(StepState::Running) {
+        tx.set_job_step(job.id, job.current_step, StepState::Failed, at)
+            .await?;
+    }
+    match tx.fail_job(job.id, from, failure, at).await {
+        Ok(()) => {}
+        Err(DbError::Conflict { .. }) => {
+            return Err(ApiError::conflict(
+                codes::WRONG_STATE,
+                format!("the job is {}; it can no longer be failed", job.state),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(step_history(&tx.job_steps(job.id).await?))
+}
+
 /// The boot services a succeeded job's stops go on: its own, then every
 /// other active boot service whose served subnets contain the device's
 /// source address (decision 0023 item 2), each once.
@@ -484,6 +588,9 @@ pub(crate) async fn progress<S: Store + 'static>(
                     "success is reported only after step 4 completed",
                 )));
             }
+            // Finding SEC-013.1: the job stops holding its MACs and its
+            // stops appear in one step for any concurrent confirmation.
+            tx.lock_mac_claims().await?;
             // Step 5 changes state with its own records (finding NIST-009).
             let last = Step::REPORT_RESTART;
             if state_of(&steps, last) == Some(StepState::Pending) {
@@ -582,6 +689,59 @@ pub(crate) async fn progress<S: Store + 'static>(
 }
 
 impl<S: Store + 'static> Api<S> {
+    /// The timeout sweep (maintenance; finding SEC-012, REQ-JOB-011):
+    /// every running job past its signed plan's step timeout or stall
+    /// timeout is failed (category `timeout`, reason `step_timeout` or
+    /// `stall_timeout`), with one `job.failed` record by the server, each
+    /// job in its own transaction. Returns how many were failed.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] for the first job that could not be failed (the others
+    /// before it stay failed; it and the rest are retried next pass).
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SC-5, AC-12 - a job cannot hold its claimed MACs past
+    //   its timeouts; AU-2, AU-3, AU-12 - each failure audited with the
+    //   server as actor.
+    // - SPEC: specs/progress.md#REQ-JOB-011, #REQ-JOB-012
+    pub async fn fail_overdue_jobs(&self) -> Result<usize, ApiError> {
+        let at = self.now()?;
+        let mut tx = self.store().begin().await?;
+        let running = tx.list_jobs(&[JobState::Running]).await;
+        tx.rollback().await;
+        let mut failed = 0usize;
+        for j in running? {
+            let mut tx = self.store().begin().await?;
+            let Some(job) = tx.lock_job(j.id).await? else {
+                tx.rollback().await;
+                continue;
+            };
+            let steps = tx.job_steps(job.id).await?;
+            let Some(o) = overdue(&job, &steps, at) else {
+                tx.rollback().await;
+                continue;
+            };
+            let f = server_failure(o.step, FailureCategory::Timeout, o.reason)?;
+            let history = fail_in_tx(&mut tx, &job, &[JobState::Running], &f, at).await?;
+            let d = crate::context::system_draft("job.failed", Outcome::Failure)
+                .target("job", &job.id.to_string())
+                .reason(o.reason)
+                .detail(
+                    Detail::new()
+                        .with("step", &o.step.get())
+                        .with("kind", o.step.kind().as_str())
+                        .with("category", FailureCategory::Timeout.as_str())
+                        .with("timeout_s", &o.timeout_s)
+                        .with("failed_by", "server")
+                        .with("steps", &history),
+                );
+            let r = self.append(&mut tx, &d).await?;
+            self.commit(tx, &[r]).await?;
+            failed = failed.saturating_add(1);
+        }
+        Ok(failed)
+    }
+
     /// The lost-job sweep (maintenance): every running job not heard from
     /// for `jobs.lost_after_s` becomes `lost`, one `job.lost` record each,
     /// in one transaction (REQ-JOB-012). Returns how many.

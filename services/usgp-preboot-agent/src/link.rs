@@ -26,6 +26,7 @@ use crate::client::{ApiFailure, DeviceApi};
 /// [`ServerLink`] over a [`DeviceApi`].
 pub struct ApiLink<'a> {
     api: &'a mut dyn DeviceApi,
+    unauthorised: bool,
 }
 
 impl std::fmt::Debug for ApiLink<'_> {
@@ -37,7 +38,28 @@ impl std::fmt::Debug for ApiLink<'_> {
 impl<'a> ApiLink<'a> {
     /// A link over `api`, which already holds the session.
     pub fn new(api: &'a mut dyn DeviceApi) -> Self {
-        Self { api }
+        Self {
+            api,
+            unauthorised: false,
+        }
+    }
+
+    /// `true` once any call was answered 401: the server no longer
+    /// accepts the session token. With decision 0023 item 1 that happens
+    /// when the device's source network changed (for example a new IPv4
+    /// address after the wipe) or the confirmed session lapsed (SEC-013.2).
+    #[must_use]
+    pub fn saw_unauthorised(&self) -> bool {
+        self.unauthorised
+    }
+
+    fn note<T>(&mut self, r: Result<T, ApiFailure>) -> Result<T, LinkError> {
+        r.map_err(|e| {
+            if e.status() == Some(401) {
+                self.unauthorised = true;
+            }
+            classify(&e)
+        })
     }
 }
 
@@ -72,13 +94,13 @@ impl ServerLink for ApiLink<'_> {
         content: &Sha256Digest,
         n: u64,
     ) -> Result<Vec<u8>, LinkError> {
-        self.api
-            .fetch_chunk(job, content, n)
-            .map_err(|e| classify(&e))
+        let r = self.api.fetch_chunk(job, content, n);
+        self.note(r)
     }
 
     fn report(&mut self, job: JobId, report: &ProgressV1) -> Result<ProgressAckV1, LinkError> {
-        self.api.report(job, report).map_err(|e| classify(&e))
+        let r = self.api.report(job, report);
+        self.note(r)
     }
 }
 
@@ -116,5 +138,84 @@ mod tests {
         assert_eq!(classify(&status(500, None)), LinkError::Transient);
         assert_eq!(classify(&status(400, None)), LinkError::Protocol);
         assert_eq!(classify(&ApiFailure::BadResponse("x")), LinkError::Protocol);
+    }
+
+    /// A device API whose every call fails with `fail`.
+    struct Failing(ApiFailure);
+
+    impl DeviceApi for Failing {
+        fn open(
+            &mut self,
+            _: &usgp_proto::device::DeviceHelloV1,
+        ) -> Result<usgp_proto::device::SessionOpenedV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn status(&mut self) -> Result<usgp_proto::device::SessionStatusV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn submit_code(
+            &mut self,
+            _: &usgp_proto::AuthCode,
+        ) -> Result<usgp_proto::device::SessionStatusV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn packages(&mut self) -> Result<usgp_proto::device::DevicePackageListV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn choose_package(
+            &mut self,
+            _: &usgp_proto::device::ChoosePackageV1,
+        ) -> Result<(), ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn choose_disk(&mut self, _: &usgp_proto::DiskDescriptorV1) -> Result<(), ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn confirm(
+            &mut self,
+            _: &usgp_proto::device::ConfirmV1,
+        ) -> Result<usgp_proto::device::ConfirmedV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn cancel(&mut self) -> Result<(), ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn end(&mut self, _: &usgp_proto::device::EndSessionV1) -> Result<(), ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn fetch_chunk(
+            &mut self,
+            _: JobId,
+            _: &Sha256Digest,
+            _: u64,
+        ) -> Result<Vec<u8>, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn report(&mut self, _: JobId, _: &ProgressV1) -> Result<ProgressAckV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn bound_waits(&mut self, _: std::time::Duration, _: std::time::Duration) {}
+    }
+
+    /// SEC-013.2: a 401 during the job is remembered, so the agent can
+    /// show its own screen rather than a generic refusal.
+    #[test]
+    fn a_401_is_remembered() {
+        let job = JobId::parse("0b6f2c1e-8a4d-4f3b-9c2e-7d5a1b3c4e6f").unwrap();
+        let digest = usgp_crypto::sha256(b"chunk");
+        let mut api = Failing(status(401, Some(codes::INVALID_TOKEN)));
+        let mut link = ApiLink::new(&mut api);
+        assert!(!link.saw_unauthorised());
+        assert_eq!(link.fetch_chunk(job, &digest, 0), Err(LinkError::Refused));
+        assert!(link.saw_unauthorised());
+
+        let mut api = Failing(status(403, Some(codes::FORBIDDEN)));
+        let mut link = ApiLink::new(&mut api);
+        let _ = link.fetch_chunk(job, &digest, 0);
+        assert!(!link.saw_unauthorised(), "403 is not a token refusal");
+        let mut api = Failing(status(503, None));
+        let mut link = ApiLink::new(&mut api);
+        let _ = link.fetch_chunk(job, &digest, 0);
+        assert!(!link.saw_unauthorised());
     }
 }

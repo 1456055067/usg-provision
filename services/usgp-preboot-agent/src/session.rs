@@ -58,6 +58,12 @@ use crate::link::ApiLink;
 use crate::ui::{self, Console, ConsoleClosed, ConsoleView, Input};
 
 pub use crate::ui::MAX_IDLE_WAIT;
+/// The agent's own failure code when the server answers 401 during the
+/// job (SEC-013.2): it no longer accepts this device's session. Shown on
+/// screen and returned in [`Outcome::JobFailed`]; never sent (the server
+/// refuses the token).
+pub const SESSION_NOT_ACCEPTED: &str = "session_not_accepted";
+
 /// Poll interval bounds (the server suggests `poll_ms`).
 const POLL_MS: (u64, u64) = (500, 10_000);
 /// Design caps on the job's own I/O waits (below the plan's limits).
@@ -747,11 +753,11 @@ impl Agent<'_> {
             budget
         });
         let job_id = confirmed.job_id;
+        let mut link = ApiLink::new(&mut *self.api);
         let result = match self.host.platform(e, budget) {
             // The engine could not start: it reports its own step-1
             // failure (local, internal, nothing written) and shows it.
             Err(err) => {
-                let mut link = ApiLink::new(&mut *self.api);
                 let mut view = ConsoleView::new(&mut *self.console);
                 Err(engine.fail_before_start(
                     job_id,
@@ -762,7 +768,6 @@ impl Agent<'_> {
                 ))
             }
             Ok(mut platform) => {
-                let mut link = ApiLink::new(&mut *self.api);
                 let mut view = ConsoleView::new(&mut *self.console);
                 match &verified {
                     Some(v) => engine.run(v, &mut *platform, &mut link, &mut view),
@@ -780,11 +785,38 @@ impl Agent<'_> {
                 }
             }
         };
+        let token_refused = link.saw_unauthorised();
         match result {
             Ok(s) => Ending {
                 outcome: Outcome::Succeeded(s.job_id),
                 action: Some(PowerAction::Restart),
             },
+            // SEC-013.2: the server answered 401 to a job request, so it no
+            // longer accepts this session (decision 0023 item 1: the token
+            // is bound to the source network). Not "server unreachable":
+            // a screen and a code of its own. The server cannot be told
+            // (it refuses the token); the job becomes lost there.
+            Err(f) if token_refused => {
+                let mut lines: Vec<String> = vec![
+                    "The server no longer accepts this device's session; its network address \
+                     may have changed (for example a new address from DHCP), or the session \
+                     lapsed."
+                        .to_owned(),
+                    "The server will mark the job lost. An operator can see it in the job \
+                     list."
+                        .to_owned(),
+                ];
+                lines.extend(ui::failure_lines(&f));
+                lines.push(format!("Code: {SESSION_NOT_ACCEPTED}"));
+                self.stop(
+                    "The server no longer accepts this device's session",
+                    &lines,
+                    Outcome::JobFailed {
+                        written: f.disk_written,
+                        code: SESSION_NOT_ACCEPTED.to_owned(),
+                    },
+                )
+            }
             Err(f) => {
                 // The failure is on screen (ConsoleView keeps it).
                 let action = self.wait_for_person();

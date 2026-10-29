@@ -681,6 +681,18 @@ device on purpose gets no answer until an operator acts.
   A stop is reversed only by an audited operator command until
   REQ-BOOT-062 is specced. Requirement text unchanged; the list's form
   and signing are clean-side design.
+- Status note (DRAFT, 2026-10-29) [project rule], DEC-0023 item 2: a
+  stop applies on every active boot service whose subnets include the
+  device's source address, not only on the job's own boot service. It
+  is keyed by the network hardware addresses the device claimed. Those
+  addresses are shown at confirmation and recorded with the job's
+  success; an address that already has a live stop, or a running job
+  under another session, is refused at confirmation; each stop is
+  marked "claimed" (the device's own report, not verified) in its
+  audit record. Stopping a device by its SMBIOS UUID or DHCP option 97
+  GUID, or by a hardware address a relay observed, is not built in
+  M3; it is a POA&M item for M5. DEC-0023 amends the stop scope of
+  DEC-0021 item 2. Requirement text unchanged.
 
 ### Timing
 

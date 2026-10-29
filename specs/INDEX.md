@@ -98,7 +98,7 @@ a decision.
 | BOOT-2 | Network boot works on UEFI firmware (M1 scope by project decision: x86-64, IPv4). | `specs/boot-network.md` | P1 | AUDITED | REQ-BOOT-003, 005 | SRC-004 (indirect), DEC-0004 |
 | BOOT-3 | Network boot also works on legacy BIOS firmware, including first-generation virtual machines, with working video output. | `specs/boot-network.md` | P2 | NOT SPECCED | none | SRC-004, SRC-006, SRC-007 |
 | BOOT-4 | UEFI devices can use HTTP boot instead of TFTP-based PXE, for faster transfer. *Single source (SRC-009, dated 2022); the public release notes do not mention it. Any requirement derived from this row is capped at SHOULD, or marked `OPEN`, until a second public source confirms it.* | `specs/boot-network.md` | P2 | NOT SPECCED | none | SRC-009 |
-| BOOT-5 | After a network-booted install, the device's next boot goes to the installed disk rather than looping back into network boot. For M1, an operator can tell the boot service not to offer a boot program to a device, so that the device falls through to its next boot option (project decision, M1). M3: the boot service serves the Windows PE boot files, and the install leaves the installed Windows first in the firmware boot order. | `specs/boot-network.md` | P1 | AUDITED (partial; AUDITED: 050, 051, 060; OPEN: 062). M3: AUDITED 2026-10-28, 063, 064, 066 (064 by DEC-0018 item 2, project rule); AUDITED 2026-10-28 (re-audit round 2), 061, 065, 067 (DEC-0018 item 9, project rule). M3 build: AUDITED 2026-10-28 status notes on 062 and 067 (DEC-0021, project rule) | REQ-BOOT-050, 051, 060 to 067 (OPEN: 062) | SRC-004, SRC-021, SRC-088, SRC-089, SRC-091 to SRC-094, DEC-0004, DEC-0018, DEC-0021 |
+| BOOT-5 | After a network-booted install, the device's next boot goes to the installed disk rather than looping back into network boot. For M1, an operator can tell the boot service not to offer a boot program to a device, so that the device falls through to its next boot option (project decision, M1). M3: the boot service serves the Windows PE boot files, and the install leaves the installed Windows first in the firmware boot order. | `specs/boot-network.md` | P1 | AUDITED (partial; AUDITED: 050, 051, 060; OPEN: 062). M3: AUDITED 2026-10-28, 063, 064, 066 (064 by DEC-0018 item 2, project rule); AUDITED 2026-10-28 (re-audit round 2), 061, 065, 067 (DEC-0018 item 9, project rule). M3 build: AUDITED 2026-10-28 status notes on 062 and 067 (DEC-0021, project rule). 2026-10-29: DRAFT status note on 067 (DEC-0023 item 2, project rule) | REQ-BOOT-050, 051, 060 to 067 (OPEN: 062) | SRC-004, SRC-021, SRC-088, SRC-089, SRC-091 to SRC-094, DEC-0004, DEC-0018, DEC-0021, DEC-0023 |
 | BOOT-6 | ARM-architecture devices can be provisioned. | `specs/boot-network.md` | P3 | NOT SPECCED | none | SRC-004, SRC-007 |
 
 ### MEDIA — Boot media
@@ -142,7 +142,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| DISK-1 | The installer selects the target disk at boot; existing partitions are wiped and the disk is partitioned for the OS. | `specs/disk.md` | P1 | AUDITED (M3, 2026-10-28; REQ-DISK-001 to 016; 002, 005, 006, 016 rest on DEC-0018 items 7 and 8, project rules; OPEN-DISK-1 to 4 remain; M3 build: OPEN-DISK-5 added, AUDITED 2026-10-28) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-057, SRC-080, SRC-084 to SRC-087, SRC-096, SRC-099, SRC-110, SRC-130, DEC-0004, DEC-0009, DEC-0018 |
+| DISK-1 | The installer selects the target disk at boot; existing partitions are wiped and the disk is partitioned for the OS. | `specs/disk.md` | P1 | AUDITED (M3, 2026-10-28; REQ-DISK-001 to 016; 002, 005, 006, 016 rest on DEC-0018 items 7 and 8, project rules; OPEN-DISK-1 to 4 remain; M3 build: OPEN-DISK-5 added, AUDITED 2026-10-28; 2026-10-29: DRAFT status note on 004, DEC-0023 item 3, project rule) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-057, SRC-080, SRC-084 to SRC-087, SRC-096, SRC-099, SRC-110, SRC-130, DEC-0004, DEC-0009, DEC-0018, DEC-0023 |
 | DISK-2 | eMMC storage is supported as a target. | `specs/disk.md` | P3 | NOT SPECCED | SRC-006 |
 
 ### CFG — Configuration and answer files
@@ -394,7 +394,9 @@ decide.
    with a subdirectory apply root; [project rule, REQ-PE-017] in M3
    the apply root is the Windows partition's root, so it does not
    arise. The R5 notes were audited 2026-10-28, approve with comments;
-   fixes CR-R5S-001 to 005 applied).
+   fixes CR-R5S-001 to 005 applied. 2026-10-29: a DRAFT [project
+   rule] in §13 next to M-04 refuses image names that break topic 23
+   §27, citing OPEN-WAPI-14).
    Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.

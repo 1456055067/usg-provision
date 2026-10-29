@@ -17,6 +17,7 @@ fn concrete(pattern: &str) -> String {
 #[tokio::test]
 async fn every_bearer_route_refuses_without_token() {
     let h = Harness::m3().await;
+    h.loopback_service("routes").await;
     let mut n = 0;
     for r in DEVICE_ROUTES.iter().filter(|r| r.id != DeviceRouteId::Open) {
         let body = r.json_body.then(|| b"{}".to_vec());
@@ -39,6 +40,7 @@ async fn every_bearer_route_refuses_without_token() {
 #[tokio::test]
 async fn listeners_are_separate() {
     let h = Harness::m3().await;
+    h.loopback_service("separate").await;
     // Operator routes do not exist on the device listener.
     let r = h.dev_raw("GET", "/v1/packages", &[], None).await;
     assert_eq!(r.status, 404);

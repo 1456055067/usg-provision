@@ -132,6 +132,76 @@ mod tls {
         }
     }
 
+    /// The full-digest content tag (73 bytes) is kept, so the check that
+    /// the server's `ETag` names the signed digest runs: a tag naming
+    /// another digest refuses the download (M3 review: the tag used to be
+    /// dropped as over the 64-byte limit, and the check never ran).
+    #[test]
+    fn etag_naming_another_digest_refused() {
+        let key = SigningKey::generate().unwrap();
+        let d = data();
+        let wrong = api::content_etag(&usgp_crypto::sha256(b"another file"));
+        assert_eq!(wrong.len(), 73);
+        let env = Env::new(
+            vec![
+                route("GET", &manifest_path(), 200, content_manifest(&key, &d)),
+                route("GET", &content_path(), 200, d.clone()).with_header("etag", &wrong),
+            ],
+            Some(key.verifying_key()),
+        );
+        let out = env.dir.join("x.wim");
+        let o = download(&env, &out);
+        assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+        assert!(
+            stderr(&o).contains("server ETag does not name the signed digest"),
+            "{}",
+            stderr(&o)
+        );
+        assert!(!out.exists());
+        assert!(!part(&out).exists());
+    }
+
+    /// Image delete sends the server's full-digest content tag in
+    /// `If-Match` as read (here the view has no digest to fall back on).
+    #[test]
+    fn delete_sends_full_content_etag() {
+        let tag = api::content_etag(&usgp_crypto::sha256(b"image bytes"));
+        let view = api::ImageView {
+            id: ContentId::parse(ID).unwrap(),
+            display_name: DisplayName::new("Win 11 Ent").unwrap(),
+            file_name: FileName::new("install image.wim").unwrap(),
+            size: 11,
+            sha256: None,
+            state: ContentState::Failed,
+            reason: None,
+            created_by: OperatorId::parse(PKG).unwrap(),
+            created_at: UnixMicros::new(0).unwrap(),
+            updated_at: UnixMicros::new(0).unwrap(),
+            compression: None,
+            image_count: None,
+            boot_index: None,
+            editions: Vec::new(),
+        };
+        let env = Env::new(
+            vec![
+                route(
+                    "GET",
+                    &format!("/v1/images/{ID}"),
+                    200,
+                    serde_json::to_vec(&view).unwrap(),
+                )
+                .with_header("etag", &tag),
+                route("DELETE", &format!("/v1/images/{ID}"), 204, Vec::new()),
+            ],
+            None,
+        );
+        let o = env.run(&["image", "delete", ID, "--yes"], b"");
+        assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+        let seen = env.seen();
+        let del = seen.iter().find(|s| s.method == "DELETE").unwrap();
+        assert_eq!(del.header("if-match"), Some(tag.as_str()));
+    }
+
     #[test]
     fn tampered_chunk() {
         let key = SigningKey::generate().unwrap();

@@ -63,6 +63,9 @@ pub enum Permission {
     JobView,
     /// Acknowledge a failed job.
     JobAcknowledge,
+    /// Fail a running or lost job (finding SEC-012: releases the MACs it
+    /// claims).
+    JobFail,
     /// View boot services and their packages (REQ-TGT-001, REQ-TGT-008).
     BootServiceView,
     /// Set the packages a boot service offers (REQ-TGT-001).
@@ -95,6 +98,7 @@ impl Permission {
         Self::DeviceSessionApprove,
         Self::JobView,
         Self::JobAcknowledge,
+        Self::JobFail,
         Self::BootServiceView,
         Self::BootServiceAssign,
         Self::BootStopView,
@@ -124,6 +128,7 @@ impl Permission {
             Self::DeviceSessionApprove => "device_session.approve",
             Self::JobView => "job.view",
             Self::JobAcknowledge => "job.acknowledge",
+            Self::JobFail => "job.fail",
             Self::BootServiceView => "boot_service.view",
             Self::BootServiceAssign => "boot_service.assign",
             Self::BootStopView => "boot_stop.view",

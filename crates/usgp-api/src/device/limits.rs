@@ -31,6 +31,8 @@ use usgp_proto::limits::{
 };
 use usgp_proto::ops::MAX_CODE_TTL_S;
 
+use usgp_proto::BootServiceId;
+
 use crate::authn::{MAX_TRACKED_SOURCES, source_key};
 use crate::limits::ConfigError;
 
@@ -120,9 +122,19 @@ pub struct DeviceConfig {
     pub unauthorised_idle_timeout: Duration,
     /// Session opens per source per minute (10).
     pub session_opens_per_ip_per_min: u32,
-    /// Session opens per minute from all sources together (120; finding
-    /// SEC-001).
+    /// Session opens per minute from all sources together (600; findings
+    /// SEC-001, SEC-011: above the per-boot-service ceiling, so one
+    /// network cannot use it up).
     pub session_opens_per_min: u32,
+    /// Session opens per minute per boot service (60; finding SEC-011).
+    pub session_opens_per_boot_service_per_min: u32,
+    /// Concurrent connections from the sources one boot service serves
+    /// (64; finding SEC-001: a connection is admitted only from a source
+    /// an active boot service serves).
+    pub max_connections_per_boot_service: usize,
+    /// How often the accept loop reloads the served-subnet table from the
+    /// store (30 s; finding SEC-001).
+    pub boot_service_refresh: Duration,
     /// Failed code attempts before the session is refused (5).
     pub code_attempts_per_session: u32,
     /// Code attempts per source per minute (10).
@@ -162,7 +174,10 @@ impl Default for DeviceConfig {
             max_pending_sessions_per_boot_service: 32,
             unauthorised_idle_timeout: Duration::from_secs(120),
             session_opens_per_ip_per_min: 10,
-            session_opens_per_min: 120,
+            session_opens_per_min: 600,
+            session_opens_per_boot_service_per_min: 60,
+            max_connections_per_boot_service: 64,
+            boot_service_refresh: Duration::from_secs(30),
             code_attempts_per_session: 5,
             code_attempts_per_ip_per_min: 10,
             poll_ms: 2000,
@@ -185,7 +200,7 @@ impl DeviceConfig {
         let secs = |d: Duration, lo: u64, hi: u64| (lo..=hi).contains(&d.as_secs());
         let step = |s: u32| (1..=MAX_STEP_TIMEOUT_S).contains(&s);
         let j = &self.jobs;
-        let checks: [(bool, &'static str, &'static str); 25] = [
+        let checks: [(bool, &'static str, &'static str); 28] = [
             (
                 (1..=4096).contains(&self.max_connections),
                 "device_api.max_connections",
@@ -263,6 +278,21 @@ impl DeviceConfig {
                 (1..=100_000).contains(&self.session_opens_per_min),
                 "device_api.session_opens_per_min",
                 "1 to 100000",
+            ),
+            (
+                (1..=100_000).contains(&self.session_opens_per_boot_service_per_min),
+                "device_api.session_opens_per_boot_service_per_min",
+                "1 to 100000",
+            ),
+            (
+                (1..=self.max_connections).contains(&self.max_connections_per_boot_service),
+                "device_api.max_connections_per_boot_service",
+                "1 to device_api.max_connections",
+            ),
+            (
+                secs(self.boot_service_refresh, 1, 600),
+                "device_api.boot_service_refresh_s",
+                "1 to 600",
             ),
             (
                 (1..=20).contains(&self.code_attempts_per_session),
@@ -392,6 +422,55 @@ impl GlobalRate {
     }
 }
 
+/// Most boot services [`PerServiceRate`] tracks; beyond it the windows
+/// are reset (at worst a fresh minute for every service).
+const MAX_TRACKED_SERVICES: usize = 4096;
+
+/// Events per boot service per minute (finding SEC-011).
+#[derive(Debug)]
+pub struct PerServiceRate {
+    per_min: u32,
+    state: Mutex<HashMap<BootServiceId, Window>>,
+}
+
+impl PerServiceRate {
+    /// A limiter allowing `per_min` events per boot service per minute.
+    #[must_use]
+    pub fn new(per_min: u32) -> Self {
+        Self {
+            per_min,
+            state: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// True (and counted) if one more event for `service` fits now.
+    pub fn admit(&self, service: BootServiceId, now: Instant) -> bool {
+        let mut m = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !m.contains_key(&service) && m.len() >= MAX_TRACKED_SERVICES {
+            m.retain(|_, w| now.saturating_duration_since(w.start) < WINDOW);
+            if m.len() >= MAX_TRACKED_SERVICES {
+                m.clear();
+            }
+        }
+        let w = m.entry(service).or_insert(Window {
+            start: now,
+            count: 0,
+        });
+        if now.saturating_duration_since(w.start) >= WINDOW {
+            *w = Window {
+                start: now,
+                count: 0,
+            };
+        }
+        if w.count < self.per_min {
+            w.count = w.count.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Events per source (IPv4 address or IPv6 /64) per minute. Memory is
 /// bounded: beyond [`MAX_TRACKED_SOURCES`] sources, new ones share one
 /// overflow window (so a spoofed-address flood limits itself).
@@ -489,7 +568,10 @@ mod tests {
         let base = DeviceConfig::default();
         assert_eq!(base.max_pending_sessions_per_boot_service, 32);
         assert_eq!(base.unauthorised_idle_timeout, Duration::from_secs(120));
-        assert_eq!(base.session_opens_per_min, 120);
+        assert_eq!(base.session_opens_per_min, 600);
+        assert_eq!(base.session_opens_per_boot_service_per_min, 60);
+        assert_eq!(base.max_connections_per_boot_service, 64);
+        assert_eq!(base.boot_service_refresh, Duration::from_secs(30));
         for (c, setting) in [
             (
                 DeviceConfig {
@@ -520,9 +602,42 @@ mod tests {
                 },
                 "device_api.session_opens_per_min",
             ),
+            (
+                DeviceConfig {
+                    session_opens_per_boot_service_per_min: 0,
+                    ..base.clone()
+                },
+                "device_api.session_opens_per_boot_service_per_min",
+            ),
+            (
+                DeviceConfig {
+                    max_connections_per_boot_service: 257,
+                    ..base.clone()
+                },
+                "device_api.max_connections_per_boot_service",
+            ),
+            (
+                DeviceConfig {
+                    boot_service_refresh: Duration::from_secs(0),
+                    ..base.clone()
+                },
+                "device_api.boot_service_refresh_s",
+            ),
         ] {
             assert_eq!(c.validate().unwrap_err().setting, setting);
         }
+    }
+
+    #[test]
+    fn per_service_rate() {
+        let r = PerServiceRate::new(2);
+        let t = Instant::now();
+        let a = BootServiceId::from_random_bytes([1; 16]);
+        let b = BootServiceId::from_random_bytes([2; 16]);
+        assert!(r.admit(a, t) && r.admit(a, t));
+        assert!(!r.admit(a, t));
+        assert!(r.admit(b, t));
+        assert!(r.admit(a, t + WINDOW));
     }
 
     #[test]

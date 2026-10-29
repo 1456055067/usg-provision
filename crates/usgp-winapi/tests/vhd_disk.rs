@@ -46,11 +46,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use usgp_disk::{BlockDevice, GptLimits, parse_gpt};
+use usgp_disk::layout::PartRole;
+use usgp_disk::{
+    BlockDevice, Bus, DiskFacts, DiskIdentity, GptLimits, WindowsUefiLayout, parse_gpt,
+};
 use usgp_winapi::WinApiError;
 use usgp_winapi::disk::{
     self, DiskInterface, DiskQuery, PartitionStyle, RawDisk, TableId, Writability,
 };
+use usgp_winapi::diskpart::FsKind;
+use usgp_winapi::format::{self, FormatEnv, FormatTarget};
 use usgp_winapi::paths::DriveLetter;
 use usgp_winapi::volume;
 
@@ -81,13 +86,17 @@ struct Vhd {
 
 impl Vhd {
     fn create(path: &Path) -> Result<Self, String> {
+        Self::create_mib(path, VHD_MIB)
+    }
+
+    fn create_mib(path: &Path, mib: u64) -> Result<Self, String> {
         let _ = std::fs::remove_file(path);
         let vhd = Self {
             path: path.to_owned(),
         };
         diskpart(&[
             format!(
-                "create vdisk file=\"{}\" maximum={VHD_MIB} type=expandable",
+                "create vdisk file=\"{}\" maximum={mib} type=expandable",
                 path.display()
             ),
             vhd.select(),
@@ -141,6 +150,22 @@ impl BlockDevice for ReadOnly {
     }
 }
 
+/// A freshly attached VHD has no partitions: Windows reports it either as
+/// RAW (no table) or as an empty MBR (observed on the CI runner). Any
+/// other style, or any partition, fails.
+fn assert_new_disk_is_empty(layout: &disk::DriveLayout) {
+    assert!(
+        matches!(layout.style, PartitionStyle::Raw | PartitionStyle::Mbr),
+        "new disk style {:?}",
+        layout.style
+    );
+    assert!(
+        layout.partitions.is_empty(),
+        "new disk has partitions: {:?}",
+        layout.partitions
+    );
+}
+
 fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
@@ -184,7 +209,12 @@ fn vhd_raw_io_update_and_volume_letters() {
         .expect("inspect");
     println!("VHD disk {n}: {info:?}");
     assert_eq!(info.geometry.size_bytes, size);
-    assert_eq!(info.layout.style, PartitionStyle::Raw);
+    // A new VHD is "like an uninitialised disk" (`winpe.md` §11), but the
+    // runner has reported it as MBR-style (CI run 40876728637), so the
+    // style is an observation; what matters is that it has no partitions.
+    println!("VHD-OBS new disk style: {:?}", info.layout.style);
+    assert_new_disk_is_empty(&info.layout);
+    let first_table = info.layout.table_id();
     assert_eq!(info.writability, Writability::Writable);
     assert_eq!(info.interface_path, None, "opened by number");
 
@@ -202,7 +232,7 @@ fn vhd_raw_io_update_and_volume_letters() {
         .expect("inspect by path");
     assert_eq!(by_path.interface_path.as_deref(), Some(iface.path.as_str()));
     assert_eq!(by_path.descriptor, info.descriptor);
-    assert_eq!(by_path.layout.table_id(), TableId::None);
+    assert_eq!(by_path.layout.table_id(), first_table);
     let w = RawDisk::open_interface_for_write(&iface, size).expect("open by path for write");
     assert_eq!(w.number(), n);
     assert_eq!(
@@ -211,7 +241,7 @@ fn vhd_raw_io_update_and_volume_letters() {
     );
     assert_eq!(
         w.layout().expect("layout on the write handle").table_id(),
-        TableId::None
+        first_table
     );
     drop(w);
     assert!(matches!(
@@ -265,7 +295,10 @@ fn vhd_raw_io_update_and_volume_letters() {
     raw.read_at(size - sector, &mut last)
         .expect("read last sector");
     raw.update_properties().expect("update properties");
-    assert_eq!(raw.layout().expect("layout").style, PartitionStyle::Raw);
+    // Only sectors past LBA 0 were written: the table is as it was.
+    let after = raw.layout().expect("layout");
+    assert_eq!(after.style, info.layout.style);
+    assert_new_disk_is_empty(&after);
     drop(raw);
 
     // Let DiskPart lay out and format one volume, then resolve it by
@@ -399,5 +432,173 @@ fn vhd_raw_io_update_and_volume_letters() {
             .expect("letters")
             .contains(&letter)
     );
+    drop(vhd);
+}
+
+/// The single disk that appeared after `before` was taken.
+fn new_disk(before: &BTreeSet<u32>) -> u32 {
+    wait_for("the attached VHD", || {
+        let after: BTreeSet<u32> = disk::enumerate().ok()?.into_iter().collect();
+        let new: Vec<u32> = after.difference(before).copied().collect();
+        assert!(new.len() <= 1, "more than one new disk appeared: {new:?}");
+        new.first().copied()
+    })
+}
+
+/// BOOT-004: our full four-partition layout, with the recovery partition
+/// already carrying its type and attributes `0x8000000000000001`
+/// (`gpt.md` §10, REQ-DISK-008), is written to a VHD exactly as the
+/// engine writes it (the `usgp-disk` plan through `RawDisk`, then the
+/// property update). Each volume is then formatted with the agent's own
+/// code, `usgp_winapi::format` (wait for the volume by extent, assign a
+/// letter, write the script, re-check the letter, DiskPart, read back).
+/// Only the letter choice differs: any free letter from P to W, where the
+/// agent prefers W, S and R and reserves the Windows letter.
+///
+/// Prints `BOOT-004 recovery-format accepted: ...` or `BOOT-004
+/// recovery-format refused: ...` for the CI summary. A refusal fails the
+/// test: the agent then needs the format-as-basic-data fallback (POAM in
+/// `platform_win.rs`).
+///
+/// The VHD is 66 000 MiB expandable (above the 64 GB layout minimum);
+/// quick formats write little, so the file stays small.
+#[test]
+#[ignore = "needs administrator rights and USGP_WIN_VHD=1; run by the windows-agent CI job with --ignored"]
+fn boot004_recovery_typed_partition_formats() {
+    assert_eq!(
+        std::env::var("USGP_WIN_VHD").as_deref(),
+        Ok("1"),
+        "set USGP_WIN_VHD=1 to run this test (NOT RUN is never PASS)"
+    );
+    let before: BTreeSet<u32> = disk::enumerate().expect("enumerate").into_iter().collect();
+    let path = std::env::temp_dir().join(format!("usgp-boot004-{}.vhdx", std::process::id()));
+    let vhd = Vhd::create_mib(&path, 66_000).expect("create and attach the VHD");
+    let n = new_disk(&before);
+    let iface = disk::interfaces()
+        .expect("interfaces")
+        .into_iter()
+        .find(|i| i.number == n)
+        .expect("the VHD's interface");
+    let info = DiskQuery::open_interface(&iface)
+        .expect("open")
+        .inspect()
+        .expect("inspect");
+    println!("VHD-OBS new disk style: {:?}", info.layout.style);
+    assert_new_disk_is_empty(&info.layout);
+    let (logical, physical) = info.sector_sizes.map_or(
+        (
+            info.geometry.bytes_per_sector,
+            info.geometry.bytes_per_sector,
+        ),
+        |s| (s.logical, s.physical),
+    );
+    let facts = DiskFacts {
+        identity: DiskIdentity {
+            device_number: n,
+            model: String::new(),
+            serial: None,
+        },
+        bus: Bus::FileBackedVirtual,
+        removable: false,
+        read_only: false,
+        logical_sector: logical,
+        physical_sector: physical,
+        size_bytes: info.geometry.size_bytes,
+        hosts_boot_environment: false,
+        partitions: Vec::new(),
+    };
+    // Distinct, non-nil GUID bytes (test data; the agent uses the DRBG).
+    let mut counter = 0u8;
+    let mut rng = |buf: &mut [u8]| {
+        for b in buf {
+            counter = counter.wrapping_add(1);
+            *b = counter;
+        }
+    };
+    let layout = WindowsUefiLayout::compute(&facts, 500 * 1024 * 1024, &mut rng).expect("layout");
+    assert_eq!(layout.recovery.attributes, 0x8000_0000_0000_0001);
+    let plan = layout.gpt_plan().expect("GPT plan");
+
+    // Write the table as the engine does (backup first; usgp-disk's
+    // order), then make Windows re-read it.
+    let mut raw = RawDisk::open_interface_for_write(&iface, info.geometry.size_bytes)
+        .expect("open for write");
+    for (off, bytes) in plan.writes().expect("encode") {
+        raw.write_at(off, &bytes).expect("write table");
+    }
+    raw.flush().expect("flush");
+    raw.update_properties().expect("update properties");
+    drop(raw);
+
+    let system_dir = usgp_winapi::system::system_directory().expect("system directory");
+    let script_dir = std::env::temp_dir();
+    let env = FormatEnv {
+        system_dir: &system_dir,
+        script_dir: &script_dir,
+        tool_limit: Duration::from_secs(600),
+    };
+    let block = u64::from(layout.block);
+    let roles = [
+        (&layout.esp, FsKind::Fat32, "System"),
+        (&layout.windows, FsKind::Ntfs, "Windows"),
+        (&layout.recovery, FsKind::Ntfs, "Recovery"),
+    ];
+    let mut letters = Vec::new();
+    let mut recovery = None;
+    for (i, (part, fs, label)) in roles.iter().enumerate() {
+        let t = FormatTarget {
+            disk: n,
+            start: part.first_lba * block,
+            len: part.len_lbas() * block,
+            fs: *fs,
+            label,
+        };
+        let outcome = format::wait_for_volume(&t, Duration::from_secs(60)).and_then(|vol| {
+            let letter = ('P'..='W')
+                .filter_map(DriveLetter::new)
+                .find(|l| volume::volume_at(*l).is_err())
+                .expect("a free letter");
+            volume::assign_letter(letter, &vol).map_err(format::FormatError::Os)?;
+            letters.push(letter);
+            let random = [u8::try_from(i).unwrap_or(0).wrapping_add(0xB0); 16];
+            format::format_at_letter(&t, &vol, letter, &env, random)?;
+            Ok((vol, letter))
+        });
+        println!("BOOT-004 {:?} ({label}): {outcome:?}", part.role);
+        match part.role {
+            PartRole::Recovery => recovery = Some((t, outcome)),
+            _ => {
+                let (vol, _) = outcome.unwrap_or_else(|e| panic!("{label}: {e}"));
+                let want = if *fs == FsKind::Fat32 {
+                    "FAT32"
+                } else {
+                    "NTFS"
+                };
+                assert_eq!(volume::file_system_name(&vol).expect("fs"), want);
+            }
+        }
+    }
+    let (t, outcome) = recovery.expect("recovery formatted or refused");
+    match outcome {
+        Ok((vol, _)) => {
+            let fs = volume::file_system_name(&vol).expect("fs");
+            let ext = volume::disk_extents(&vol).expect("extents");
+            println!(
+                "BOOT-004 recovery-format accepted: {fs} at disk {n} offset {} length {} \
+                 (type {}, attributes {:#018x})",
+                t.start, t.len, layout.recovery.type_guid, layout.recovery.attributes
+            );
+            assert_eq!(fs, "NTFS");
+            assert!(matches!(ext.as_slice(), [x] if x.disk_number == n
+                && x.starting_offset == t.start && x.length == t.len));
+        }
+        Err(e) => {
+            println!("BOOT-004 recovery-format refused: {e}");
+            panic!("BOOT-004 recovery-format refused: {e} (the agent needs the fallback)");
+        }
+    }
+    for l in letters {
+        let _ = volume::remove_letter(l);
+    }
     drop(vhd);
 }

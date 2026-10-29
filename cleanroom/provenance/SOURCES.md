@@ -511,7 +511,17 @@ clean-room code audit CR-001 and CR-003; 2026-10-29):
   open.
 - REL-M3-WU15-003 (DLL search order, 2026-10-29): three Microsoft
   Learn pages fetched (SRC-166), no search, no vendor source. New
-  text: topic 23 §28 and OPEN-WAPI-15, DRAFT.
+  text: topic 23 §28 and OPEN-WAPI-15, DRAFT (AUDITED 2026-10-29 after
+  CR-W15-002 and 003).
+- M3 review spec drift (2026-10-29): no fetches, no search. DEC-0023
+  logged from the coordinator's message (record not opened). Three
+  DRAFT status notes, all [project rule]: REQ-DISK-004 (DEC-0023 item
+  3), REQ-BOOT-067 (DEC-0023 item 2), and a names rule in
+  standards/wim.md §13 next to M-04, which cites topic 23 §27 and
+  OPEN-WAPI-14. Follow-up the same day: the names rule now cites
+  [project rule, DEC-0021 item 4; REQ-JOB-008] as the coordinator
+  directed; the DEC-0023 record was opened at the coordinator's
+  direction and its row and the two notes were completed from it.
 
 DISM sample run R3 folded into wim.md (spec request SR-5, 2026-10-28):
 
@@ -774,6 +784,7 @@ recorded in the repository and need no public-access check.
 | DEC-0020 | Pre-boot agent trust model | `docs/decisions/0020-preboot-agent-trust-model.md` | 2026-10-28 (owner decision, as stated in the M3 build spec request) | Project decision, not product behaviour. Content taken from the spec request; record not opened. Checked by the clean-room auditor 2026-10-28 (spec pass) | Items 1 and 5: the operator adds the agent and its public configuration (server address and trust anchor) to the operator's own WinPE, and the product never modifies the PE (CR-002); the device carries no secret; REQ-TGT-012's trusted environment is met by server-authenticated TLS plus the mandatory code or approval (DEC-0018 item 1) acting as the device credential; a secret embedded in the PE is not built: REQ-PE-010 status note, REQ-PE-015 status note, preinstall-env.md OPEN-PE-6 (settled for the project), REQ-TGT-012 status note; INDEX header, PE-1, TGT-1 |
 | DEC-0021 | Minimal relay enrolment for M3 | `docs/decisions/0021-minimal-relay-enrolment-m3.md` | 2026-10-28 (owner decision, as stated in the M3 build spec request) | Project decision, not product behaviour. Content taken from the spec request; record not opened. Checked by the clean-room auditor 2026-10-28 (spec pass) | Manual relay enrolment; relay pulls a signed, generation-numbered boot-policy list; a stop is reversed only by an audited operator command until REQ-BOOT-062 is specced: REQ-BOOT-062 and REQ-BOOT-067 status notes. Item 4 (all content for the chosen package downloaded and verified in full before the wipe, then discarded; fetched and verified again during apply; nothing staged and nothing written before it is verified; OPEN-JOB-3 open only as a product question): REQ-PE-016 status note (corrected for CR-001). INDEX header, BOOT-5, PE-1 |
 | DEC-0022 | Applying absolute link and junction targets (OPEN-WIM-12) | `docs/decisions/0022-apply-rebases-rpfix-targets.md` | 2026-10-28 (Accepted by owner 2026-10-28, with a 2026-10-28 clarification of "rewritten" after review finding BOOT-R4-001) | Project decision, not product behaviour. Record opened by the researcher at the coordinator's direction (R4 fold); the exact rule is taken from the "re-base rule" section of the run's R4 boot-protocol findings, which the decision names | standards/wim.md §6.1 (R4 reparse notes) and §13 (OPEN-WIM-12 settled; the [project rule, DEC-0022] re-base rule; OPEN-WIM-13 raised); standards/reparse-and-security-descriptors.md §5, §10, §11; INDEX topics 9 and 24. AUDITED 2026-10-28 (CR-R4-001 to 009 applied). R5 (AUDITED 2026-10-28): the rule's consequences checked against OBS-059 (a volume-root capture is re-based exactly as the rule predicts, 10 of 10 buffers); standards/wim.md §6.1 and §13 (OPEN-WIM-13 closed for the project, rule block support note); standards/reparse-and-security-descriptors.md §5, §11 |
+| DEC-0023 | M3 review decisions: token binding, boot stops, space reserve | `docs/decisions/0023-m3-review-decisions.md` | 2026-10-29 (Accepted by owner 2026-10-29) | Project decision, not product behaviour. Record opened by the researcher at the coordinator's direction (2026-10-29). Amends decision 0020 (token wording) and DEC-0021 item 2 (boot-stop scope) | Item 3 (pre-wipe check and minimum disk size need the expanded image, a documented file-system overhead estimate and 16 GiB free on the Windows partition; refused before any write): disk.md REQ-DISK-004 status note (GiB noted as the conservative reading of gpt.md §10's "16 GB"). Item 2 (stops keyed by claimed MACs, shown at confirmation and recorded with the job's success; a MAC with a live stop or another session's running job refused at confirmation; marked "claimed"; applied on every active boot service whose subnets include the source address; stops by relay-observed MACs, SMBIOS UUID or option 97 GUID a POA&M for M5): boot-network.md REQ-BOOT-067 status note. Item 1 (token bound to source network, with expiry): no spec text in this round. INDEX DISK-1, BOOT-5. All DRAFT 2026-10-29 |
 
 ## Project observation records
 

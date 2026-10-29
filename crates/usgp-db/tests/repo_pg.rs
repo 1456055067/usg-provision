@@ -257,6 +257,17 @@ mod t {
         db.finish().await;
     }
 
+    /// Finding SEC-013.1 on PostgreSQL: the advisory claim lock blocks a
+    /// second confirmation until the first commits.
+    #[tokio::test]
+    async fn m3_claim_lock_serialises() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_claim_lock_serialises(&db.admin, &db.app, &a).await;
+        m3::flow_job_timeouts_checked(&db.admin, &db.app, &a).await;
+        db.finish().await;
+    }
+
     #[tokio::test]
     async fn m3_session_scopes_and_idle() {
         let db = TestDb::migrated().await;

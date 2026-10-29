@@ -44,6 +44,8 @@ const PLAN: &[(&str, &str)] = &[
     ("GET", "/v1/jobs"),
     ("GET", "/v1/jobs/{id}"),
     ("POST", "/v1/jobs/{id}/acknowledge"),
+    // Finding SEC-012.
+    ("POST", "/v1/jobs/{id}/fail"),
     ("GET", "/v1/boot-services"),
     ("GET", "/v1/boot-services/{id}"),
     ("PUT", "/v1/boot-services/{id}/packages"),

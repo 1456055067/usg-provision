@@ -29,6 +29,8 @@
 //! - [`fsquery`] and [`manifest`]: read-only file metadata and the
 //!   canonical tree manifest (`examples/tree_manifest.rs`).
 //!
+//! - [`format`] (with the OS-neutral [`diskpart`]): formatting one new
+//!   volume with DiskPart, shared by the agent and the VHD tests;
 //! - [`fs`]: the tree writer behind `winsink::WinSink` (feature `sink`,
 //!   which brings `usgp-image`'s `ApplySink`).
 //!
@@ -57,6 +59,8 @@ mod privscope;
 pub mod parse;
 
 #[cfg(any(windows, test))]
+pub mod diskpart;
+#[cfg(any(windows, test))]
 pub mod fsvalues;
 #[cfg(any(windows, test))]
 pub mod manifest_text;
@@ -75,6 +79,8 @@ pub mod disk;
 pub mod error;
 #[cfg(windows)]
 pub mod firmware;
+#[cfg(windows)]
+pub mod format;
 #[cfg(windows)]
 pub mod fs;
 #[cfg(windows)]

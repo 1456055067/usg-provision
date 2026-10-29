@@ -295,9 +295,18 @@ pub struct DeviceApiDocument {
     pub unauthorised_idle_timeout_s: Option<i64>,
     /// Session opens per source per minute (default 10).
     pub session_opens_per_ip_per_min: Option<i64>,
-    /// Session opens per minute from all sources (default 120; finding
-    /// SEC-001).
+    /// Session opens per minute from all sources (default 600; findings
+    /// SEC-001, SEC-011).
     pub session_opens_per_min: Option<i64>,
+    /// Session opens per minute per boot service (default 60; finding
+    /// SEC-011).
+    pub session_opens_per_boot_service_per_min: Option<i64>,
+    /// Connections from the sources of one boot service (default 64;
+    /// finding SEC-001).
+    pub max_connections_per_boot_service: Option<i64>,
+    /// Served-subnet table reload interval, s (default 30; finding
+    /// SEC-001).
+    pub boot_service_refresh_s: Option<i64>,
     /// Failed code attempts before the session is refused (default 5).
     pub code_attempts_per_session: Option<i64>,
     /// Code attempts per source per minute (default 10).
@@ -1262,6 +1271,21 @@ fn device_section(
         "device_api.session_opens_per_min",
         d.session_opens_per_min,
         c.session_opens_per_min,
+    )?;
+    c.session_opens_per_boot_service_per_min = num(
+        "device_api.session_opens_per_boot_service_per_min",
+        d.session_opens_per_boot_service_per_min,
+        c.session_opens_per_boot_service_per_min,
+    )?;
+    c.max_connections_per_boot_service = size(
+        "device_api.max_connections_per_boot_service",
+        d.max_connections_per_boot_service,
+        c.max_connections_per_boot_service.min(c.max_connections),
+    )?;
+    c.boot_service_refresh = secs(
+        "device_api.boot_service_refresh_s",
+        d.boot_service_refresh_s,
+        c.boot_service_refresh,
     )?;
     c.code_attempts_per_session = num(
         "device_api.code_attempts_per_session",

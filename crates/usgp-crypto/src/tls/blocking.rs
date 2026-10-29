@@ -27,9 +27,10 @@
 // - NIST 800-53: SC-8, SC-8(1) (Transmission Confidentiality and
 //   Integrity) - every byte between the agent and the server is inside
 //   TLS 1.2/1.3 with AEAD suites.
-// - NIST 800-53: IA-3 (Device Identification and Authentication) - the
-//   server is authenticated by its certificate chain to the configured
-//   anchors and by name.
+// - NIST 800-53: IA-5(2) (Public Key-Based Authentication) - the server
+//   is authenticated by its certificate chain to the configured anchors
+//   and by name (SC-8 above; no IA-3 claim: the device is not
+//   authenticated by this channel).
 // - NIST 800-53: SC-13 (Cryptographic Protection) - FIPS provider;
 //   `ClientConfig::fips()` asserted at build time and per connection.
 // - NIST 800-53: SC-23 (Session Authenticity) - no resumption; every

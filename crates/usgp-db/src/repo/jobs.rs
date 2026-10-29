@@ -32,14 +32,15 @@ use super::conv::{
     texts, to_i32, to_i64, to_json, to_uuid,
 };
 use crate::error::DbError;
-use crate::model::{ChosenPackage, Job, JobStep, NewJob};
+use crate::model::{ChosenPackage, Job, JobStep, JobTimeouts, NewJob};
 use crate::pool::{Bookkeeping, PgTx};
 
 const COLUMNS: &str = "id, session_id, boot_service_id, package_id, package_revision, \
      image_content_id, edition_index, disk, layout, macs, state, current_step, failure_step, \
      failure_category, failure_detail, attempts, bytes_done, bytes_total, last_seq, \
      started_at_us, last_report_at_us, finished_at_us, previous_job_id, wipe_audit_seq, \
-     wipe_record_hash, plan_sha256, plan_key_id, acknowledged_by, acknowledged_at_us";
+     wipe_record_hash, plan_sha256, plan_key_id, step_timeouts_s, stall_timeout_s, \
+     acknowledged_by, acknowledged_at_us";
 
 const STEP_COLUMNS: &str = "job_id, step, state, started_at_us, finished_at_us";
 
@@ -69,6 +70,23 @@ fn from_row(r: &Row) -> Result<Job, DbError> {
         }
     };
     let key: &[u8] = col(r, "plan_key_id")?;
+    let steps: Vec<i32> = col(r, "step_timeouts_s")?;
+    let positive = |v: i32| u32::try_from(v).ok().filter(|v| *v >= 1);
+    let steps_s: [u32; 5] = steps
+        .into_iter()
+        .map(positive)
+        .collect::<Option<Vec<u32>>>()
+        .and_then(|v| v.try_into().ok())
+        .ok_or(DbError::Corrupt {
+            what: "step_timeouts_s",
+        })?;
+    let stall: i32 = col(r, "stall_timeout_s")?;
+    let timeouts = JobTimeouts {
+        steps_s,
+        stall_s: positive(stall).ok_or(DbError::Corrupt {
+            what: "stall_timeout_s",
+        })?,
+    };
     Ok(Job {
         id: col_id(r, "id", JobId::from_bytes)?,
         session_id: col_id(r, "session_id", SessionId::from_bytes)?,
@@ -101,6 +119,7 @@ fn from_row(r: &Row) -> Result<Job, DbError> {
         wipe_record_hash: col_digest(r, "wipe_record_hash")?,
         plan_sha256: col_digest(r, "plan_sha256")?,
         plan_key_id: KeyId(usgp_common::Sha256Digest(bytes32(key, "plan_key_id")?)),
+        timeouts,
         acknowledged,
     })
 }
@@ -121,16 +140,27 @@ pub(crate) async fn insert(tx: &mut PgTx, j: &NewJob) -> Result<(), DbError> {
             what: "previous job is the job itself",
         });
     }
+    if !j.timeouts.valid() {
+        return Err(DbError::InvalidArgument {
+            what: "job timeouts",
+        });
+    }
     let disk = to_json(&j.disk, "disk descriptor")?;
     let id = to_uuid(j.id.as_bytes());
+    let step_timeouts: Vec<i32> = j
+        .timeouts
+        .steps_s
+        .iter()
+        .map(|v| to_i32(*v, "step timeout"))
+        .collect::<Result<_, _>>()?;
     tx.execute(
         "insert job",
         "INSERT INTO job (id, session_id, boot_service_id, package_id, package_revision, \
          image_content_id, edition_index, disk, macs, state, current_step, bytes_total, \
          started_at_us, previous_job_id, wipe_audit_seq, wipe_record_hash, plan_sha256, \
-         plan_key_id) \
+         plan_key_id, step_timeouts_s, stall_timeout_s) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'running', 1, $10, $11, $12, $13, $14, \
-         $15, $16)",
+         $15, $16, $17, $18)",
         &[
             &id,
             &to_uuid(j.session_id.as_bytes()),
@@ -150,6 +180,8 @@ pub(crate) async fn insert(tx: &mut PgTx, j: &NewJob) -> Result<(), DbError> {
             &j.wipe_record_hash.0.as_slice(),
             &j.plan_sha256.0.as_slice(),
             &j.plan_key_id.0.0.as_slice(),
+            &step_timeouts,
+            &to_i32(j.timeouts.stall_s, "stall timeout")?,
         ],
     )
     .await?;
@@ -210,6 +242,22 @@ pub(crate) async fn steps(tx: &mut PgTx, id: JobId) -> Result<Vec<JobStep>, DbEr
         .query("list job_step", &sql, &[&to_uuid(id.as_bytes())])
         .await?;
     rows.iter().map(step_from_row).collect()
+}
+
+/// Advisory-lock key serialising MAC-claim decisions ("usgpmacs").
+pub(crate) const MAC_CLAIM_LOCK_KEY: i64 = 0x7573_6770_6d61_6373;
+
+pub(crate) async fn lock_claims(tx: &mut PgTx) -> Result<(), DbError> {
+    // Transaction-scoped; changes no row (a query, as the session quota
+    // lock). Under READ COMMITTED every later statement sees what the
+    // previous holder committed.
+    tx.query_opt(
+        "lock mac claims",
+        "SELECT pg_advisory_xact_lock($1)",
+        &[&MAC_CLAIM_LOCK_KEY],
+    )
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn running_for_macs(tx: &mut PgTx, macs: &MacList) -> Result<Vec<JobId>, DbError> {

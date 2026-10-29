@@ -13,8 +13,8 @@ use usgp_audit::{Actor, AuditDraft, AuditRecord, Detail, Interface, Outcome};
 use usgp_common::Sha256Digest;
 use usgp_crypto::{HmacKey, HmacTag, KeyId};
 use usgp_db::{
-    BootService, ChosenPackage, DbError, NewAuthCode, NewBootStop, NewDeviceSession, NewJob,
-    Operator, Package, RepoTx, SessionAuth, SessionScope, Store,
+    BootService, ChosenPackage, DbError, JobTimeouts, NewAuthCode, NewBootStop, NewDeviceSession,
+    NewJob, Operator, Package, RepoTx, SessionAuth, SessionScope, Store,
 };
 use usgp_proto::device::{DeviceArch, FirmwareKind, SecureBootState, SessionState};
 use usgp_proto::disk::{
@@ -263,6 +263,12 @@ pub fn wipe_draft(job: JobId) -> AuditDraft {
     .detail(Detail::new().with("scope", "tables+volume-heads-1mib"))
 }
 
+/// The plan timeouts the test jobs carry.
+pub const TIMEOUTS: JobTimeouts = JobTimeouts {
+    steps_s: [21_600, 1800, 21_600, 1800, 600],
+    stall_s: 1800,
+};
+
 /// A job for an authorised, disk-chosen session, naming `wipe`.
 pub fn new_job(
     s: &NewDeviceSession,
@@ -288,6 +294,7 @@ pub fn new_job(
         wipe_record_hash: wipe.record_hash,
         plan_sha256: digest(),
         plan_key_id: KeyId(Sha256Digest([5; 32])),
+        timeouts: TIMEOUTS,
         bytes_total: Some(4096),
         started_at: now(),
     }
@@ -955,6 +962,8 @@ pub async fn flow_job_success<A: Store, S: Store>(admin: &A, store: &S, a: &Audi
     assert_eq!(j.current_step, Step::VERIFY_CONTENT);
     assert_eq!(j.session_id, s.id);
     assert_eq!(j.macs, device_macs);
+    // Finding SEC-012: the plan's timeouts are stored with the job.
+    assert_eq!(j.timeouts, TIMEOUTS);
     assert_eq!(tx.job_by_session(s.id).await.unwrap().unwrap().id, job);
     // Decision 0023 item 2: the running job holds its MACs.
     assert_eq!(tx.running_jobs_for_macs(&device_macs).await.unwrap(), [job]);
@@ -1627,4 +1636,88 @@ pub async fn flow_raise_generation<A: Store, S: Store>(admin: &A, store: &S, a: 
     // The next stop change continues from the raised value.
     assert_eq!(tx.bump_boot_policy_generation(bs.id).await.unwrap(), 1001);
     tx.rollback().await;
+}
+
+/// Finding SEC-012: a job whose timeouts are 0 is refused before anything
+/// is written.
+pub async fn flow_job_timeouts_checked<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let op = enrol(admin, a, "timeouts operator").await;
+    let bs = enrol_boot_service(admin, a, "relay timeouts").await;
+    let p = ready_package(store, a, &op).await;
+    let s = ready_session(store, a, &op, bs.id, &p, macs(1)).await;
+    let id = JobId::from_random_bytes(rand_bytes());
+    let mut tx = store.begin().await.unwrap();
+    let wipe = a.chain.append(&mut tx, &wipe_draft(id)).await.unwrap();
+    let mut j = new_job(&s, bs.id, &p, id, &wipe);
+    j.timeouts.steps_s[2] = 0;
+    assert!(matches!(
+        tx.insert_job(&j).await,
+        Err(DbError::InvalidArgument { .. })
+    ));
+    tx.rollback().await;
+}
+
+/// Finding SEC-013.1: the claim lock serialises two transactions; the
+/// second sees what the first committed (its running job) once it holds
+/// the lock.
+pub async fn flow_claim_lock_serialises<A: Store, S: Store + Clone + 'static>(
+    admin: &A,
+    store: &S,
+    a: &Audit,
+) {
+    let op = enrol(admin, a, "claims operator").await;
+    let bs = enrol_boot_service(admin, a, "relay claims").await;
+    let p = ready_package(store, a, &op).await;
+    let shared = macs(1);
+    let s = ready_session(store, a, &op, bs.id, &p, shared.clone()).await;
+
+    let mut first = store.begin().await.unwrap();
+    first.lock_mac_claims().await.unwrap();
+    assert!(
+        first
+            .running_jobs_for_macs(&shared)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let other = store.clone();
+    let claim = shared.clone();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn(async move {
+        let mut tx = other.begin().await.unwrap();
+        tx.lock_mac_claims().await.unwrap();
+        let _ = held_tx.send(());
+        let seen = tx.running_jobs_for_macs(&claim).await.unwrap();
+        tx.rollback().await;
+        seen
+    });
+    let mut held_rx = held_rx;
+    // The second cannot take the lock while the first holds it.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut held_rx)
+            .await
+            .is_err(),
+        "the claim lock did not block"
+    );
+    // The first confirms (job running) and commits.
+    let id = JobId::from_random_bytes(rand_bytes());
+    append(a, &mut first, "job.created", "job", &id.to_string()).await;
+    let wipe = a.chain.append(&mut first, &wipe_draft(id)).await.unwrap();
+    first
+        .insert_job(&new_job(&s, bs.id, &p, id, &wipe))
+        .await
+        .unwrap();
+    first
+        .set_device_session_state(
+            s.id,
+            &[SessionState::Authorised],
+            SessionState::Confirmed,
+            None,
+            now(),
+        )
+        .await
+        .unwrap();
+    first.commit().await.unwrap();
+    assert_eq!(second.await.unwrap(), [id]);
 }

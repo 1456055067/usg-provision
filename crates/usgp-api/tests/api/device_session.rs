@@ -592,10 +592,12 @@ async fn disk_and_package_rules() {
 }
 
 /// Finding SEC-001: a device outside every served subnet gets no
-/// session at all (403, one capped refusal record); the operator still
-/// sees the boot service's own warning (REQ-TGT-008).
+/// connection at all (closed at accept, one capped
+/// `device.connection.refused` record), so it holds no connection slot
+/// and no session; the operator still sees the boot service's own warning
+/// (REQ-TGT-008).
 #[tokio::test]
-async fn no_session_without_boot_service() {
+async fn no_connection_without_boot_service() {
     let h = Harness::m3().await;
     let relay = h.relay_cert("relay elsewhere");
     let bs = h
@@ -609,25 +611,10 @@ async fn no_session_without_boot_service() {
     let r = h.get(Who::Admin, &format!("/v1/boot-services/{bs}")).await;
     assert_eq!(r.json()["usable_count"], 0);
     assert_eq!(r.json()["warning"]["code"], "no_usable_package");
-    let r = h
-        .dev(
-            "POST",
-            "/v1/device/sessions",
-            None,
-            Some(hello(&["02:00:00:00:00:14"])),
-        )
-        .await;
-    assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
-    assert_eq!(r.code(), "forbidden");
-    assert!(r.json().get("token").is_none());
-    let refused = h.events("device.session.open_refused");
-    assert_eq!(refused.len(), 1);
+    assert!(h.connect_to(h.device_addr, None).await.is_err());
+    let refused = h.wait_events("device.connection.refused", 1).await;
     assert_eq!(refused[0].reason.as_deref(), Some("no_boot_service"));
-    assert!(
-        refused[0]
-            .detail
-            .contains("\"boot_service_resolution\":\"none\"")
-    );
+    assert!(refused[0].detail.contains("\"source_ip\":\"127.0.0.1\""));
     assert!(h.events("device.session.opened").is_empty());
     let mut tx = h.store.begin().await.unwrap();
     assert!(tx.list_device_sessions(&[]).await.unwrap().is_empty());

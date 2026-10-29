@@ -486,7 +486,10 @@ mod tests {
         assert_eq!(clean_etag(b""), None);
         assert_eq!(clean_etag(b"\"r7\"\r\nX: y"), None);
         assert_eq!(clean_etag(b"\"r 7\""), None);
-        assert_eq!(clean_etag(&[b'a'; 65]), None);
+        assert_eq!(clean_etag(&[b'a'; MAX_IF_MATCH_BYTES + 1]), None);
+        // The server's full-digest content tag (73 bytes) is kept.
+        let content = usgp_proto::api::content_etag(&usgp_common::Sha256Digest([7; 32]));
+        assert_eq!(clean_etag(content.as_bytes()), Some(content));
         assert_eq!(clean_etag("\"é\"".as_bytes()), None);
     }
 

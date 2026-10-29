@@ -140,8 +140,10 @@ fn real_descriptors(root: &Path) -> (Vec<Vec<u8>>, String, String) {
     std::fs::create_dir(&d).expect("probe dir");
     std::fs::write(&f, b"p").expect("probe file");
     std::fs::write(&g, b"p").expect("probe file");
-    // Keep explicit access for Administrators and SYSTEM, then drop
-    // inheritance so the DACL is protected.
+    // Grant explicit access to two example SIDs, then drop inheritance so
+    // the DACL is protected. S-1-5-32-544 and S-1-5-18 are example SIDs
+    // used as test data; the test does not rely on what they mean, only
+    // that the runner's account keeps access (CR-RV1-002).
     let st = Command::new("icacls")
         .arg(&g)
         .args([

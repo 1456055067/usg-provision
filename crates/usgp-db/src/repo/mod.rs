@@ -618,6 +618,13 @@ pub trait RepoTx: AuditTx + Send + Sized {
         id: JobId,
     ) -> impl Future<Output = Result<Vec<JobStep>, DbError>> + Send;
 
+    /// Serialises MAC-claim decisions until the transaction ends (finding
+    /// SEC-013.1): the confirmation takes it before checking the claimed
+    /// MACs and holds it while it inserts the job; a job's success takes it
+    /// before adding its stops. Two confirmations claiming one MAC cannot
+    /// both pass the check. As [`RepoTx::lock_device_session_quota`].
+    fn lock_mac_claims(&mut self) -> impl Future<Output = Result<(), DbError>> + Send;
+
     /// Running jobs sharing a MAC with `macs`, ordered by start time
     /// (decision 0023 item 2).
     fn running_jobs_for_macs(
@@ -1129,6 +1136,10 @@ impl RepoTx for crate::pool::PgTx {
 
     async fn job_steps(&mut self, id: JobId) -> Result<Vec<JobStep>, DbError> {
         jobs::steps(self, id).await
+    }
+
+    async fn lock_mac_claims(&mut self) -> Result<(), DbError> {
+        jobs::lock_claims(self).await
     }
 
     async fn running_jobs_for_macs(&mut self, macs: &MacList) -> Result<Vec<JobId>, DbError> {

@@ -55,7 +55,10 @@
 // the source network, not to the TLS channel (no channel binding over
 // HTTP/1.1 bearer tokens here); a confirmed session stays usable for up to
 // twice `jobs.lost_after_s` after its job was last heard from, so a lost
-// job can be resumed (REQ-JOB-012).
+// job can be resumed (REQ-JOB-012). The binding has a cost: if a device's
+// IPv4 address (or IPv6 /64) changes after the wipe, every later request
+// gets 401 `invalid_token` and the job becomes `lost` (finding SEC-013.2;
+// the agent is to report this 401 distinctly).
 
 use std::net::IpAddr;
 

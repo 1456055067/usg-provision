@@ -76,6 +76,11 @@ pub(crate) fn requests(
         ("GET", "/v1/jobs".into(), None),
         ("GET", format!("/v1/jobs/{NOWHERE}"), None),
         ("POST", format!("/v1/jobs/{NOWHERE}/acknowledge"), None),
+        (
+            "POST",
+            format!("/v1/jobs/{NOWHERE}/fail"),
+            Some(serde_json::json!({ "reason": "device replaced" })),
+        ),
         ("GET", "/v1/boot-services".into(), None),
         ("GET", format!("/v1/boot-services/{NOWHERE}"), None),
         (

@@ -46,16 +46,19 @@
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use usgp_audit::Detail;
-use usgp_db::{ChosenPackage, DbError, DeviceSession, NewJob, RepoTx, SessionAuth, Store};
+use usgp_db::{
+    ChosenPackage, DbError, DeviceSession, JobTimeouts, NewJob, RepoTx, SessionAuth, Store,
+};
 use usgp_proto::device::{ConfirmV1, ConfirmedV1, SessionState};
 use usgp_proto::job_plan::{
     LayoutPolicyV1, PlanDeviceV1, PlanImageV1, PlanPackageV1, PlanStepV1, PlanWipeV1,
     RetryPolicyV1, SCHEMA_V1, WipeScope,
 };
-use usgp_proto::{JobId, JobPlanV1, PayloadType, PlanDiskV1, Step, codes};
+use usgp_proto::{JobId, JobPlanV1, PayloadType, PlanDiskV1, Step, UnixMicros, codes};
 
 use super::auth::{DeviceCtx, require};
 use super::handlers::lock_live;
+use super::job::overdue;
 use super::offer::offered;
 use crate::body::ApiBody;
 use crate::context::Api;
@@ -70,13 +73,26 @@ pub const WIPE_AUTHORISED: &str = "disk.wipe.authorised";
 
 /// Refuses (409 `in_use`) if a MAC the session claims has an uncleared
 /// boot stop on any boot service, or belongs to a running job of another
-/// session (decision 0023 item 2).
-async fn claims_free<T: RepoTx>(tx: &mut T, cur: &DeviceSession) -> Result<(), ApiError> {
+/// session (decision 0023 item 2). A running job already past its plan's
+/// step or stall timeout does not hold its MACs (finding SEC-012; the
+/// sweep fails it). The caller holds the claim lock (finding SEC-013.1).
+async fn claims_free<T: RepoTx>(
+    tx: &mut T,
+    cur: &DeviceSession,
+    at: UnixMicros,
+) -> Result<(), ApiError> {
     let stops = tx.active_boot_stops_for_macs(&cur.macs).await?;
     let running: Vec<JobId> = tx.running_jobs_for_macs(&cur.macs).await?;
     let mut others = Vec::with_capacity(running.len());
     for id in running {
-        if tx.job(id).await?.is_some_and(|j| j.session_id != cur.id) {
+        let Some(j) = tx.job(id).await? else {
+            continue;
+        };
+        if j.session_id == cur.id {
+            continue;
+        }
+        let steps = tx.job_steps(id).await?;
+        if overdue(&j, &steps, at).is_none() {
             others.push(id);
         }
     }
@@ -190,7 +206,10 @@ pub(crate) async fn confirm<S: Store + 'static>(
     // session claims become boot stops when its job succeeds, so a MAC
     // that is already stopped, or held by a running job of another
     // session, is refused here.
-    claims_free(&mut tx, &cur).await?;
+    // Finding SEC-013.1: held until the job row commits, so a second
+    // confirmation claiming one of these MACs sees this job running.
+    tx.lock_mac_claims().await?;
+    claims_free(&mut tx, &cur, at).await?;
     let previous = tx.previous_failed_job(&cur.macs).await?;
     let disk_detail = || {
         Detail::new()
@@ -297,6 +316,16 @@ pub(crate) async fn confirm<S: Store + 'static>(
         wipe_record_hash: r_wipe.record_hash,
         plan_sha256,
         plan_key_id,
+        timeouts: JobTimeouts {
+            steps_s: [
+                j.timeout_verify_s,
+                j.timeout_disk_s,
+                j.timeout_apply_s,
+                j.timeout_boot_s,
+                j.timeout_report_s,
+            ],
+            stall_s: j.stall_timeout_s,
+        },
         bytes_total: None,
         started_at: at,
     };

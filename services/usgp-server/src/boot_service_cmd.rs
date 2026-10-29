@@ -55,7 +55,7 @@
 // lost from the restored database (the relays keep their last list until
 // it is replaced).
 
-// POAM: IA-5/CA-5 (relay enrolment rotation, finding NIST-015) - a relay's
+// POAM: IA-5/IA-3 (relay enrolment rotation, finding NIST-015) - a relay's
 // client certificate is bound by its fingerprint at manual enrolment and
 // has no rotation path: renewing the certificate means disabling the boot
 // service and enrolling a new record (new id, new assignments). Expiry

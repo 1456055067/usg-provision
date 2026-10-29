@@ -876,6 +876,9 @@ impl Harness {
         .target("boot_service", &b.id.to_string());
         self.api.chain().append(&mut tx, &d).await.unwrap();
         tx.commit().await.unwrap();
+        // The device listener admits connections by its served-subnet
+        // table (finding SEC-001); the server reloads it periodically.
+        self.api.refresh_device_boot_services().await.unwrap();
         b.id
     }
 

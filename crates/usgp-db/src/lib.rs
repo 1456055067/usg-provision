@@ -61,10 +61,10 @@ pub use memory::{MemoryStore, MemoryTx};
 pub use migrate::{MigrateReport, MigrationError, SCHEMA_VERSION};
 pub use model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
-    DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
-    NewDeviceSession, NewEdition, NewJob, Operator, OperatorRole, OperatorStatus, Package,
-    PackageRef, PeDeclaration, ReadyContent, Reason, SessionAuth, SessionScope, StoredManifest,
-    Upload, WimFacts, source_network,
+    DeviceSession, Edition, EditionDeclaration, Job, JobStep, JobTimeouts, NewAuthCode,
+    NewBootStop, NewContent, NewDeviceSession, NewEdition, NewJob, Operator, OperatorRole,
+    OperatorStatus, Package, PackageRef, PeDeclaration, ReadyContent, Reason, SessionAuth,
+    SessionScope, StoredManifest, Upload, WimFacts, source_network,
 };
 pub use pool::{PgStore, PgTx};
 pub use repo::{RepoTx, Store};

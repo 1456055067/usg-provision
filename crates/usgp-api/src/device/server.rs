@@ -3,6 +3,13 @@
 //! the device, decision 0020), HTTP/1.1 with hyper, connection caps and
 //! timeouts (plan M3 sections 3.1, 3.9 and 6).
 //!
+//! - a connection is admitted only from a source an active boot service
+//!   serves, by the cached served-subnet table
+//!   ([`super::admission`]; finding SEC-001); other sources are closed at
+//!   once and audited as `device.connection.refused` under the anonymous
+//!   per-source cap;
+//! - at most `device_api.max_connections_per_boot_service` connections
+//!   from the sources of one boot service;
 //! - at most `device_api.max_connections` connections in total, taken at
 //!   TCP accept;
 //! - at most `device_api.max_connections_per_source` connections and
@@ -17,8 +24,9 @@
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-8, SC-8(1), SC-13 - TLS 1.2/1.3 on the FIPS provider
 //   only (usgp-crypto `DeviceServerTls`).
-// - NIST 800-53: SC-5 - connection caps (total, per source, handshakes per
-//   source); handshake, header and idle timeouts.
+// - NIST 800-53: SC-5 - connections only from served subnets; caps per
+//   boot service, per source, handshakes per source and in total;
+//   handshake, header and idle timeouts (finding SEC-001).
 // - NIST 800-53: SC-23 - no session resumption (usgp-crypto).
 // - NIST 800-53: CM-7 - HTTP/1.1 only; the listener is off unless enabled.
 // - NIST 800-53: AU-2, AU-12 - failed handshakes audited (capped).
@@ -30,18 +38,20 @@
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use usgp_audit::Interface;
+use usgp_audit::{Actor, AuditDraft, Detail, Interface, Outcome};
 use usgp_crypto::tls::{DeviceServerTls, TlsFailure};
 use usgp_db::Store;
 
-use super::router::{DeviceConn, handle_device};
+use super::admission::Admission;
+use super::router::{DeviceConn, device_ip, handle_device};
+use crate::authn::AuthClass;
 use crate::context::Api;
 use crate::idle::IdleIo;
 use crate::server::{Either, SourceSlot, SourceTable, race};
@@ -74,6 +84,19 @@ pub async fn serve_device<S: Store + 'static>(
     }
     let all = Arc::new(Semaphore::new(c.max_connections));
     let sources = SourceTable::new(c.max_connections_per_source, c.max_handshakes_per_source);
+    // Finding SEC-001: the served-subnet table, loaded now (a failure
+    // admits nothing until a later load succeeds) and refreshed.
+    let _ = api.refresh_device_boot_services().await;
+    let refresher = {
+        let api = api.clone();
+        let every = c.boot_service_refresh;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                let _ = api.refresh_device_boot_services().await;
+            }
+        })
+    };
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
         let accept = std::pin::pin!(listener.accept());
@@ -93,7 +116,7 @@ pub async fn serve_device<S: Store + 'static>(
             drop(tcp);
             continue;
         };
-        tokio::spawn(connection(
+        tokio::spawn(admit_then_serve(
             api.clone(),
             Arc::clone(&tls),
             tcp,
@@ -102,7 +125,67 @@ pub async fn serve_device<S: Store + 'static>(
             source,
         ));
     }
+    refresher.abort();
     Ok(())
+}
+
+/// Admits the connection by its source's boot service (finding SEC-001),
+/// takes a per-boot-service slot, then serves it. A cached lookup; the
+/// total and per-source slots taken at accept are held only for it.
+async fn admit_then_serve<S: Store + 'static>(
+    api: Api<S>,
+    tls: Arc<DeviceServerTls>,
+    tcp: TcpStream,
+    remote: SocketAddr,
+    permit: OwnedSemaphorePermit,
+    source: SourceSlot,
+) {
+    let ip = device_ip(remote);
+    let service = match api.device_admission(ip).await {
+        Admission::Served(id) => id,
+        refused => {
+            drop((tcp, permit, source));
+            api.audit_connection_refused(remote, refused.reason()).await;
+            return;
+        }
+    };
+    let max = api.config().device.max_connections_per_boot_service;
+    let Some(slot) = api.inner.device.connections.take(service, max) else {
+        // Over the boot service's cap: closed without a response, as the
+        // other caps.
+        return;
+    };
+    connection(api, tls, tcp, remote, permit, source).await;
+    drop(slot);
+}
+
+impl<S: Store + 'static> Api<S> {
+    /// Audits a connection refused at accept (anonymous budget; over the
+    /// cap it is counted in `auth.unauthenticated.summary`).
+    async fn audit_connection_refused(&self, remote: SocketAddr, reason: &'static str) {
+        let ip = device_ip(remote);
+        if !self
+            .inner
+            .unauth
+            .admit(ip, reason, AuthClass::Anonymous, Instant::now())
+        {
+            return;
+        }
+        let d = AuditDraft::new(
+            "device.connection.refused",
+            Outcome::Refused,
+            Actor::unauthenticated(Some("device")),
+            Interface::DeviceApi,
+        )
+        .source(&remote.to_string())
+        .reason(reason)
+        .detail(
+            Detail::new()
+                .with("listener", "device_api")
+                .with("source_ip", &ip.to_string()),
+        );
+        self.record_refusal(&d).await;
+    }
 }
 
 async fn connection<S: Store + 'static>(

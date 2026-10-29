@@ -117,8 +117,23 @@ mod config_m3 {
         );
         let t = with(
             &t,
-            "session_opens_per_min = 120",
+            "session_opens_per_min = 600",
             "session_opens_per_min = 60",
+        );
+        let t = with(
+            &t,
+            "session_opens_per_boot_service_per_min = 60",
+            "session_opens_per_boot_service_per_min = 20",
+        );
+        let t = with(
+            &t,
+            "max_connections_per_boot_service = 64",
+            "max_connections_per_boot_service = 16",
+        );
+        let t = with(
+            &t,
+            "boot_service_refresh_s = 30",
+            "boot_service_refresh_s = 5",
         );
         let c = parse_text(&t, None).unwrap();
         assert_eq!(c.api.device.max_pending_sessions_per_boot_service, 8);
@@ -127,6 +142,9 @@ mod config_m3 {
             Duration::from_secs(300)
         );
         assert_eq!(c.api.device.session_opens_per_min, 60);
+        assert_eq!(c.api.device.session_opens_per_boot_service_per_min, 20);
+        assert_eq!(c.api.device.max_connections_per_boot_service, 16);
+        assert_eq!(c.api.device.boot_service_refresh, Duration::from_secs(5));
         assert_eq!(c.api.device.poll_ms, 5000);
         assert_eq!(c.api.device.code_max_ttl, Duration::from_secs(7200));
         assert_eq!(c.api.device.jobs.lost_after, Duration::from_secs(600));
@@ -286,9 +304,25 @@ mod config_m3 {
                 "device_api.unauthorised_idle_timeout_s",
             ),
             (
-                "session_opens_per_min = 120",
+                "session_opens_per_min = 600",
                 "session_opens_per_min = 0",
                 "device_api.session_opens_per_min",
+            ),
+            // Findings SEC-001 (round 2) and SEC-011.
+            (
+                "session_opens_per_boot_service_per_min = 60",
+                "session_opens_per_boot_service_per_min = 0",
+                "device_api.session_opens_per_boot_service_per_min",
+            ),
+            (
+                "max_connections_per_boot_service = 64",
+                "max_connections_per_boot_service = 257",
+                "device_api.max_connections_per_boot_service",
+            ),
+            (
+                "boot_service_refresh_s = 30",
+                "boot_service_refresh_s = 0",
+                "device_api.boot_service_refresh_s",
             ),
             (
                 "default_ttl_s = 900",

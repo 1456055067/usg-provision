@@ -681,7 +681,7 @@ device on purpose gets no answer until an operator acts.
   A stop is reversed only by an audited operator command until
   REQ-BOOT-062 is specced. Requirement text unchanged; the list's form
   and signing are clean-side design.
-- Status note (DRAFT, 2026-10-29) [project rule], DEC-0023 item 2: a
+- Status note (AUDITED 2026-10-29) [project rule], DEC-0023 item 2: a
   stop applies on every active boot service whose subnets include the
   device's source address, not only on the job's own boot service. It
   is keyed by the network hardware addresses the device claimed. Those

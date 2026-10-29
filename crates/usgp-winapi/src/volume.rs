@@ -213,6 +213,48 @@ pub fn assign_letter(letter: DriveLetter, volume: &VolumeGuidPath) -> Result<()>
         .map_err(|e| WinApiError::os("set volume mount point", e))
 }
 
+/// Makes `letter` the only drive letter of `volume`, which the caller
+/// resolved by its extents on the target disk (REQ-DISK-008, BOOT-004).
+///
+/// Reads the volume's own letters first (`GetVolumePathNamesForVolumeName`,
+/// topic 23 §15). If `letter` is already one of them it is kept;
+/// otherwise each letter the volume holds is removed
+/// (`DeleteVolumeMountPoint`, §15) and `letter` assigned. Windows may
+/// mount a new volume at a letter of its own (automatic mounting), and
+/// `SetVolumeMountPoint` then refuses a second letter (BOOT-004, CI run
+/// 40928612312: error 87).
+///
+/// Only letters read from `volume` itself are removed, never another
+/// volume's, and never `X:` ([`remove_letter`] refuses it). Folder mount
+/// points are left alone: they do not stop a drive letter being added and
+/// the plan never creates them.
+///
+/// Returns the letters the volume held before, always, with the outcome,
+/// so the caller can log them whether or not the change succeeded (an
+/// empty list if they could not be read).
+// COMPLIANCE MAPPING:
+// - NIST 800-53: CM-7 (Least Functionality) - only the target volume's
+//   own letters are changed; SI-10 (Information Input Validation)
+// - SPEC: specs/standards/windows-storage-firmware-api.md §15
+// - SPEC: specs/disk.md#REQ-DISK-008 (BOOT-004)
+pub fn set_only_letter(
+    letter: DriveLetter,
+    volume: &VolumeGuidPath,
+) -> (Vec<DriveLetter>, Result<()>) {
+    let before = match drive_letters(volume) {
+        Ok(b) => b,
+        Err(e) => return (Vec::new(), Err(e)),
+    };
+    if before.contains(&letter) {
+        return (before, Ok(()));
+    }
+    let outcome = before
+        .iter()
+        .try_for_each(|l| remove_letter(*l))
+        .and_then(|()| assign_letter(letter, volume));
+    (before, outcome)
+}
+
 /// Removes the drive letter `letter`. The Windows PE system letter `X:` is
 /// refused.
 pub fn remove_letter(letter: DriveLetter) -> Result<()> {

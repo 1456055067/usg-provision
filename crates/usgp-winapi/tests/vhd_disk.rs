@@ -566,7 +566,20 @@ fn boot004_recovery_typed_partition_formats() {
             let letter = volume::free_letter('P'..='W', &letters)
                 .map_err(format::FormatError::Os)?
                 .expect("a free letter");
-            volume::assign_letter(letter, &vol).map_err(format::FormatError::Os)?;
+            // Automount may already have given the volume a letter, and
+            // a second one is refused (CI run 40928612312, error 87).
+            let (before, set) = volume::set_only_letter(letter, &vol);
+            println!(
+                "LETTER-OBS {:?} letters before assign: {before:?}",
+                part.role
+            );
+            set.map_err(|e| {
+                println!(
+                    "LETTER-OBS {:?} set {letter:?} failed, letters before {before:?}: {e}",
+                    part.role
+                );
+                format::FormatError::Os(e)
+            })?;
             letters.push(letter);
             let random = [u8::try_from(i).unwrap_or(0).wrapping_add(0xB0); 16];
             format::format_at_letter(&t, &vol, letter, &env, random)?;

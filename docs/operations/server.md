@@ -1,4 +1,4 @@
-# Operating `usgp-server` (milestone M2)
+# Operating `usgp-server` (milestones M2 and M3)
 
 `usgp-server` is the control plane. In M2 it holds Windows images and
 Windows PE kits in a content-addressed, integrity-protected store, lists
@@ -6,6 +6,38 @@ the editions of an uploaded WIM, builds deployment packages from one
 edition and one PE, signs content and package manifests, and serves an
 operator API over mutual TLS. Every operator action and every refusal is
 written to a tamper-evident audit chain in PostgreSQL.
+
+M3 adds a second, separate listener for pre-boot devices (the
+[device listener](#device-listener)), operator-issued device codes and
+console approval of waiting devices, signed job plans, job progress and
+failure records, and a minimal, manual enrolment of relays as boot
+services with a signed boot-policy list that tells each relay which
+devices to stop booting (decision 0021).
+
+**M3 evidence status (read first).** M3 is **not met**. The owner's lab
+procedure MT-2 (steps L1 to L12, [MT-2-lab.md](../testing/MT-2-lab.md))
+is NOT RUN, and so is M2's MT-1. CI on `m3/build`:
+
+- run 40818350636 (commit 647af22): all 19 jobs passed, before the
+  reviews and the review fix rounds;
+- run 40876728637 (commit 349de13): boot smoke S10 (GPT-OBS-002) and S1
+  to S8 passed; the Windows VHD step and S9 failed;
+- run 40910029759 (commit fff029f): S9 passed, GPT-OBS-001 was
+  accepted, and boot smoke passed 11 of 11; `gates` and `pg-integration`
+  timed out on a test hang that was fixed afterwards;
+- run 40928612312 (commit 21c1efb, the current commit): conclusion
+  failure. `gates`, `pg-integration`, boot smoke S1 to S10, `fuzz-smoke`
+  (24 targets) and `large-upload` passed. In `windows-agent` the FIPS
+  probe and the raw-disk VHD test passed (GPT-OBS-001 accepted again),
+  and the BOOT-004 VHD test failed: Windows refused (error 87) to assign
+  a drive letter to the new Windows partition, before any format. The
+  agent's own Windows letter step may fail the same way after the wipe;
+  this is an open defect pending the owner's decision (POAM-53).
+
+The M3 behaviour below is tested in-process (QA run on commit 647af22,
+macOS, functional evidence only) and by the review fix rounds' own
+tests, which passed in CI run 40928612312 but have no QA re-run. See
+[TEST_EVIDENCE.md](../compliance/TEST_EVIDENCE.md).
 
 **M2 evidence status (read first).** The server's behaviour is tested
 in-process on the in-memory store, on a macOS development host, which is
@@ -51,6 +83,11 @@ The example configuration and the service unit in this guide are
 - [Example configuration](#example-configuration)
 - [Example service unit](#example-service-unit)
 - [Operators](#operators)
+- [Device listener](#device-listener)
+- [Device codes and approval](#device-codes-and-approval)
+- [Boot services (relay enrolment)](#boot-services-relay-enrolment)
+- [Jobs](#jobs)
+- [Boot stops](#boot-stops)
 - [TLS, CRL refresh and revocation](#tls-crl-refresh-and-revocation)
 - [Audit](#audit)
 - [Time synchronisation](#time-synchronisation)
@@ -100,6 +137,9 @@ handle. ACLs are not inspected (POAM-7): put no ACLs on these paths.
 | `/etc/usgp-server/db/ca.pem`, `app.pem` | `root:root` | 0644 | Trusted files |
 | `/etc/usgp-server/db/app.key` | `root:usgp-server` | 0640 | Service private key (below) |
 | `/etc/usgp-server/keys/content.p8`, `audit.p8` | `root:usgp-server` | 0640 | Service private keys (below) |
+| `/etc/usgp-server/keys/plan.p8`, `boot-policy.p8`, `code-hmac.key` (M3) | `root:usgp-server` | 0640 | Service private keys (below) |
+| `/etc/usgp-server/tls/device.pem` (M3) | `root:root` | 0644 | Device listener certificate chain |
+| `/etc/usgp-server/tls/device.key` (M3) | `root:usgp-server` | 0640 | Device listener key; service private key (below) |
 | `/etc/usgp-server/keys/*.pub` | `root:root` | 0644 | Public keys |
 | `/etc/usgp-server/db/admin.pem` | `root:root` | 0644 | Trusted file |
 | `/etc/usgp-server/db/admin.key` | `root:root` | **0600** | Administrative key (below) |
@@ -109,7 +149,9 @@ handle. ACLs are not inspected (POAM-7): put no ACLs on these paths.
 Private key rules (SC-12, AC-6):
 
 - **Keys the service reads** (TLS key, `[database]` client key, content
-  and audit signing keys) must not be readable by others, and may be
+  and audit signing keys; in M3 also the device listener key, the plan
+  and boot-policy signing keys and the code HMAC key) must not be
+  readable by others, and may be
   group-readable only when the group is the service's own (the effective
   gid of `serve`). Use `root:<service group> 0640`, or `0600`. `serve`,
   running as the service user, applies the full rule at every start. A
@@ -155,7 +197,7 @@ refuses start-up (decision 0012). Three roles are needed (decision 0016):
 |------|---------|--------|
 | `usgp_owner` (any name; given to `migrate`) | `usgp-server migrate` only | Owns the database and schema; runs migrations |
 | `usgp_app` (this exact name) | `serve` | Granted by migration 0002; since migration 0003 no INSERT, UPDATE or DELETE on operator records; no UPDATE or DELETE on audit records or checkpoints |
-| `usgp_admin` (this exact name) | `operator enrol`, `operator disable`, `audit verify` | Granted by migration 0003: read, insert and update operator records (no delete); append to and read the audit chain |
+| `usgp_admin` (this exact name) | `operator enrol`, `operator disable`, `audit verify`; in M3 also `boot-service enrol`, `disable` and `raise-generation` | Granted by migration 0003: read, insert and update operator records (no delete); append to and read the audit chain. Migration 0004 (M3) adds read, insert and update on boot-service records and on the boot-policy generation; only this role may write boot-service records |
 
 Steps, by the database administrator:
 
@@ -226,6 +268,47 @@ chmod 0640 /etc/usgp-server/keys/content.p8 /etc/usgp-server/keys/audit.p8
   compromise of root on the server host can sign manifests and
   checkpoints (POAM-18).
 
+### Keys for the device listener (M3)
+
+The device listener needs three more keys, one per purpose. They are
+configured together (all three or none), each must be a file of its
+own, and none may be the content or audit key file
+(`must be a file of its own (one key per purpose)`). `device_api.enabled
+= true` without them refuses start-up (field `device_api.enabled`).
+
+```sh
+usgp-server keygen --purpose plan \
+  --out-key /etc/usgp-server/keys/plan.p8 \
+  --out-pub /etc/usgp-server/keys/plan.pub
+usgp-server keygen --purpose boot-policy \
+  --out-key /etc/usgp-server/keys/boot-policy.p8 \
+  --out-pub /etc/usgp-server/keys/boot-policy.pub
+usgp-server keygen --purpose code-hmac \
+  --out-key /etc/usgp-server/keys/code-hmac.key
+chown root:usgp-server /etc/usgp-server/keys/plan.p8 \
+  /etc/usgp-server/keys/boot-policy.p8 /etc/usgp-server/keys/code-hmac.key
+chmod 0640 /etc/usgp-server/keys/plan.p8 \
+  /etc/usgp-server/keys/boot-policy.p8 /etc/usgp-server/keys/code-hmac.key
+```
+
+| Key | Purpose | Public half goes to |
+|-----|---------|---------------------|
+| `signing.plan_key` (ECDSA P-384) | Signs each job plan given to a device | The agent's `plan.pub`, through `usgp-cli pe agent-config` ([winpe-kit.md](winpe-kit.md)) |
+| `signing.content_key` (M2) | Signs content and package manifests | The agent's `content.pub`, and the operator CLI's `--content-key-pub` |
+| `signing.boot_policy_key` (ECDSA P-384) | Signs the boot-policy list each relay pulls | Each relay's `server_feed.boot_policy_key_pub` ([relay.md](relay.md#server_feed-m3)) |
+| `codes.hmac_key` | Keys the HMAC-SHA-256 under which device codes are stored; codes are never stored in clear | No public half and no key id. Exactly 32 raw bytes from the module's DRBG, loaded into a wiped buffer |
+
+- The plan and content keys must differ: `pe agent-config` refuses two
+  equal public keys.
+- The agent and the relays pin these public keys. Rotating the plan or
+  content key means building new agent configurations
+  ([winpe-kit.md](winpe-kit.md)); rotating the boot-policy key means
+  updating every relay's `boot_policy_key_pub`. There is no rotation
+  list for the plan or boot-policy key.
+- Rotating `codes.hmac_key` makes every unused code unusable.
+- `server.start` records `device_listen` and the plan and boot-policy key
+  ids.
+
 ## Command line
 
 The FIPS check runs before every command.
@@ -236,10 +319,14 @@ The FIPS check runs before every command.
 | `usgp-server --check-config PATH [--admin-uid UID]` | Validate the configuration and every file it names; build the TLS acceptor and the database TLS client. Connects to nothing, binds nothing, does not check the content root or the admin-key readability rule | 0 valid; 78 invalid; 1 FIPS |
 | `usgp-server serve --config PATH [--admin-uid UID] [--allow-shared-admin-uid]` | Run the server | 0 clean stop; 78 configuration, trust or key error; 1 FIPS, database, schema version, audit, bind or runtime failure |
 | `usgp-server migrate --config PATH --owner-user NAME --owner-cert PEM --owner-key PEM [--admin-uid UID]` | Apply pending migrations as the owner role | 0; 78; 77 not a local administrator; 1 |
-| `usgp-server keygen --purpose content\|audit --out-key FILE --out-pub FILE` | Generate a signing key | 0; 1 |
+| `usgp-server keygen --purpose content\|audit\|plan\|boot-policy --out-key FILE --out-pub FILE` | Generate a signing key (`plan` and `boot-policy` are M3) | 0; 1 |
+| `usgp-server keygen --purpose code-hmac --out-key FILE` | Generate the device-code HMAC key (M3; `--out-pub` is refused) | 0; 1 |
 | `usgp-server operator enrol --config PATH --cert PEM --name NAME --role administrator\|none [--admin-uid UID]` | Bind one certificate to one operator | 0; 2 bad name; 78 (also if `[database.admin]` is absent); 77; 1 refused or database |
 | `usgp-server operator disable --config PATH --id UUID [--admin-uid UID]` | Disable an operator (0 also if already disabled) | 0; 2 bad id; 78; 77; 1 |
 | `usgp-server audit verify --config PATH --trusted-key PEM [--trusted-key PEM ...] [--max-unsigned-records N] [--max-checkpoint-age DUR] [--admin-uid UID]` | Verify the audit chain | 0 intact; 1 tampered or policy violated; 69 chain unreadable (not verified); 78; 77; 2 usage |
+| `usgp-server boot-service enrol --config PATH --cert PEM --name NAME --subnet CIDR [--subnet CIDR ...] [--admin-uid UID]` | Bind one relay client certificate to a new boot service and the subnets it serves (M3, decision 0021) | 0; 78; 77; 1 refused or database |
+| `usgp-server boot-service disable --config PATH --id UUID [--admin-uid UID]` | Disable a boot service (M3) | 0; 78; 77; 1 |
+| `usgp-server boot-service raise-generation --config PATH --id UUID --to N [--admin-uid UID]` | Raise a boot service's boot-policy generation after a restore (M3) | 0; 78; 77; 1 |
 | `usgp-server -h` / `--help` | Usage on stdout | 0 |
 | no arguments, or anything else | Usage on stderr | 2 |
 
@@ -251,16 +338,19 @@ the configuration file; 78 configuration, trust or key error. Note that
 
 `--admin-uid UID` names one uid, besides root, that may own the trusted
 files. The local administrative commands (`migrate`, `operator`,
-`audit verify`) run only as root or as the owner of the configuration
+`audit verify`, `boot-service`) run only as root or as the owner of the
+configuration
 file they load (named on the command line). **That check is a guard
 against mistakes, not the access control**: any local user can write a
 configuration file of their own. The access control is possession of the
-`usgp_admin` client key (root only, mode 0600) for `operator` and `audit
-verify`, and of the owner key for `migrate` (decision 0016; POAM-30).
-`keygen` has no restriction; it only creates new files the invoker owns.
+`usgp_admin` client key (root only, mode 0600) for `operator`, `audit
+verify` and `boot-service`, and of the owner key for `migrate` (decision
+0016; POAM-30). `keygen` has no restriction; it only creates new files
+the invoker owns.
 
-The certificate given to `operator enrol` is read under the trusted-file
-rules, because it decides who becomes an administrator.
+The certificates given to `operator enrol` and `boot-service enrol` are
+read under the trusted-file rules, because they decide who becomes an
+administrator and which relay may pull a boot-policy list.
 
 ## Configuration reference
 
@@ -348,6 +438,78 @@ There is no password key in either section.
 | `content_key` | required | Content and package manifest signing key (PKCS#8 PEM) |
 | `audit_key` | required | Audit checkpoint signing key; a different file and key from `content_key` |
 | `previous_content_pubs` | `[]` | Up to 64 SPKI PEM files of earlier content keys |
+| `plan_key` (M3) | none | Job plan signing key. With `boot_policy_key` and `codes.hmac_key`: all three or none, each its own file; required when `device_api.enabled = true` |
+| `boot_policy_key` (M3) | none | Boot-policy list signing key; same rules as `plan_key` |
+
+### `[device_api]` (M3)
+
+The device listener ([Device listener](#device-listener)). The
+listener is **off** unless `enabled = true`. Every value below is
+project design (CM-6); OPEN-TGT-1 and OPEN-JOB-4 leave the spec values
+open, so the defaults fail closed. "Source" means an IPv4 address or an
+IPv6 /64.
+
+| Key | Default | Range / rule |
+|-----|---------|--------------|
+| `enabled` | `false` | When true, `listen`, `cert_chain`, `private_key` and the three M3 keys are required |
+| `listen` | `127.0.0.1:8444` | IP address and port; must differ from `api.listen`. Choose an address the boot segments can reach |
+| `cert_chain` | none | Device listener certificate chain (PEM); required when enabled; the path is checked even when disabled |
+| `private_key` | none | Device listener key; service private-key rule; required when enabled |
+| `min_version` | `"1.2"` | `"1.2"` or `"1.3"` |
+| `max_connections` | 256 | 1 to 4096 |
+| `max_connections_per_source` | 16 | 1 to `max_connections` |
+| `max_handshakes_per_source` | 8 | 1 to `max_connections_per_source` |
+| `max_connections_per_boot_service` | 64 | 1 to `max_connections`; connections from the sources one boot service serves |
+| `boot_service_refresh_s` | 30 | 1 to 600; how often the listener reloads its table of served subnets |
+| `handshake_timeout_s` | 10 | 1 to 300 |
+| `header_timeout_s` | 10 | 1 to 300 |
+| `idle_timeout_s` | 120 | 1 to 3600 |
+| `max_json_bytes` | 65536 | 1024 to 65536 |
+| `max_headers` | 64 | 8 to 256 |
+| `max_header_bytes` | 16384 | 8192 to 1048576 |
+| `pending_session_ttl_s` | 3600 | 60 to 86400; lifetime of a session before its wipe confirmation |
+| `max_pending_sessions` | 64 | 1 to 100000, in total |
+| `max_pending_sessions_per_ip` | 4 | 1 to `max_pending_sessions`, per source |
+| `max_pending_sessions_per_boot_service` | 32 | 1 to `max_pending_sessions` |
+| `unauthorised_idle_timeout_s` | 120 | 30 to `pending_session_ttl_s`, and at least 5 poll intervals; a session never authorised and not heard from this long expires early |
+| `session_opens_per_ip_per_min` | 10 | 1 to 1000 |
+| `session_opens_per_boot_service_per_min` | 60 | 1 to 100000 |
+| `session_opens_per_min` | 600 | 1 to 100000, all sources together |
+| `code_attempts_per_session` | 5 | 1 to 20; failed code attempts before the session is refused |
+| `code_attempts_per_ip_per_min` | 10 | 1 to 1000 |
+| `poll_ms` | 2000 | 500 to 60000; poll interval suggested to the agent |
+| `progress_min_interval_ms` | 2000 | 100 to 60000; `progress` reports recorded at most this often per job |
+| `max_chunk_requests_per_job` | 2 | 1 to 16 concurrent chunk requests |
+
+### `[codes]` (M3)
+
+| Key | Default | Range / rule |
+|-----|---------|--------------|
+| `hmac_key` | none | The code HMAC key (32 raw bytes); see [Keys](#keys-for-the-device-listener-m3) |
+| `default_ttl_s` | 900 | 60 to `max_ttl_s`; a code's lifetime when the operator names none |
+| `max_ttl_s` | 3600 | 60 to 86400 |
+
+The code length is fixed: 10 symbols of Crockford's base32 (50 bits from
+the DRBG), shown as `XXXXX-XXXXX`.
+
+### `[jobs]` (M3)
+
+Written into every signed plan. OPEN-JOB-4 leaves the values open; these
+are project design.
+
+| Key | Default | Range / rule |
+|-----|---------|--------------|
+| `lost_after_s` | 900 | 60 to 86400; a running job not heard from this long becomes `lost` |
+| `retry_attempts` | 5 | 1 to 100; device retries of a transient failure |
+| `retry_base_ms`, `retry_max_ms` | 2000, 60000 | 1 <= base <= max <= 3600000 |
+| `stall_timeout_s` | 1800 | 1 to 604800; no progress this long fails the job |
+| `timeout_verify_s`, `timeout_disk_s`, `timeout_apply_s`, `timeout_boot_s`, `timeout_report_s` | 21600, 1800, 21600, 1800, 600 | 1 to 604800 each; steps 1 to 5 |
+| `report_interval_s` | 30 | 1 to 3600 |
+
+Fixed, not configurable (REQ-DISK-004, REQ-DISK-006): the minimum disk
+size (64 x 10^9 bytes, or more for a large image), the separate wipe
+confirmation, and the refusal of removable, USB and boot-media disks.
+There is no setting that skips TLS or signature checks.
 
 ### `[audit]`
 
@@ -401,9 +563,11 @@ The total metadata of a file is also limited to 32 times the file size
 **Example, not shipped, not tested as a file.** Every key is written out
 with its default or a safe example value. The key set was checked against
 `services/usgp-server/src/config.rs` (every section refuses unknown keys)
-and against the test fixture
-`services/usgp-server/tests/fixtures/server-v1.toml`. Paths are
-examples.
+and against the test fixtures
+`services/usgp-server/tests/fixtures/server-v1.toml` and (M3 sections)
+`server-m3.toml`. Paths are examples. The M3 device listener is shown
+switched off; to switch it on, set `enabled = true` and give it an
+address the boot segments can reach.
 
 ```toml
 # usgp-server example configuration: every key, defaults unless noted.
@@ -483,6 +647,9 @@ check_stall_timeout_s = 600
 content_key = "/etc/usgp-server/keys/content.p8"
 audit_key = "/etc/usgp-server/keys/audit.p8"
 previous_content_pubs = []
+# M3, SC-12: job plans and boot-policy lists; one key per purpose.
+plan_key = "/etc/usgp-server/keys/plan.p8"
+boot_policy_key = "/etc/usgp-server/keys/boot-policy.p8"
 
 [audit]
 # AU-9(3): signed checkpoints by count, by time and by heartbeat.
@@ -513,6 +680,61 @@ max_integrity_bytes = 16777216
 
 [log]
 level = "info"
+
+[device_api]
+# CM-7: off unless configured; a separate listener from [api].
+enabled = false
+listen = "127.0.0.1:8444"
+cert_chain = "/etc/usgp-server/tls/device.pem"
+private_key = "/etc/usgp-server/tls/device.key"
+min_version = "1.2"
+# SC-5: connection caps; a source outside every served subnet is closed.
+max_connections = 256
+max_connections_per_source = 16
+max_handshakes_per_source = 8
+max_connections_per_boot_service = 64
+boot_service_refresh_s = 30
+handshake_timeout_s = 10
+header_timeout_s = 10
+idle_timeout_s = 120
+max_json_bytes = 65536
+max_headers = 64
+max_header_bytes = 16384
+# AC-12 / SC-5: pending sessions expire and are capped.
+pending_session_ttl_s = 3600
+max_pending_sessions = 64
+max_pending_sessions_per_ip = 4
+max_pending_sessions_per_boot_service = 32
+unauthorised_idle_timeout_s = 120
+session_opens_per_ip_per_min = 10
+session_opens_per_boot_service_per_min = 60
+session_opens_per_min = 600
+# AC-7: code attempts.
+code_attempts_per_session = 5
+code_attempts_per_ip_per_min = 10
+poll_ms = 2000
+progress_min_interval_ms = 2000
+max_chunk_requests_per_job = 2
+
+[codes]
+# IA-5: codes are stored only as HMAC-SHA-256 values under this key.
+hmac_key = "/etc/usgp-server/keys/code-hmac.key"
+default_ttl_s = 900
+max_ttl_s = 3600
+
+[jobs]
+# REQ-JOB-007, REQ-JOB-011: written into every signed plan.
+lost_after_s = 900
+retry_attempts = 5
+retry_base_ms = 2000
+retry_max_ms = 60000
+stall_timeout_s = 1800
+timeout_verify_s = 21600
+timeout_disk_s = 1800
+timeout_apply_s = 21600
+timeout_boot_s = 1800
+timeout_report_s = 600
+report_interval_s = 30
 ```
 
 ## Example service unit
@@ -596,6 +818,280 @@ Notes:
 - Enrolment creates the audit chain's genesis record if `serve` has not
   run yet, so operators can be enrolled before the first start.
 - There is no list or review command for operators in M2 (AC-2 gap).
+- M3 adds the permissions `auth_code.issue`, `auth_code.view`,
+  `auth_code.revoke`, `device_session.view`, `device_session.approve`,
+  `job.view`, `job.acknowledge`, `job.fail`, `boot_service.view`,
+  `boot_service.assign`, `boot_stop.view` and `device.boot_reenable`.
+  `administrator` holds all of them; there is still no other role, so
+  one role holds every M3 permission (AC-5 is not claimed).
+
+## Device listener
+
+The device listener serves the pre-boot agent
+([winpe-kit.md](winpe-kit.md)). It is a separate listener from the
+operator API (`[api]`), with its own address, certificate and limits.
+
+- **Off by default.** It runs only with `device_api.enabled = true`, and
+  then needs its certificate and key and the three M3 keys
+  ([Keys](#keys-for-the-device-listener-m3)).
+- **TLS, server-authenticated only.** TLS 1.2 or 1.3 on the FIPS
+  provider. No client certificate is requested: a pre-boot device holds
+  no secret (decision 0020). The agent checks the server certificate
+  against the trust anchors in its `agent.toml`. Use a certificate whose
+  name matches `server_name` in the agent configuration.
+- **Admission by served subnet.** At accept time the listener closes a
+  connection whose source address is not inside a subnet of an active
+  boot service, and audits `device.connection.refused` (capped per
+  source). It keeps a cached table of active boot services and their
+  subnets, loaded when the listener starts (nothing is admitted until
+  the first load succeeds), reloaded every
+  `device_api.boot_service_refresh_s` (30 s), and reloaded on a refused
+  source at most once a second.
+- **After enrolling or re-enabling a boot service on a running server,**
+  its devices can be refused for up to `boot_service_refresh_s` (30 s by
+  default), or until a refused connection more than 1 s after the last
+  load triggers a reload. Wait for the refresh before booting devices on
+  a newly enrolled subnet. After a `boot-service disable`, the table
+  drops the service at its next load.
+- **Connection caps.** In total (`max_connections`), per source, per
+  boot service (`max_connections_per_boot_service`), and handshakes per
+  source.
+- **Session opens** are refused (403 `forbidden`, a capped
+  `device.session.open_refused` with reason `no_boot_service`) when no
+  active boot service serves the source, or more than one does. That
+  check runs before any rate limit counts the request. Then come the
+  per-source, per-boot-service and global open ceilings and the pending
+  session caps (429 `rate_limited`).
+- **Bearer token.** An opened session gets a 32-byte token from the
+  DRBG; the server keeps only its SHA-256. Every later request carries
+  it as `Authorization: Bearer`. The token is **bound to the source
+  network** it was issued to: the same IPv4 address or IPv6 /64
+  (decision 0023 item 1). A request from another source network gets
+  401 `invalid_token` and a capped `auth.unauthenticated` record with
+  reason `token_source_mismatch`. A device whose IPv4 address changes
+  after the wipe therefore loses its session, and its job becomes `lost`
+  (POAM-39).
+- **Expiry.** A pending session expires after `pending_session_ttl_s`,
+  or sooner (`unauthorised_idle_timeout_s`) if it was never authorised
+  and stops polling. A confirmed session's token stops working at the
+  job's last contact plus twice `jobs.lost_after_s` while the job is
+  unfinished, and at finish plus `jobs.lost_after_s` once it has
+  finished (decision 0023 item 1, as clarified 2026-10-29; 403
+  `session_ended`).
+- **Fail closed on audit.** Every state-changing device route writes its
+  record in the same transaction as the change. If the record cannot be
+  written, the route answers 503 `audit_unavailable` and nothing
+  changes. In particular, the wipe confirmation creates no job and no
+  plan unless `disk.wipe.authorised` commits (REQ-DISK-006).
+- **Errors** use the M2 shape `{"error":{"code","message"}}`. A
+  malformed body gets a fixed 400 message with the line and column, never
+  the parser's text. Wrong, expired, used and revoked codes get the same
+  answer.
+
+Device routes, for reference (the agent is the only intended client):
+
+| Method, path | Purpose | Audit (success / refusal) |
+|--------------|---------|---------------------------|
+| POST `/v1/device/sessions` | Open a session (no token yet) | `device.session.opened` / `device.session.open_refused` |
+| GET `/v1/device/session` | Poll the session state | none / `device.session.status_refused` |
+| POST `/v1/device/session/code` | Enter an operator code | `auth_code.used`, `device.session.authorised` / `device.session.code_refused` |
+| GET `/v1/device/session/packages` | Packages offered to this device | `device.session.packages.read` (and `boot_service.no_usable_package` when empty) / `device.session.packages_refused` |
+| POST `/v1/device/session/package` | Choose a package | `device.session.package_chosen` / `device.session.package_refused` |
+| POST `/v1/device/session/disk` | Choose a disk (a descriptor, never disk content) | `device.session.disk_chosen` / `device.session.disk_refused` |
+| POST `/v1/device/session/confirm` | The separate wipe confirmation: creates the job and returns the signed plan | `job.created`, `disk.wipe.authorised`, `job.plan.issued` / `device.session.confirm_refused` |
+| POST `/v1/device/session/cancel` | Cancel before the confirmation only | `device.session.cancelled` / `device.session.cancel_refused` |
+| POST `/v1/device/session/end` | End the session (nothing to offer, no disk, firmware, agent error) | `device.session.ended` / `device.session.end_refused` |
+| GET `/v1/device/jobs/{job}/content/{sha256}/chunks/{n}` | One verified content chunk | `job.content.read` (once per job, content and pass) / `job.content.refused` |
+| POST `/v1/device/jobs/{job}/progress` | Progress and step changes | `job.step.*`, `job.failed`, `job.succeeded`, `boot_stop.added` / `job.progress.refused` |
+
+## Device codes and approval
+
+A device session gets no package list, no plan and no content until it
+is authorised (decision 0018 item 1, decision 0020). There are two ways.
+
+**A code entered at the device.**
+
+```sh
+usgp-cli code issue [--ttl SECONDS] [--note TEXT]
+usgp-cli code list
+usgp-cli code revoke ID
+```
+
+- `code issue` prints the code **once**, on stdout only (`Cache-Control:
+  no-store`). The server stores only its HMAC-SHA-256 under
+  `codes.hmac_key`; the value is never logged, never audited and never
+  shown again. `code list` shows ids, states and times, never values.
+- A code is single-use and expires after `--ttl` (default
+  `codes.default_ttl_s`, at most `codes.max_ttl_s`). Revoke an unused code
+  you no longer need.
+- The technician types the code at the device with echo off. After
+  `device_api.code_attempts_per_session` (5) failures the session is
+  refused; each source gets `code_attempts_per_ip_per_min` (10) attempts
+  a minute.
+- Records: `auth_code.issued`, `auth_code.revoked`, `auth_code.used`,
+  `device.session.authorised` (method `code`), and
+  `device.session.code_refused` for a failure (never the value).
+
+**Approval in the console.**
+
+```sh
+usgp-cli session list [--state awaiting_authorisation]
+usgp-cli session show ID
+usgp-cli session approve --display-code CODE [ID]
+usgp-cli session refuse ID [--note TEXT]
+```
+
+- The device shows a **display code** (`XXX-XXX`). It is not a secret;
+  it binds the approval to the screen in front of the technician. Read
+  it from the device, and check the session's MACs, source address,
+  firmware, architecture, Secure Boot state and memory with `session
+  show` before approving. These device facts are **claimed** by the
+  device, not verified (POAM-38).
+- `approve` refuses a display code that does not match
+  (`device.session.approve_refused`). `refuse` ends the session; the
+  device then shows a persistent "refused" screen.
+- **Neither way authenticates the device itself** (POAM-38). Approve
+  only a device you can see. Under decision 0020 a copied PE gains
+  nothing without a fresh authorisation, and M3 delivers no secret to
+  any session. **M4 must not deliver a secret to a session authorised
+  only by a code or an approval** (security review, M3).
+
+## Boot services (relay enrolment)
+
+M3 brings forward a minimal, manual part of M5's relay enrolment
+(decision 0021). A **boot service** is one relay's client certificate,
+bound by its SHA-256 to a record with a name and the subnets it serves.
+It decides which packages a device on those subnets is offered
+(REQ-TGT-001), and which boot-policy list the relay pulls
+(REQ-BOOT-067).
+
+```sh
+usgp-server boot-service enrol --config /etc/usgp-server/server.toml \
+  --cert /root/relay-a.pem --name relay-site-a --subnet 10.20.1.0/24
+usgp-server boot-service disable --config /etc/usgp-server/server.toml \
+  --id UUID
+usgp-cli boot-service list
+usgp-cli boot-service show ID
+usgp-cli boot-service set-packages ID PACKAGE_ID... --if-match TAG
+```
+
+- `enrol` is a local administrative command (`usgp_admin` key). It
+  refuses a certificate without the TLS client purpose, a certificate
+  already bound to an operator or to another boot service, and a name in
+  use (`boot_service.enrol.refused`). It prints the boot service id; put
+  that id in the relay's `server_feed.boot_service_id`.
+- The relay's certificate must chain to `tls.client_trust_anchors` and
+  pass the same CRL checks as an operator's, because the relay pulls its
+  list from the operator listener (`GET /v1/relay/boot-policy`, a route
+  only a boot service may use). A certificate bound to both an operator
+  and a boot service is refused (`auth.ambiguous_certificate`).
+- **Disable** makes the relay's certificate get 401
+  (`auth.boot_service_disabled`), and its devices are offered nothing.
+- **No rotation.** A renewed relay certificate means disabling the boot
+  service and enrolling a new one (new id, packages assigned again).
+  `cert_not_after` is recorded but not enforced ahead of time (POAM-44).
+- `set-packages` replaces the package list; pass the assignment tag that
+  `show` prints with `--if-match`. A boot service with no usable package
+  is shown with a warning, and its devices see "nothing to offer"
+  (REQ-TGT-008).
+- **Overlapping subnets.** A device whose source address two active boot
+  services serve cannot open a session (403). Do not enrol overlapping
+  subnets.
+- After enrolling, allow for the listener's admission refresh
+  ([Device listener](#device-listener)).
+
+**Boot-policy generation.** Each boot service has a generation number
+that rises by one each time its stop list changes. A relay refuses a
+list whose generation is below the one it holds. After a database
+restore, raise it:
+
+```sh
+usgp-server boot-service raise-generation --config \
+  /etc/usgp-server/server.toml --id UUID --to N
+```
+
+`N` must be above the current value and above the generation every
+relay of that boot service holds (each relay reports it in
+`relay.start` and `boot_policy.applied`). Records:
+`boot_policy.generation.raised` or `.raise.refused`. The generation
+never goes down (migration 0004 guard). See
+[Backup and restore](#backup-and-restore).
+
+## Jobs
+
+A job is created by the wipe confirmation at the device, in the same
+transaction as `job.created` and `disk.wipe.authorised`. The
+`disk.wipe.authorised` record names how the session was authorised
+(`auth_method`, and `auth_code_id` or `approved_by_operator`) and the
+MACs the device claimed. The plan is signed after the commit. The person
+who confirms at the device is not individually identified (AU-10 basis
+only).
+
+```sh
+usgp-cli job list [--state S]
+usgp-cli job show ID
+usgp-cli job ack ID
+```
+
+- **States**: `running`, `lost`, `failed`, `succeeded`. Steps: 1
+  download and verify all content, 2 partition and format, 3 apply the
+  image, 4 make the disk bootable, 5 report success and restart. Every
+  step change and every state change is one audit record. `failed` and
+  `succeeded` are final. There is no cancelled state: a job cannot be
+  cancelled after the wipe confirmation (REQ-TGT-011).
+- `job show` gives the job's steps, bytes and percentage, disk, the
+  partition layout the device reported, and any persistent error (step,
+  category, code, the files that failed, attempts), the same fields the
+  device shows. It also links a new job to an earlier failed or lost job
+  of the same MACs (`previous_job_id`).
+- **Lost.** A running job not heard from for `jobs.lost_after_s` becomes
+  `lost` (`job.lost`). The device's next report moves it back to
+  `running` (`job.resumed`).
+- **Server-enforced time limits.** The plan's step and stall timeouts are
+  stored with the job. A running job whose current step runs past its
+  timeout, or that sends no accepted report within the stall timeout, is
+  failed by the server: category `timeout`, reason `step_timeout` or
+  `stall_timeout`, `job.failed` with `failed_by=server`. A late report
+  from such a job gets 409 `job_not_running` and the job is failed in
+  the same transaction.
+- **Acknowledge.** `job ack` (permission `job.acknowledge`) clears the
+  attention flag of a failed job; the job stays `failed`
+  (`job.failure.acknowledged`).
+- **Fail a job (operator).** The API route `POST /v1/jobs/{id}/fail`
+  with the body `{"reason": "..."}` (1 to 200 printable characters;
+  permission `job.fail`) fails a `running` or `lost` job: category
+  `refused`, code `operator_failed`, and `job.failed` with
+  `failed_by=operator` and the reason as a note. A finished job gets 409
+  and `job.fail_refused`. `usgp-cli` has no command for it in M3. Use it
+  for a job that holds a device's MACs (a confirmation for those MACs is
+  refused with 409 `in_use` while another session's job is running)
+  and whose device will not report again.
+- **After the wipe**, the device carries on even when the server answers
+  503; a step whose report was refused is recorded only when a later
+  report succeeds (POAM-41). The final `job.succeeded` or `job.failed`
+  record carries the server's step history.
+
+## Boot stops
+
+When a job succeeds, the server adds a **boot stop** for each MAC the
+device claimed, on every active boot service whose subnets contain the
+device's source address, and raises each one's generation in the same
+transaction (`boot_stop.added`, marked `claimed=<mac>`,
+`mac_basis=agent_claim`; decision 0023 item 2). The relays then stop
+offering a boot program to those MACs (REQ-BOOT-067).
+
+```sh
+usgp-cli boot-stop list
+usgp-cli boot-stop clear ID
+```
+
+- `clear` (permission `device.boot_reenable`) is the only way to make a
+  stopped device network-bootable again in M3 (decision 0021 item 3;
+  REQ-BOOT-062 is OPEN). It raises the generation (`boot_stop.cleared`).
+- The MACs are the device's own claim, shown to the technician on the
+  wipe screen. A MAC that already has a live stop, or a running job in
+  another session, is refused at the confirmation. Stops by the MAC the
+  relay observed, or by the SMBIOS UUID, are not built (POAM-42, M5).
 
 ## TLS, CRL refresh and revocation
 
@@ -693,7 +1189,12 @@ with `seq`, `ts_us`, `record_hash`, `prev_hash` and `persisted` in
   `auth.operator_disabled`, sustained `auth.unauthenticated.summary`
   counts, `content.integrity.failed`, `content.orphan.found`,
   `operator.enrolled`, `operator.disabled` and `audit.verify` with
-  outcome failure.
+  outcome failure. From M3 also: `maintenance.sweep.failed`,
+  `boot_service.enrolled`, `boot_service.disabled`,
+  `boot_policy.generation.raised`, `boot_stop.cleared`, `job.failed`,
+  `device.session.approved`, `auth_code.issued`, sustained
+  `device.session.code_refused` or `device.connection.refused` counts,
+  and `auth.unauthenticated` with reason `token_source_mismatch`.
 - No product tool verifies the chain from the forwarded lines; the
   comparison below is manual.
 
@@ -716,6 +1217,16 @@ with `seq`, `ts_us`, `record_hash`, `prev_hash` and `persisted` in
 | `image.deleted`, `image.delete.refused`, `pe.deleted`, `pe.delete.refused` | Deletes |
 | `package.created`, `.edited`, `.cloned`, `.deleted`, `.refused`, `package.status.changed`, `package.manifest.signed`, `package.read`, `package.list.read`, `package.manifest.read`, `os_support.refused` | Packages |
 | `operator.enrolled`, `operator.enrol.refused`, `operator.disabled`, `operator.disable.refused`, `audit.verify` | Local administrative commands (actor: local uid, claimed) |
+| `boot_service.enrolled`, `boot_service.enrol.refused`, `boot_service.disabled`, `boot_service.disable.refused`, `boot_policy.generation.raised`, `boot_policy.generation.raise.refused` | M3 local administrative commands (actor: local uid, claimed) |
+| `auth_code.issued`, `auth_code.refused`, `auth_code.list.read`, `auth_code.revoked`, `auth_code.revoke_refused` | M3 operator code actions (never the code value) |
+| `device_session.list.read`, `device.session.approved`, `device.session.approve_refused`, `device.session.refused`, `device.session.refuse_refused` | M3 operator session actions |
+| `device.connection.refused`, `device.session.opened`, `device.session.open_refused`, `device.session.no_boot_service`, `auth_code.used`, `device.session.authorised`, `device.session.code_refused`, `device.session.packages.read`, `boot_service.no_usable_package`, `device.session.package_chosen`, `device.session.disk_chosen`, `device.session.cancelled`, `device.session.expired`, `device.session.ended`, and the `*_refused` event of each device route | M3 device sessions (actor kind `device_session`, label with the claimed MACs and source; interface `device_api`) |
+| `disk.wipe.authorised`, `job.created`, `job.plan.issued` | M3 wipe confirmation (one transaction; plan signed after the commit) |
+| `job.step.started`, `job.step.completed`, `job.failed`, `job.succeeded`, `job.lost`, `job.resumed`, `job.content.read`, `job.content.refused`, `job.progress.refused` | M3 job state changes and content access |
+| `job.list.read`, `job.read`, `job.failure.acknowledged`, `job.acknowledge_refused`, `job.fail_refused` | M3 operator job actions (`job.failed` with `failed_by=operator` for the fail route) |
+| `boot_service.read`, `boot_service.packages.set`, `boot_service.packages.refused`, `boot_stop.list.read`, `boot_stop.added`, `boot_stop.cleared`, `boot_stop.clear_refused` | M3 boot services and stops |
+| `boot_policy.read`, `boot_policy.refused`, `boot_policy.generation.initialised`, `auth.boot_service_disabled`, `auth.ambiguous_certificate` | M3 relay pulls (actor kind `boot_service`) |
+| `maintenance.sweep.failed` | M3 maintenance sweep (lost jobs, expiry, time limits) could not run; unpersisted, at most once per 300 s per sweep |
 
 ### Verifying the chain
 
@@ -822,6 +1333,20 @@ Until it does:
 6. Content restored without its database row (or the reverse) shows up
    as `content.orphan.found` or as an integrity failure on use; review
    both before returning the system to service.
+7. **Boot-policy generation (M3).** The restored database holds an
+   older boot-policy generation than the relays, so every relay refuses
+   the server's lists as a rollback until the generation passes theirs
+   (POAM-36). Before devices are booted again, for each boot service:
+   read the generation each relay holds (from its last `relay.start` or
+   `boot_policy.applied` record), run `usgp-server boot-service
+   raise-generation --id UUID --to N` with `N` above all of them, and
+   check that each relay then logs `boot_policy.applied`.
+8. **Boot stops (M3).** Stops added after the backup are not in the
+   restored database. A relay keeps its last list until the raised
+   generation replaces it, so those devices become network-bootable
+   again then. Compare `boot_stop.added` records in the SIEM after the
+   backup's time with `usgp-cli boot-stop list`, and review the affected
+   devices before returning the system to service.
 
 ## Schema migrations and upgrades
 
@@ -830,8 +1355,12 @@ Until it does:
   migration in its own transaction. It refuses if an applied migration is
   unknown to the binary (a newer database) or its checksum differs.
 - `serve` and the administrative commands refuse unless the applied
-  version is exactly the binary's (schema 3 in M2) with matching
-  checksums (exit 1 for `serve`).
+  version is exactly the binary's (schema 3 in M2, schema 4 in M3) with
+  matching checksums (exit 1 for `serve`). Migration 0004 adds the
+  device session, code, job, boot-service and boot-stop tables, the
+  guard triggers (including the deferred `job_wipe_authorised` trigger:
+  a job cannot commit without its `disk.wipe.authorised` record), and
+  the `usgp_app` and `usgp_admin` grants.
 - **Migrations are forward-only.** There are no down migrations. The
   rollback path is **restore from backup**: back up PostgreSQL before
   every `migrate`, and if an upgrade must be undone, reinstall the old
@@ -941,6 +1470,25 @@ contain internal paths or file content.
 | `audit_unavailable` | 500 | Audit record could not be written; nothing changed |
 | `unavailable`, `internal` | 503, 500 | At a limit; internal error ("the outcome may be unknown, check before retrying" when a commit failed) |
 
+M3 codes, mostly on the device listener (where `audit_unavailable` is
+503, not 500):
+
+| Code | Status | Meaning |
+|------|--------|---------|
+| `forbidden` | 403 | At session open: no active boot service, or more than one, serves the source |
+| `invalid_token` | 401 | Bearer token unknown, or used from another source network |
+| `rate_limited` | 429 | A session-open, pending-session or code-attempt limit |
+| `not_authorised` | 403 | The session is not authorised yet |
+| `code_not_accepted` | 422 | The code was wrong, expired, used or revoked (one answer for all) |
+| `session_refused`, `session_ended` | 403 (`session_ended` is 409 on one state conflict) | Refused by an operator or by too many code attempts; expired, ended or lapsed |
+| `wrong_state`, `job_started` | 409 | The request does not fit the session's state; cancel after the wipe confirmation |
+| `in_use` | 409 | At confirmation: a claimed MAC has a live boot stop or a running job in another session |
+| `package_not_offered`, `disk_too_small` | 422 | The package is not offered to this device; the disk is below the package's minimum |
+| `display_code_mismatch` | 422 | Approval with a display code that is not the session's |
+| `job_not_running` | 409 | A chunk or report for a job that is not running (including one the server just failed for a time limit) |
+| `progress_out_of_order` | 409 | A report out of step order |
+| `integrity_failed` | 500 | A content chunk failed its server-side check; not retried by the agent |
+
 ## Limits
 
 All defaults are project design, listed in the
@@ -971,6 +1519,15 @@ both times). Real media (MT-1) is NOT RUN.
   mitigation.
 - Allow the server to reach PostgreSQL only; allow PostgreSQL to accept
   only `hostssl` from the server host.
+- **Device listener (M3).** Expose `device_api.listen` only to the boot
+  segments that enrolled boot services serve; the listener itself also
+  closes connections from sources outside every served subnet. Relays
+  pull their boot-policy lists from the operator listener (`api.listen`),
+  so allow each enrolled relay host to reach it.
+- A host inside a served subnet can still hold that boot service's
+  connection and pending-session slots, within the per-source and
+  per-boot-service caps. Port security and DHCP snooping on the boot
+  segment are the network mitigation.
 
 ## Known gaps
 
@@ -987,10 +1544,20 @@ key buffer reallocation; serviced WIM layouts with few observations;
 MT-1 NOT RUN; Linux fuzzing without ASan;
 OPEN-PE-LIC with counsel; no restore event.
 
+M3 adds POAM-38 to POAM-60 and extends POAM-1, 6, 11, 16, 18, 21, 31
+and 36 (all pending owner acceptance). In short: the device has no
+credential of its own and its facts are claimed; the token is bound to
+the source network, not the TLS channel; secret buffers inside the HTTP
+stack are not wiped; post-wipe audit scope; boot stops keyed by claimed
+MACs; no SMBIOS identifier; no relay certificate rotation; a substituted
+PE on the boot network; FIPS in Windows PE unconfirmed; MT-2 NOT RUN.
+
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | Evidence status: CI run 40928612312 recorded (failure in `windows-agent` only: BOOT-004 VHD test, error 87 before any format; open defect POAM-53; everything else named passed). M3 still not met. |
+| 2026-10-29 | M3 (WU-16; `m3/build` at 21c1efb). Title and M3 evidence status (M3 not met; MT-2 and MT-1 NOT RUN; CI runs 40818350636, 40876728637, 40910029759 as recorded; 40928612312 pending). New files and modes (device TLS key, plan, boot-policy and code HMAC keys); `usgp_admin` grants of migration 0004; keys for the device listener and their purposes; `keygen` purposes and `boot-service enrol`, `disable` and `raise-generation` commands; configuration reference for `[signing]` additions, `[device_api]` (every key, including `max_pending_sessions_per_boot_service`, `unauthorised_idle_timeout_s`, `session_opens_per_min`, `session_opens_per_boot_service_per_min`, `max_connections_per_boot_service`, `boot_service_refresh_s`), `[codes]` and `[jobs]`; example configuration extended (checked against `server-m3.toml`). New sections: Device listener (admission by served subnet and the 30 s refresh after enrolment, token bound to the source network, expiry and lapse, fail-closed audit, device routes), Device codes and approval, Boot services (relay enrolment, disable, no rotation, raise-generation), Jobs (states, server time limits, acknowledge, the operator fail route), Boot stops. M3 events, alerts, M3 reason codes, restore steps 7 and 8 (raise the generation; review lost stops), schema 4, device-listener network controls, M3 known gaps. |
 | 2026-10-28 | CI on commit 5ea03a1. Rewrote the evidence status: `pg-integration` PASS (`migrate_pg`, `repo_pg`, `audit_pg` 9 each, `e2e_pg` 1); `large-upload` PASS (peak 54 MiB); `fuzz-smoke` and `wim-samples` `verify` PASS with the S11/S12 rules; MT-1 NOT RUN; M2 met except exit 1a (MT-1, owner action), so not met. Audit-row protection now cites `audit_pg` and `repo_pg`, with what each tests. Limits note records both large-upload peaks. Known gaps: POAM-34 closed; `repo_pg` and `e2e_pg` removed from the NOT RUN list. |
 | 2026-10-27 | First M2 CI evidence (commit d72b761) and the S11/S12 WIM rules. Rewrote the evidence status: `large-upload`, `fuzz-smoke` and the `wim-samples` `verify` job PASS; `pg-integration` not fully passed (`repo_pg` and `e2e_pg` NOT RUN); MT-1 NOT RUN. Updated the 256 MiB note under Limits. `wim_resource_overlap` and `wim_metadata_order_not_supported` now describe the S11/S12 rules (OBS-018, OBS-021), matching the working tree, which is not yet committed. Known gaps now go up to POAM-37. |
 | 2026-10-27 | First version for milestone M2 (WU-11): deployment with three certificate-only database roles, key modes and the `serve` admin-key refusal, command line and exit codes, full configuration reference including round-1 and round-2 keys, example configuration and example service unit (not shipped, not tested; REL-M2-P6-003), TLS and CRL refresh with rollback refusal, audit chain, checkpoints, heartbeat, SIEM forwarding and `audit verify` (`--max-unsigned-records` default 251, `--max-checkpoint-age`), time synchronisation, backup and restore with the audit-chain procedure (NIST-012), forward-only migrations with restore from backup as rollback (REL-M2-P6-004), WIM reason codes with remedies, API reason codes, limits, network controls and NOT RUN caveats. |

@@ -110,7 +110,7 @@ shows the disk's size and the minimum.
 - Standards: `specs/standards/gpt.md` §10, §13
 - Status: AUDITED (2026-10-28; whether an operator may lower the minimum is
   OPEN-DISK-1)
-- Status note (DRAFT, 2026-10-29) [project rule], DEC-0023 item 3: the
+- Status note (AUDITED 2026-10-29) [project rule], DEC-0023 item 3: the
   Windows partition must hold the chosen image's expanded size, plus
   a documented estimate of file-system overhead (a project design
   value), plus 16 GiB free. Microsoft says the Windows partition must

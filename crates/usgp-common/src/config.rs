@@ -51,8 +51,9 @@
 
 // POAM: off Unix, [`read_bounded`] has no equivalent of `O_NOFOLLOW`: a
 // final symbolic link or junction is followed (the target must still be a
-// regular file). No Windows caller reads operator files through it yet;
-// the trust functions fail closed there.
+// regular file). The Windows pre-boot agent reads its configuration
+// file through it (`usgp-preboot-agent` `config::load`); the trust
+// functions still fail closed there.
 
 use std::fs::File;
 use std::io::Read;

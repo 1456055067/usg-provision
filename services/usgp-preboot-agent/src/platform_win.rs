@@ -620,8 +620,7 @@ impl WinVolumes {
             let letter = volume::free_letter(wintools::letter_order(), &taken)
                 .map_err(|e| perr(win_kind(&e), "list drive letters"))?
                 .ok_or(perr(PlatformErrorKind::Refused, "find a free drive letter"))?;
-            volume::assign_letter(letter, &vol)
-                .map_err(|e| perr(win_kind(&e), "assign a drive letter"))?;
+            set_only_letter(letter, &vol, spec.role)?;
             letter
         };
         // SEC-008: the script's name comes from the DRBG.
@@ -685,6 +684,9 @@ impl WinVolumes {
         let mine = volume::drive_letters(vol)
             .map_err(|e| perr(win_kind(&e), "read the volume's drive letters"))?;
         if !mine.contains(&letter) {
+            // The reserved letter must be free; a letter automount gave
+            // this volume is not "taken by another volume" (it is
+            // removed by `set_only_letter`).
             let reported =
                 volume::letters_in_use().map_err(|e| perr(win_kind(&e), "list drive letters"))?;
             if reported.contains(&letter) || volume::letter_in_use(letter) {
@@ -693,13 +695,33 @@ impl WinVolumes {
                     "the reserved Windows drive letter was taken",
                 ));
             }
-            volume::assign_letter(letter, vol)
-                .map_err(|e| perr(win_kind(&e), "assign the Windows drive letter"))?;
         }
+        set_only_letter(letter, vol, PartRole::Windows)?;
         // Unlocked before DiskPart opens the volume to format it.
         drop(lock);
         Ok(letter)
     }
+}
+
+/// Makes `letter` the only drive letter of `vol` (resolved by its extents
+/// on the target disk) and notes the letters it held before on stderr, as
+/// a trace for the operator console and CI (BOOT-004, round 4).
+// COMPLIANCE MAPPING:
+// - NIST 800-53: CM-7 (Least Functionality) - only the target volume's
+//   own letters are removed
+// - SPEC: specs/standards/windows-storage-firmware-api.md §15
+// - SPEC: specs/disk.md#REQ-DISK-008 (BOOT-004)
+fn set_only_letter(
+    letter: DriveLetter,
+    vol: &VolumeGuidPath,
+    role: PartRole,
+) -> Result<(), PlatformError> {
+    let (before, outcome) = volume::set_only_letter(letter, vol);
+    eprintln!("usgp-preboot-agent: {role:?} volume letters before assign: {before:?}");
+    outcome.map_err(|e| {
+        eprintln!("usgp-preboot-agent: {role:?} volume: setting {letter:?} failed: {e}");
+        perr(win_kind(&e), "assign a drive letter")
+    })
 }
 
 impl VolumeOps for WinVolumes {

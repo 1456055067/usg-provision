@@ -1,6 +1,7 @@
 # usg-provision architecture
 
-Status: baseline from the bootstrap run (2026-10-25). Derived only from
+Status: baseline from the bootstrap run (2026-10-25), with what M3 built
+recorded in [section 9](#9-m3-as-built) (2026-10-29). Derived only from
 `specs/INDEX.md` (all capabilities `NOT SPECCED`), open standards, and
 decision [0001](decisions/0001-fips-validated-crypto.md). Every mechanism
 here is our own design. Where the index is silent or a behaviour is listed
@@ -91,8 +92,8 @@ we never ship Microsoft components. Consequences for the design:
 | # | Boundary | Authentication | Untrusted inputs | Fail-secure rule |
 |---|----------|----------------|------------------|------------------|
 | TB-1 | Target firmware ↔ relay (DHCP/PXE, TFTP; L2) | None possible (open standards provide none). Secure Boot, where the device has it on, is the only integrity check the firmware makes; we never weaken it. | Every DHCP/TFTP packet (RFC 2131/2132/4578, RFC 1350/2347-2349). | Malformed or unexpected packet → drop, rate-limited log. Unknown architecture → no offer. Device whose job is complete → no offer (BOOT-5). |
-| TB-2 | Pre-boot agent ↔ relay/server (HTTPS) | Server authenticated by TLS against a provisioning trust anchor baked into the PE boot kit. The device is unauthenticated until the session is authorised (technician code or operator approval, design D-3). | Hardware facts, selections, progress events, logs from the device. | No authorised session → no package list, no plan, no secret. Plan signature or content digest mismatch → stop before any disk write. |
-| TB-3 | Relay ↔ server (mTLS) | Mutual TLS; relay certificate issued by the server's internal CA at operator-approved enrolment (RELAY-1 "assigned to that role"). | Relay health, cache inventory, forwarded events. | Revoked or expired relay cert → relay stops answering PXE. Lost server link → relay serves only content it already verified; never invents plans. |
+| TB-2 | Pre-boot agent ↔ relay/server (HTTPS) | Server authenticated by TLS against a provisioning trust anchor baked into the PE boot kit. The device is unauthenticated until the session is authorised (technician code or operator approval, design D-3). **M3:** the agent talks to the server's separate device listener directly; the session's bearer token is bound to the source network (decision 0023 item 1); the device itself is never authenticated (POAM-38). | Hardware facts, selections, progress events, logs from the device. | No authorised session → no package list, no plan, no secret. Plan signature or content digest mismatch → stop before any disk write. |
+| TB-3 | Relay ↔ server (mTLS) | Mutual TLS; relay certificate issued by the server's internal CA at operator-approved enrolment (RELAY-1 "assigned to that role"). **M3:** a minimal, manual enrolment binds an existing relay client certificate to a boot service (decision 0021); the relay pulls only a signed boot-policy list. | Relay health, cache inventory, forwarded events. | Revoked or expired relay cert → relay stops answering PXE. Lost server link → relay serves only content it already verified; never invents plans. |
 | TB-4 | Operator ↔ API (HTTPS) | Operator authentication (mechanism decided at M2; PIV/CAC-capable mTLS is the target, D-6) + RBAC on every route. | All request bodies, uploads (multi-GB WIM, ZIP/CAB driver packages, unattend templates). | Unauthenticated or unauthorised → 401/403 + audit event. Upload fails validation → quarantined, never published. |
 | TB-5 | Server ↔ its storage | OS file permissions; integrity via signed manifests. | Content read back from disk. | Digest mismatch on read → content marked bad, not served. |
 | TB-6 | Build/supply chain | `cargo deny`, `cargo audit`, pinned toolchain, lockfile. | Third-party crates; the FIPS C module (decision 0001). | Any gate failure blocks release. |
@@ -187,7 +188,8 @@ crates/
   usgp-wincfg/       NEW: unattend template model/render, driver package ingest (ZIP/CAB)
   usgp-deploy/       job plan model + step engine (OS-neutral)
   usgp-cache/        verified chunk cache, eviction, upstream fetch
-  usgp-api/          server REST routes, authn, RBAC
+  usgp-api/          server REST routes, authn, RBAC; M3 device listener routes
+  usgp-winapi/       M3: Windows API binding for the agent (windows-sys, decision 0019)
 services/
   usgp-server/       control plane binary
   usgp-relay/        per-segment boot + cache binary
@@ -225,9 +227,14 @@ common <- dhcp, tftp, httpboot, disk, wincfg, db, proto   (no crypto in parsers)
 deploy  -> common, proto, disk, image, wincfg
 server  -> api, audit, db, image, wincfg, proto, crypto, common
 relay   -> dhcp, tftp, httpboot, cache, proto, crypto, common
-agent   -> deploy, proto, crypto, common
+agent   -> deploy, proto, crypto, common; winapi (Windows target only)
 cli     -> proto, crypto, common
 ```
+
+M3: `usgp-disk`, `usgp-deploy` and `usgp-image` stay OS-neutral with no
+`-sys` crate; `usgp-disk` now depends on `usgp-proto` (the verified plan
+type). Every `unsafe` call is in `usgp-winapi/src/ffi.rs`, each with a
+`// SAFETY:` comment (decision 0019).
 
 ## 7. Wire protocols (our design)
 
@@ -255,3 +262,69 @@ cli     -> proto, crypto, common
 - Parsers: bounds-checked, no panics, fuzz target each.
 - IPv4 only until IPv6 boot is confirmed (Unconfirmed list); packet types
   are not designed to preclude a later v6 path.
+
+## 9. M3 as built
+
+What milestone M3 built (branch `m3/build`, 2026-10-29), where it
+differs from the baseline above. M3 is not met: the owner's lab
+procedure MT-2 has not run ([MT-2-lab.md](testing/MT-2-lab.md)).
+
+**Components.**
+
+- **Device listener.** `usgp-server` runs a second listener for pre-boot
+  devices (`[device_api]`, off by default), separate from the operator
+  API: server-authenticated TLS only, its own certificate, limits and
+  route table, and admission only from sources inside an active boot
+  service's subnets ([server.md](operations/server.md#device-listener)).
+- **The agent talks to the server directly** in M3. Step 4 of section 4
+  ("proxying through the relay") and content from the relay cache wait
+  for M5; the agent fetches each 8 MiB chunk from the device listener
+  and verifies it against the signed content manifest.
+- **`usgp-winapi`** is the agent's only path to Windows APIs not covered
+  by `std` (disks, volumes, firmware variables, privileges, file-system
+  metadata), through `windows-sys` 0.61 confined by `deny.toml`
+  (decision 0019). NTFS and FAT32 are formatted by Microsoft's DiskPart,
+  BCDBoot makes the installed Windows bootable, and the agent writes the
+  firmware boot option and `BootOrder` itself; the GPT is written by our
+  own `usgp-disk`.
+- **Image apply** uses our own WIM reader (decision 0018 item 4), writing
+  through Windows APIs, with every chunk verified before the wipe and
+  again before use (decision 0021 item 4). Features not shown by our own
+  DISM samples are refused (decision 0006).
+- **Relay feed.** The relay pulls a signed, generation-numbered
+  boot-policy list from the server's operator listener over mTLS and
+  stops answering devices whose installs succeeded (REQ-BOOT-067). A
+  relay serving a Windows PE kit must have the feed enabled
+  ([relay.md](operations/relay.md#boot-policy-from-the-server-m3)).
+
+**Brought forward from M5 (decision 0021).** A minimal, manual relay
+enrolment: an administrative command binds a relay's existing client
+certificate to a boot-service record and its subnets. This gives package
+offers per boot service (REQ-TGT-001) and the automatic boot stop. Full
+enrolment (identity issuance, revocation, rotation), caching and relay
+health stay in M5 (POAM-44).
+
+**Trust model of the device (decision 0020).** The device carries no
+secret. The operator places the agent and a public configuration (server
+URL, trust anchors, plan and content public keys) in their own Windows
+PE ([winpe-kit.md](operations/winpe-kit.md)). A session is authorised by
+a single-use operator code or an operator approval; this authorises the
+session, not the device (POAM-38).
+
+**Rule for M4 (security review, M3).** A rogue PE can relay a code that
+a technician types. That is harmless in M3, which gives no secret to any
+session, but **M4 must not deliver any secret (domain-join credentials,
+local administrator passwords, enrolment tokens) to a session authorised
+only by a code or an approval**. Secret delivery in M4 needs a stronger
+basis, decided in the M4 plan.
+
+**Wipe guard.** The server records `disk.wipe.authorised` in the same
+transaction as the job, and PostgreSQL refuses to commit a job without
+it; the agent can build its wipe authorisation only from a verified plan
+that names that record (section 3, "Destructive operations").
+
+## Document Change History
+
+| Date | Change |
+|------|--------|
+| 2026-10-29 | M3: status line; TB-2 and TB-3 notes (device listener, token bound to the source network, device not authenticated; manual relay enrolment and the boot-policy pull); `usgp-winapi` in the crate map and layering; new section 9, "M3 as built" (device listener, agent talking to the server directly, `usgp-winapi`, own WIM apply, relay feed, the enrolment brought forward from M5, the device trust model, the M4 rule on secrets, the wipe guard). |

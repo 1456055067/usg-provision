@@ -127,6 +127,27 @@ start, a minimal authenticated operator API with audit arrives in M2.
 - Decisions before start: D-2, D-3, D-4, D-5.
 - Build order: `usgp-disk` ∥ `usgp-proto` (session, plan) → `usgp-deploy` →
   `usgp-image` (apply) → `usgp-preboot-agent`; `usgp-relay` BOOT-5 policy.
+- Status (2026-10-29, branch `m3/build`): built, **not met**.
+  - Exit 1 (lab install) is the owner's lab procedure MT-2
+    ([MT-2-lab.md](testing/MT-2-lab.md)), **NOT RUN**. Its CI parts
+    passed: the agent and server against a synthetic WIM on a simulated
+    platform, our GPT under OVMF (boot smoke S10, CI run 40876728637), and
+    the relay's BOOT-5 stop with OVMF (S9, CI run 40910029759).
+  - Exits 2, 3 and 4 passed in the M3 QA run (commit 647af22) on the
+    in-memory store and simulated platform; the PostgreSQL wipe-record
+    fault test and the review fix rounds' tests passed in CI run
+    40928612312, which failed only on the Windows BOOT-004 VHD test, an
+    open defect pending the owner's decision (POAM-53).
+  - M2's MT-1 is also still NOT RUN.
+  - Decisions: 0018 (session, boot content and install defaults), 0019
+    (Windows API binding), 0020 (agent trust model), 0021 (minimal relay
+    enrolment brought forward), 0022 (link and junction re-base), 0023
+    (token binding, boot stops, space reserve).
+- **Brought forward from M5 (decision 0021).** A minimal, manual relay
+  enrolment: an administrative command binds a relay's client
+  certificate to a boot service and its subnets, and the relay pulls a
+  signed, generation-numbered boot-policy list over mTLS. Stops are
+  reversed only by an operator command until REQ-BOOT-062 is specced.
 
 ### M4: Configuration, drivers, workflow, management hand-off
 
@@ -150,6 +171,11 @@ start, a minimal authenticated operator API with audit arrives in M2.
   `specs/agent-handoff.md`, `specs/os-support.md`). Standards 10, 12, 19
   (ZIP and CAB formats).
 - Decisions before start: D-8, D-9.
+- Constraint from M3 (security review): a rogue PE can relay a code a
+  technician types, so **no secret may be delivered to a device session
+  authorised only by an operator code or an operator approval** (decision
+  0018 item 1). M4's secret delivery needs a stronger basis, decided in
+  the M4 plan (POAM-38).
 - Build order: `usgp-wincfg` → `usgp-deploy` steps → `usgp-preboot-agent` →
   `usgp-server` secret service.
 
@@ -167,6 +193,11 @@ start, a minimal authenticated operator API with audit arrives in M2.
   2. A revoked relay stops answering PXE within the configured interval.
   3. A corrupted cache entry is detected, evicted, and refetched.
   4. Full R1 end-to-end run recorded as ATO test evidence.
+- M3 already built a minimal, manual part (decision 0021): binding a
+  relay's existing certificate to a boot service, and the signed
+  boot-policy pull. M5 adds identity issuance, revocation and rotation
+  (POAM-44), caching, relay health, and boot stops keyed by observed MACs
+  or the SMBIOS UUID (POAM-42, POAM-43).
 - Spec gate: RELAY-1, RELAY-2 (`specs/relay.md`). Standards 17, 20.
 - Decisions before start: D-5 for any Windows relay host; RELAY-1 host OS
   answer (Unconfirmed) or a recorded product decision.
@@ -272,3 +303,15 @@ others are project decisions for the owner, recorded in `docs/decisions/`.
 | D-8 | M4 | Local administrator password: in the answer file and scrubbed after setup, or set by a post-setup step so it never lands in the answer file. | Project | Post-setup step; answer file carries no secret. |
 | D-9 | M4 | AGT-1: which management agent is installed? | Product (spec request) | Operator-supplied installer package + enrolment config, run as a workflow step. |
 | D-10 | before first release | Project license. | Project | Owner decides. |
+
+D-2 to D-5 were answered for M3: D-2, D-3 and D-4 by decision 0018 items
+5, 1 and 4 (with 0020 for the agent's trust model and 0019 for the
+Windows binding); D-5 by decision 0018 item 6, which accepts a POA&M item
+while the check is open (POAM-1).
+
+## Document Change History
+
+| Date | Change |
+|------|--------|
+| 2026-10-29 | M3 status recorded with CI run 40928612312 (failure in the Windows BOOT-004 VHD test only). |
+| 2026-10-29 | M3 status (built, not met; MT-2 and MT-1 NOT RUN; CI parts and runs named), the decisions taken, the relay enrolment brought forward from M5 (decision 0021) and what M5 still owes, the M4 constraint that no secret goes to a session authorised only by a code or an approval, and the answers to D-2 to D-5. |

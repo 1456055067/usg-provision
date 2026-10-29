@@ -1,10 +1,15 @@
-# Operating `usgp-relay` (milestone M1)
+# Operating `usgp-relay` (milestones M1 and M3)
 
 `usgp-relay` is the per-segment boot service. It answers UEFI x86-64 PXE
 clients over IPv4 as a ProxyDHCP responder, and serves verified boot files
 over read-only TFTP. It never assigns addresses (decision 0003). This
 guide covers the M1 release: a static, file-based configuration on a
-Linux host.
+Linux host. M3 adds serving an operator-built Windows PE boot kit
+([`[pe_kit]`](#windows-pe-boot-kit-pe_kit-m3)), large-file TFTP
+(RFC 7440 window size and block-number wraparound), and a signed
+boot-policy list pulled from the server
+([`[server_feed]`](#server_feed-m3)), which stops the relay offering a
+boot program to a device once its install has succeeded (REQ-BOOT-067).
 
 M1 evidence status: the relay's behaviour is tested in-process, and the
 live boot scenarios (boot smoke S1 to S8) passed in CI run 40438138720
@@ -12,12 +17,25 @@ on 2026-10-27, in one lab topology with OVMF firmware (see
 `docs/compliance/TEST_EVIDENCE.md`). The service unit below is an
 example: it has not been tested, and none is shipped yet.
 
+M3 evidence status: the M3 relay code is tested in-process. In CI on
+`m3/build`, S1 to S8 passed again in run 40876728637 (commit 349de13),
+and boot smoke S9 (a stopped device gets no answer from the relay and
+OVMF falls through to its disk; clearing the stop restores network boot)
+passed in run 40910029759 (commit fff029f) and again, with S1 to S10,
+in run 40928612312 (commit 21c1efb), with OVMF and a test payload, not
+Windows PE. Serving a real Windows PE, and how Microsoft's
+boot program handles window size and wraparound, are owner lab
+procedure MT-2, which is **NOT RUN**
+([MT-2-lab.md](../testing/MT-2-lab.md)).
+
 ## Contents
 
 - [Host requirements](#host-requirements)
 - [Files, ownership and modes](#files-ownership-and-modes)
 - [Command line](#command-line)
 - [Configuration reference](#configuration-reference)
+- [Windows PE boot kit (`[pe_kit]`, M3)](#windows-pe-boot-kit-pe_kit-m3)
+- [Boot policy from the server (M3)](#boot-policy-from-the-server-m3)
 - [Running without root](#running-without-root)
 - [Network requirements](#network-requirements)
 - [What the boot network may carry](#what-the-boot-network-may-carry)
@@ -43,14 +61,18 @@ example: it has not been tested, and none is shipped yet.
 
 ## Files, ownership and modes
 
-The relay reads these files and never writes them:
+The relay reads these files and never writes them (the one exception is
+the optional M3 boot-policy cache, below):
 
 | File | Configured by | Notes |
 |------|---------------|-------|
 | Configuration, for example `/etc/usgp-relay/relay.toml` | `--config PATH` | At most 64 KiB |
-| Boot manifest | `boot.manifest` | Written by `usgp-cli boot-manifest create`; at most 1 MiB and 256 files |
-| Boot root directory | `boot.root` | Holds the published boot files |
+| Boot manifest | `boot.manifest` | Written by `usgp-cli boot-manifest create`; at most 1 MiB and 256 files. In M3 it may carry a `[pe_kit]` section |
+| Boot root directory | `boot.root` | Holds the published boot files (in M3 also the Windows PE kit files) |
 | Suppression file (optional) | `suppression.file` | At most 1 MiB and 10,000 entries |
+| Server trust anchors, relay client certificate, boot-policy public key (M3) | `server_feed.trust_anchors`, `client_cert`, `boot_policy_key_pub` | Trusted files, as below |
+| Relay client private key (M3) | `server_feed.client_key` | Trusted file; also must not be readable by others, nor by the group unless it is the relay's own group: mode 0600, or 0640 with the service's group. Read into a wiped buffer |
+| Boot-policy cache (M3, optional) | `server_feed.cache_file` | **Written by the relay**: mode 0600, by atomic rename. At start-up it is read only if bounded, not a symbolic link, owned by the relay or a trusted owner and not group- or world-writable, and it is verified like a list from the server |
 
 The relay refuses to start (exit 78) unless each of these passes its
 trust rules (CM-5, SI-7):
@@ -207,8 +229,44 @@ leading `/`, no empty component and no `.` or `..` component.
 | `max_retries` | 5 | 1 to 10 | Resends per packet after the first ACK |
 | `handshake_retries` | 1 | 1 to 10 | Resends of the first packet |
 | `handshake_timeout_ms` | 2000 | 100 to 60000; at most `max_transfer_secs` | Time from request arrival to the first ACK. It also covers file verification (see [Large boot files](#large-boot-files-and-the-handshake-deadline)) |
-| `max_transfer_secs` | 600 | 10 to 3600 | Hard limit on one transfer |
-| `max_file_size_bytes` | 67108864 | 1 to 4294967295 | Largest file served. A manifest entry larger than this refuses start-up |
+| `max_transfer_secs` | 1800 (M3; 600 in M1) | 10 to 7200 | Hard limit on one transfer |
+| `max_file_size_bytes` | 1073741824 (M3; 67108864 in M1) | 1 to 4294967295 | Largest file served. A manifest entry larger than this refuses start-up |
+| `max_window_size` (M3) | 8 | 1 to 64 | Largest RFC 7440 `windowsize` granted. A client that does not ask gets lock-step transfer (window 1) |
+| `block_wrap` (M3) | `"zero"` | `"zero"`, `"one"` or `"off"` | What follows block 65535: `zero` (block 0), `one` (block 1), or `off`, which refuses a file needing more than 65535 blocks with ERROR 3 before any OACK or DATA (the M1 behaviour). Wraparound is not in RFC 1350 (see [STANDARDS_CONFORMANCE.md](../compliance/STANDARDS_CONFORMANCE.md)) |
+
+The M3 defaults (`max_file_size_bytes`, `max_transfer_secs`) were raised
+for Windows PE images. A configuration from M1 that sets the old values
+explicitly keeps them; a Windows PE `.wim` over 64 MiB then refuses
+start-up until the value is raised. Which `blksize`, `windowsize` and
+wrap mode Microsoft's boot program uses is not known from public sources
+(OPEN-WPXE-2; for wraparound, OPEN-WPXE-4, which decision 0018 item 2
+settles for the project only); lab step L4 records it
+([MT-2-lab.md](../testing/MT-2-lab.md)). Until then keep the defaults.
+
+### `[server_feed]` (M3)
+
+Off unless `enabled = true`. Every key other than `enabled` is read
+only then. **Required, with `enabled = true`, when the boot manifest has
+a `[pe_kit]`**: otherwise start-up and `--check-config` are refused (exit
+78, `relay.config.rejected` with field `server_feed.enabled`; `relay.start`
+failure for `--config`), because without the stop list the relay would
+keep booting devices whose installs succeeded (REQ-BOOT-067). An M1
+manifest without `[pe_kit]` needs no feed.
+
+| Key | Default | Range or rule | Meaning |
+|-----|---------|---------------|---------|
+| `enabled` | `false` | boolean | Pull the boot policy |
+| `url` | required | `https://host[:port]` | The server's **operator** listener (`api.listen`); plain HTTP is refused |
+| `server_name` | the URL host | DNS name or IP address, at most 253 characters | Name the server certificate must carry |
+| `trust_anchors` | required | Absolute path (PEM) | Anchors for the server certificate |
+| `client_cert` | required | Absolute path (PEM chain) | The relay's client certificate, enrolled on the server as a boot service |
+| `client_key` | required | Absolute path (PKCS#8 PEM); not the certificate file | The relay's client key; private-key rule above |
+| `boot_policy_key_pub` | required | Absolute path (SPKI PEM) | The server's boot-policy public key, pinned |
+| `boot_service_id` | required | Non-nil UUID | The id `usgp-server boot-service enrol` printed |
+| `poll_interval_s` | 30 | 5 to 3600 | Seconds between pulls, with jitter |
+| `cache_file` | none | Absolute path | Optional cache of the last list applied |
+
+There is no setting that skips TLS or signature checks.
 
 ### `[content]`, `[suppression]`, `[log]`
 
@@ -223,6 +281,111 @@ leading `/`, no empty component and no `.` or `..` component.
 Fixed, not configurable: UDP ports 67, 4011 and 69; DHCP requests of 300
 to 1472 octets with at most 16 hops; TFTP octet mode only, requests of at
 most 512 octets.
+
+## Windows PE boot kit (`[pe_kit]`, M3)
+
+In M3 the relay serves the operator's own Windows PE network-boot kit
+(decision 0018 items 3 and 5): Microsoft's UEFI boot manager, the boot
+configuration store (BCD) the operator built, `boot.sdi`, the PE's
+`boot.wim` and optional fonts. The product never generates or edits the
+BCD and never ships a Microsoft file (REQ-PE-001). Building the kit is
+in [winpe-kit.md](winpe-kit.md).
+
+The kit is described by a `[pe_kit]` section in the boot manifest,
+written by `usgp-cli boot-manifest create --pe-kit` (never by hand):
+
+```toml
+[pe_kit]
+boot_program = "bootmgfw.efi"      # Microsoft's UEFI x64 boot manager
+bcd = "Boot/BCD"                   # the operator-built store
+sdi = "Boot/boot.sdi"
+wim = "Boot/boot.wim"              # the Windows PE image
+fonts = ["Boot/Fonts/a.ttf"]       # optional, at most 32
+pe_content_sha256 = "..."          # SHA-256 of the imported, Ready PE
+```
+
+- Every kit file is also an ordinary `[[file]]` entry, verified before
+  each read like any published file (SI-7).
+- `usgp-cli` checks, before it writes the manifest, that the boot program
+  is a UEFI x64 application (PE/COFF header), that the BCD is a file the
+  operator supplied, and that the WIM's SHA-256 is a Ready x64 PE on the
+  server; it also prints the memory the PE needs (512 MiB plus the WIM
+  size, REQ-PE-018). The relay itself has no server lookup for the PE.
+- At start-up and on every re-check the relay requires every role to
+  name a published file, `boot_program` to equal
+  `boot.uefi_x64_program`, and the WIM's digest to equal
+  `pe_content_sha256`. Otherwise the kit is **missing content**: the
+  relay runs, offers no boot program, and records `boot.kit.incomplete`
+  (REQ-PE-012, REQ-BOOT-052).
+- Requested names are matched ASCII case-insensitively, with `\` read as
+  `/` and one leading separator dropped. A manifest whose names collide
+  case-insensitively is refused at load (REQ-BOOT-063).
+- A manifest with `[pe_kit]` requires `[server_feed]` with
+  `enabled = true` ([`[server_feed]`](#server_feed-m3)).
+- The manifest is still unsigned (POAM-6): the binding of the kit to the
+  imported PE rests on the trusted-file rules for the manifest.
+- **Large files.** Every read request re-reads and hashes the whole file
+  within the handshake deadline. A Windows PE `.wim` is far larger than
+  the M1 test payload; see
+  [Large boot files](#large-boot-files-and-the-handshake-deadline).
+
+## Boot policy from the server (M3)
+
+When `[server_feed]` is enabled, the relay pulls a signed,
+generation-numbered **boot-policy list** from the server
+(`GET /v1/relay/boot-policy?have=<generation>`) over mutual TLS, with
+its enrolled client certificate (decision 0021). The list names the MACs
+of devices whose installs succeeded; the relay sends them no DHCP reply
+on any path, so their firmware moves on to the installed disk
+(REQ-BOOT-067).
+
+Set-up, in order:
+
+1. On the server, enrol the relay's client certificate as a boot service
+   (`usgp-server boot-service enrol`, [server.md](server.md#boot-services-relay-enrolment)),
+   and note the id it prints.
+2. Copy the server's `boot-policy.pub` and the server's trust anchors to
+   the relay host as trusted files; install the relay's client
+   certificate and key (key mode 0600, or 0640 with the relay's group).
+3. Fill in `[server_feed]` with the id and the operator listener's URL,
+   and run `usgp-relay --check-config`. It reports `boot policy:
+   awaiting` until the first list arrives.
+4. Start the relay and check for `boot_policy.applied`.
+
+How a list is checked, in order: the signature with the pinned
+`boot_policy_key_pub`, before the payload is parsed; the boot service id;
+the generation, which must not be below the one applied. An equal
+generation with identical bytes changes nothing; with other bytes it is
+refused. A good list replaces the stop set at once and is written to
+`cache_file` if one is set.
+
+**Fail safe.**
+
+- Until a first list has been applied (from the server or from a cache
+  that verifies), the relay offers no boot program to **any** device
+  (`boot_policy` state `awaiting` in `relay.start`). A stopped device is
+  never served because the server was unreachable.
+- On any error the last good list stays in force, and
+  `boot_policy.rejected` or `boot_policy.fetch_failed` is recorded (once
+  per distinct reason, then at most once per report interval with a
+  count).
+- **The cache.** If `cache_file` is set, the relay reads it at start-up
+  and verifies it like a list from the server, so it can serve while the
+  server is unreachable. A process running as the relay's own uid can
+  replace the cache with an older, validly signed list, which the relay
+  applies at its next start until the first pull corrects it (POAM-55).
+  Keep the cache directory writable only by the relay's account.
+- After a server database restore the server's generation goes back, and
+  the relay refuses its lists as a rollback until an administrator
+  raises the generation ([server.md](server.md#backup-and-restore)).
+
+**Stops and the suppression file.** A device on the stop list, or in the
+suppression file, gets no reply; the two sets are combined. A stop is
+lifted only by `usgp-cli boot-stop clear` on the server; the relay
+applies the next generation without a restart (decision 0021 item 3).
+Stops are keyed by the MACs the device's agent claimed (POAM-42); like
+suppression, they are a convenience on an unauthenticated network, not
+access control (REQ-BOOT-045).
 
 ## Running without root
 
@@ -415,7 +578,8 @@ The protection for boot content is that it contains nothing secret
 (REQ-BOOT-043).
 
 M1 does not suppress devices automatically after provisioning
-(REQ-BOOT-060, POAM-16).
+(REQ-BOOT-060, POAM-16). M3 adds the automatic stop through the server's
+boot-policy list ([Boot policy from the server](#boot-policy-from-the-server-m3)).
 
 ## Time synchronisation
 
@@ -478,7 +642,7 @@ authenticated.
 
 | Event | When | Key detail |
 |-------|------|------------|
-| `relay.start` | Start-up finished (success), or failed before serving (failure) | `version`, `config_sha256`, `manifest_sha256`, `interfaces`, `interface_prefixes` (for example `boot0=10.20.1.0/24(interface)`), `state`, `node_name`, `node_name_source` (`config`, `hostname`, `unset`), `service_uid`, `admin_uid`, `allow_shared_admin_uid`, `warning` (`running_as_root`, `service_uid_owns_trusted_files`, `service_uid_unknown`). Failure: `reason` (for example `fips_inactive`, `async runtime unavailable`, a bind error) |
+| `relay.start` | Start-up finished (success), or failed before serving (failure) | `version`, `config_sha256`, `manifest_sha256`, `interfaces`, `interface_prefixes` (for example `boot0=10.20.1.0/24(interface)`), `state`, `node_name`, `node_name_source` (`config`, `hostname`, `unset`), `service_uid`, `admin_uid`, `allow_shared_admin_uid`, `warning` (`running_as_root`, `service_uid_owns_trusted_files`, `service_uid_unknown`). M3: `block_wrap`, `max_window_size`, `boot_policy` (`disabled`, `awaiting` or `applied`), and with a feed `boot_service_id`, `boot_policy_server`, `boot_policy_generation`. Failure: `reason` (for example `fips_inactive`, `async runtime unavailable`, a bind error) |
 | `relay.stop` | Process stop after a signal, or an error after start | `reason` |
 | `relay.config.rejected` | Configuration, trust or content refusal at start-up or in `--check-config` | `field` (a config key, `--admin-uid` or `interface[i].prefix_len`), `reason` (trust rules: world-writable, group-writable, owner, writable directory, replaced, unresolvable, symbolic link; or `service_uid_is_admin_uid`, `service_uid_unknown`) |
 | `relay.state.changed` | Change between `running` and `running_missing_content` | `from`, `to`, `cause`, `files_not_verified` |
@@ -494,8 +658,12 @@ authenticated.
 | `dhcp.drop.summary` | Every 60 s, if non-zero | counts per drop reason (for example `malformed`, `short_message`, `not_pxe_client`, `unsupported_arch`, `suppressed`, `missing_content`, `off_segment_source`, `bad_source`) |
 | `tftp.drop.summary` | Every 60 s, if non-zero | counts per drop reason (for example `malformed`, `bad_source`) |
 | `limits.shed` | Every 60 s, if a budget or cap shed requests | counts per limit (`dhcp_client`, `dhcp_relay_source`, `dhcp_global`, `dhcp_relayed_global`, `tftp_request_source`, `tftp_rrq_global`, `tftp_per_client`, `tftp_pending`, `tftp_transfers`, `tftp_error`, `tftp_verify_timeout`) |
-| `tftp.transfer.started` | A read transfer begins | `file`, `sha256`, `verified_sha256=true`, `tsize`, `oack`, `blksize` |
-| `tftp.transfer.completed` | The client acknowledged the last block | `file`, `sha256`, `size`, `last_block`, `retries`, `duration_ms` |
+| `tftp.transfer.started` | A read transfer begins | `file`, `sha256`, `size`, `verified_sha256=true`, `tsize`, `oack`, `blksize`; M3: `windowsize`, `block_wrap` |
+| `tftp.transfer.completed` | The client acknowledged the last block | `file`, `sha256`, `size`, `last_block`, `retries`, `duration_ms`; M3: `blksize`, `windowsize`, `block_wrap`, `wraps` (times the block number wrapped) |
+| `boot_policy.applied` (M3) | A new boot-policy list was applied | `source` (server or cache), `boot_service_id`, `generation`, `stops` |
+| `boot_policy.rejected`, `boot_policy.fetch_failed` (M3) | A list was refused (signature, boot service, rollback, equal generation with other bytes, malformed), or could not be fetched; the last good list stays | reason (`envelope`, `signature`, `invalid`, `wrong_boot_service`, `rollback`, `generation_reused`; or `connect`, `tls`, `http`, `status`, `too_large`, `timeout`), `boot_service_id`; once per distinct reason, then summarised with a count |
+| `boot.device.stopped` (M3) | A device on the stop list was seen and not answered; throttled per device like `dhcp.suppressed` | claimed MAC and GUID, job id, generation |
+| `boot.kit.incomplete` (M3) | The `[pe_kit]` is incomplete or not bound to its PE; no boot program is offered | the problem |
 | `tftp.transfer.failed` | The server gave up | `file`, `sha256`, `reason` (`retry_cap`, `max_duration`, `handshake_timeout`, `established_cap`, `tid_open_failed`, and others) |
 | `tftp.transfer.aborted_by_client` | The client sent an ERROR | `file`, `sha256`, `client_error_code` |
 | `tftp.request.refused` | A request got a TFTP ERROR (rate-limited) | `reason`, `code_sent` (1 not published, 2 write request, 3 too large, 4 mode) |
@@ -531,12 +699,22 @@ a separate verification bound exists (POAM-15):
   interfaces × `tftp_rrq_global_per_sec` × deadline must stay below
   `tftp_max_pending`.
 
+**Windows PE `.wim` (M3).** A Windows PE image is hundreds of megabytes
+and is read and hashed again on every request for it. Concurrent
+transfers of one file share one verified copy in memory, but each new
+request still waits for its own read and hash. No test has measured this
+with a real Windows PE `.wim`; lab step L4 records whether the boot
+manager's requests are served or dropped as `boot.file.verify_slow`
+([MT-2-lab.md](../testing/MT-2-lab.md)). If they are dropped, raise
+`tftp.handshake_timeout_ms` (at most 60000) within the rule above.
+
 ## Upgrades
 
 The relay never writes its configuration, manifest or suppression file
-(REQ-BOOT-053). Keep `/etc/usgp-relay/` and the boot root across package
-updates. A configuration with `schema_version = 1` stays valid. No package
-or conffile handling is shipped in M1.
+(REQ-BOOT-053); the M3 boot-policy cache is its only written file. Keep
+`/etc/usgp-relay/` and the boot root across package updates. A
+configuration with `schema_version = 1` stays valid. No package or
+conffile handling is shipped in M1.
 
 ## Test lab note
 
@@ -550,6 +728,8 @@ pass the trust checks above, and a user-owned `$TMPDIR` would fail them
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | Evidence status: S1 to S10 passed in CI run 40928612312. |
+| 2026-10-29 | M3 (WU-16; `m3/build` at 21c1efb). Title, scope and M3 evidence status (S1 to S8 again in CI 40876728637; S9 PASS in CI 40910029759 with OVMF and a test payload; MT-2 NOT RUN). Files table: feed material, client-key mode rule, the boot-policy cache (the relay's only written file). `[tftp]`: new defaults for `max_transfer_secs` (1800, up to 7200) and `max_file_size_bytes` (1 GiB), new `max_window_size` and `block_wrap`, and the OPEN-WPXE-2 / OPEN-WPXE-4 note. New `[server_feed]` reference, including that a `[pe_kit]` requires an enabled feed. New sections: Windows PE boot kit (`[pe_kit]`, kit checks, `boot.kit.incomplete`, unsigned manifest POAM-6) and Boot policy from the server (set-up, checks, fail-safe `awaiting` state, the cache and POAM-55, restore and raise-generation, stops combined with suppression, POAM-42). Event catalogue: M3 `relay.start` and `tftp.transfer.*` fields, `boot_policy.applied`, `.rejected`, `.fetch_failed`, `boot.device.stopped`, `boot.kit.incomplete`. Large-file note for a Windows PE `.wim`. |
 | 2026-10-27 | Evidence status: boot smoke S1 to S8 passed in CI run 40438138720; the Secure Boot note now cites S5 and states its limits. |
 | 2026-10-26 | M1 final pass: corrected what the manifest check and Secure Boot protect (QA-004); example unit no longer restart-loops on a failed `--check-config` (REL-M1-010). |
 | 2026-10-26 | First version for milestone M1: configuration reference, command line, file ownership, running without root, network requirements (REQ-BOOT-023), secrets (REQ-BOOT-043), suppression (REQ-BOOT-045), time, logging, network mitigations, audit event catalogue, large-file note. |

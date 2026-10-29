@@ -1107,7 +1107,7 @@ own limits before using it.
     and M-20 for applying a volume-root capture: content, streams,
     times and non-root descriptors as stored. At the apply root, see
     §6.1 "Root entry" and OPEN-WIM-14.
-  - **M-04, names in an image (DRAFT, 2026-10-29) [project rule,
+  - **M-04, names in an image (AUDITED 2026-10-29) [project rule,
     DEC-0021 item 4; REQ-JOB-008]:** the
     product refuses an image entry whose name breaks the Windows
     naming rules of `windows-storage-firmware-api.md` §27:

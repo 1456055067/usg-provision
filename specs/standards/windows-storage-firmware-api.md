@@ -15,7 +15,8 @@ SR-3c (2026-10-28) added §20 to §25 and OPEN-WAPI-7 to 12 (AUDITED
 (2026-10-29) added §26, §27 and OPEN-WAPI-13, 14 (AUDITED
 2026-10-29; the OPEN items stay open). REL-M3-WU15-003 (2026-10-29)
 added §28 and OPEN-WAPI-15 (AUDITED 2026-10-29; OPEN-WAPI-15 stays
-open).
+open). SR-8 (2026-10-29) added §29 and OPEN-WAPI-16 to 19 (AUDITED 2026-10-29;
+the OPEN items stay open).
 
 Sources: Microsoft Learn Win32 and driver reference pages, one page
 per function, structure or control code, named in each section below.
@@ -376,6 +377,20 @@ Microsoft facts, not product behaviour.
   state outright that `SetDefaultDllDirectories` has no effect on an
   executable's load-time imports (§28); the statement there is a
   reading.
+- **OPEN-WAPI-16** (SR-8, AUDITED): what `SetVolumeMountPoint` does, and
+  which error it reports, when the volume already has a drive letter
+  and a different drive letter is given; and whether a volume may hold
+  more than one drive letter (§29).
+- **OPEN-WAPI-17** (SR-8, AUDITED): whether automatic mounting in Windows
+  PE gives drive letters to partitions that are not basic data
+  partitions (for example the EFI system partition), and whether the
+  no-drive-letter attribute is honoured in Windows PE (§29).
+- **OPEN-WAPI-18** (SR-8, AUDITED): whether `mountvol /n` and DiskPart
+  `automount disable` persist across restarts, and whether they work
+  in a running Windows PE session (§29).
+- **OPEN-WAPI-19** (SR-8, AUDITED): `DeleteVolumeMountPoint` on a drive
+  letter is not stated in so many words to leave the volume and its
+  data untouched; §29 records it as a reading.
 
 ## 13. Volumes not backed by a disk (SR-3b item 3; AUDITED)
 
@@ -1106,3 +1121,104 @@ For unpackaged desktop applications such as the agent.
   set for it. An attacker who can write to any folder in the search
   path before the real DLL's folder can have a malicious copy loaded,
   with the program's privileges.
+
+## 29. Drive letters and automatic mounting (SR-8; AUDITED)
+
+Pages: "SetVolumeMountPointW function", "DeleteVolumeMountPointW
+function" (fileapi.h), "PARTITION_INFORMATION_GPT", Windows Commands
+"mountvol", "automount", "assign", "WinPE: Storage Area Network (SAN)
+Policy" (dated 2017-05-02), "UEFI/GPT-based hard drive partitions"
+(dated 2022-07-01). Extends §8 and §15.
+
+- **Second drive letter (`SetVolumeMountPoint`).** The page says only
+  that the call links a volume to a drive letter or to an empty folder
+  on another volume, and names one specific error: given a mounted
+  folder path it reports `ERROR_DIR_NOT_EMPTY` even for an empty
+  folder. It says nothing about a volume that already has a letter
+  being given a different one, does not say a volume may have only one
+  letter, and does not name `ERROR_INVALID_PARAMETER` (87) for any case
+  (**OPEN-WAPI-16**). The DiskPart `assign` page says an error results
+  if the requested letter or mount point is already in use (that is,
+  held by another volume), and that the command can change the letter
+  of a removable drive; it is silent on fixed volumes that already have
+  one. **[reading]** A caller should not rely on any particular
+  outcome: to move a letter, remove the old one (`DeleteVolumeMountPoint`)
+  before setting the new one, and treat any failure as fatal.
+- **Which partitions can have a drive letter at all**
+  ("PARTITION_INFORMATION_GPT"): only partitions of the basic data type
+  (`ebd0a0a2-b9e5-4433-87c0-68b6b72699c7`) can be given drive letters,
+  get volume GUID paths, host mounted folders, or appear in
+  `FindFirstVolume`/`FindNextVolume`. The `assign` page agrees: no
+  letter for system volumes, boot volumes, volumes holding the paging
+  file, OEM partitions, or any GPT partition other than basic data.
+  **[reading]** By that rule the EFI system partition, the Microsoft
+  reserved partition and the recovery partition do not get letters
+  automatically. But Microsoft's Windows PE DiskPart sample for UEFI
+  layouts assigns a letter to the system partition by hand, so the
+  "only basic data" statement is not absolute in practice
+  (**OPEN-WAPI-17**).
+- **GPT attributes affecting letters** (values stated on the page):
+  - `GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER` `0x8000000000000000`
+    (bit 63): the partition gets no drive letter **by default** when
+    the disk is first seen by a computer or moved to another one. It
+    does not forbid assigning one explicitly. Can be set on basic and
+    dynamic disks. Also listed in `specs/standards/gpt.md`.
+  - `GPT_BASIC_DATA_ATTRIBUTE_HIDDEN` `0x4000000000000000` (bit 62):
+    the mount manager does not see the partition at all, so it gets no
+    letter, no volume GUID path and no mounted folders, and is not
+    listed by the volume scan.
+  - `GPT_ATTRIBUTE_PLATFORM_REQUIRED` `0x0000000000000001`: marks a
+    partition the computer needs (for example OEM); not a volume, so
+    volume operations do not apply. The UEFI/GPT partitions page uses
+    it to keep utility partitions out of File Explorer.
+- **Automatic mounting of new volumes.**
+  - DiskPart `automount enable`: Windows mounts new basic and dynamic
+    volumes added to the system **and gives them drive letters**.
+    `automount disable` stops it mounting any new basic or dynamic
+    volume; in SAN set-ups this means no mount and no letter for newly
+    visible basic volumes. `automount` with no argument shows the
+    current state. `automount scrub` removes stored mount-point
+    folders and settings for volumes no longer present, so they do not
+    regain their old letters if they return.
+  - `mountvol /n` disables automatic mounting of new basic volumes;
+    `mountvol /e` re-enables it; `mountvol /r` does the same clean-up
+    as `scrub`. `mountvol <letter>: /s` mounts the EFI system
+    partition on that letter. `mountvol <path> /d` removes a mount
+    point; `/p` also dismounts the volume and takes it offline.
+  - **[reading]** "Mounting" here includes letter assignment
+    (`automount enable` says so); turning it off is therefore the
+    documented way to stop automatic letters for **new** volumes.
+    Neither page says whether volumes already present lose their
+    letters, nor whether the setting survives a restart
+    (**OPEN-WAPI-18**). **[reading]** `scrub` and `/r` act on stored
+    settings, which suggests these are kept by the system across
+    restarts, but this is not stated.
+- **Windows PE.** The SAN policy page says the default for Windows PE
+  images from the ADK is to mount available disks automatically. The
+  policy is set **in the image offline** (mount the boot image, run
+  the kit's SAN policy script with a number, commit): 1 mounts all
+  storage devices (default); 2 all except those on a shared bus; 3
+  mounts none; 4 makes internal disks offline (external and boot disks
+  stay online). Because it is written into the image, it applies to
+  every boot of that image. Separately, the UEFI/GPT partitions page
+  says: `X:` is reserved for Windows PE; after a restart Windows PE
+  hands out letters again in alphabetical order from `C:`, ignoring
+  what Setup configured, and the result can change with what drives
+  (for example USB sticks) are present. **[reading]** So letters seen
+  in Windows PE must never be assumed stable; find volumes by GUID path
+  or disk/offset (§7, §8). Whether `mountvol /n` or `automount
+  disable` can be used inside a running Windows PE session is not
+  stated (**OPEN-WAPI-18**).
+- **Removing a letter (`DeleteVolumeMountPoint`).** The page says the
+  call deletes a drive letter or mounted folder; for a mounted folder
+  the underlying folder is kept, and a folder that is not a mount point
+  is left alone. **[reading]** Removing a drive letter takes away only
+  that access path: it is not a dismount, format or delete, so the
+  volume and its data remain, and the volume can still be reached by
+  its GUID path. `mountvol /p`, by contrast, is documented as also
+  dismounting the volume and taking it offline, which implies plain
+  removal (`/d`) does not. The page does not state outright that the
+  volume and data are untouched (**OPEN-WAPI-19**). Note the page's own
+  example of the argument for a letter shows no trailing backslash
+  even though it says one is required; §15's rule (trailing backslash)
+  stands.

@@ -141,6 +141,66 @@ pub fn volume_at(letter: DriveLetter) -> Result<VolumeGuidPath> {
     volume_from_units("volume name", &units)
 }
 
+/// `true` unless every check finds nothing at `letter` (fail closed):
+///
+/// - `GetVolumeNameForVolumeMountPoint` names a volume there (§8);
+/// - `GetDriveType` on the letter's root does not report
+///   `DRIVE_NO_ROOT_DIR`, "no volume mounted" (§25), or fails;
+/// - it is the Windows PE system letter.
+///
+/// Two queries rather than one: on the CI runner a letter just given to a
+/// new volume was not seen as taken by the first query alone, and the
+/// next assignment of that letter failed (BOOT-004, CI run 40910029759;
+/// the pages do not say how soon a new mount point is visible to each
+/// query). Callers also exclude the letters they assigned themselves.
+#[must_use]
+pub fn letter_in_use(letter: DriveLetter) -> bool {
+    if letter == DriveLetter::PE_SYSTEM || volume_at(letter).is_ok() {
+        return true;
+    }
+    match wide(&letter.root()).ok().map(|w| ffi::drive_type(&w)) {
+        Some(Ok(t)) => DriveType::from_raw(t) != DriveType::NoRootDir,
+        _ => true,
+    }
+}
+
+/// Every drive letter any volume reports (`GetVolumePathNamesForVolumeName`,
+/// §15). Volumes whose list cannot be read are skipped; callers combine
+/// this with [`letter_in_use`].
+///
+/// # Errors
+///
+/// The volume enumeration failed.
+pub fn letters_in_use() -> Result<Vec<DriveLetter>> {
+    let mut out = Vec::new();
+    for v in volumes()? {
+        if let Ok(ls) = drive_letters(&v) {
+            out.extend(ls);
+        }
+    }
+    Ok(out)
+}
+
+/// The first letter of `order` that is free: not in `taken` (letters the
+/// caller has assigned or reserved), not reported by any volume
+/// ([`letters_in_use`]), and not [`letter_in_use`]. Never `X:`.
+///
+/// # Errors
+///
+/// The volume enumeration failed.
+pub fn free_letter(
+    order: impl IntoIterator<Item = char>,
+    taken: &[DriveLetter],
+) -> Result<Option<DriveLetter>> {
+    let reported = letters_in_use()?;
+    Ok(order.into_iter().filter_map(DriveLetter::new).find(|l| {
+        *l != DriveLetter::PE_SYSTEM
+            && !taken.contains(l)
+            && !reported.contains(l)
+            && !letter_in_use(*l)
+    }))
+}
+
 /// Gives `volume` the drive letter `letter` (`SetVolumeMountPoint`, spec
 /// §8). The Windows PE system letter `X:` is refused (plan §1.2(c)).
 pub fn assign_letter(letter: DriveLetter, volume: &VolumeGuidPath) -> Result<()> {

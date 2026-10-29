@@ -33,12 +33,10 @@ use crate::host::PowerAction;
 /// they are temporary; that is not a Microsoft requirement.
 const LETTER_ORDER: &str = "WSRTUVQPONMLKJIHGFED";
 
-/// The first free letter, given the letters in use.
-#[must_use]
-pub fn pick_letter(used: &[char]) -> Option<char> {
-    LETTER_ORDER
-        .chars()
-        .find(|c| !used.iter().any(|u| u.eq_ignore_ascii_case(c)))
+/// The letters tried for new volumes, most preferred first. The caller
+/// skips letters in use (`usgp_winapi::volume::free_letter`).
+pub fn letter_order() -> impl Iterator<Item = char> {
+    LETTER_ORDER.chars()
 }
 
 /// The BCDBoot command for the applied Windows on `windows` with the ESP
@@ -112,12 +110,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn letters_skip_used_and_reserved() {
-        assert_eq!(pick_letter(&[]), Some('W'));
-        assert_eq!(pick_letter(&['w', 'S']), Some('R'));
-        let all: Vec<char> = LETTER_ORDER.chars().collect();
-        assert_eq!(pick_letter(&all), None);
-        assert!(!LETTER_ORDER.contains(['A', 'B', 'C', 'X', 'Y', 'Z']));
+    fn letter_order_prefers_w_s_r_and_skips_reserved() {
+        let order: Vec<char> = letter_order().collect();
+        assert_eq!(order.get(..3), Some(&['W', 'S', 'R'][..]));
+        assert!(
+            !order
+                .iter()
+                .any(|c| ['A', 'B', 'C', 'X', 'Y', 'Z'].contains(c))
+        );
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), order.len(), "no letter twice");
     }
 
     #[test]

@@ -216,7 +216,21 @@ fn run_scoped(
             .run(&facts)
         });
         let done = || agent.is_finished();
-        drive(&mut drv, &done);
+        // A failed screen check panics in the driver. Without this the
+        // scope would wait for the agent, which blocks reading console
+        // input that never comes: an endless hang with no panic text
+        // (round 3). Close the input so the agent sees end of input and
+        // ends, join it, then re-raise with every screen seen.
+        let driven = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drive(&mut drv, &done);
+        }));
+        if let Err(p) = driven {
+            drv.close();
+            let _ = agent.join();
+            drv.drain();
+            eprintln!("screens seen before the failure:\n{}", drv.all());
+            std::panic::resume_unwind(p);
+        }
         agent.join().unwrap()
     });
     drv.drain();

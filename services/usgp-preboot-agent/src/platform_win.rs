@@ -411,6 +411,14 @@ struct Shared {
 }
 
 impl Shared {
+    /// Letters this agent has assigned to a volume or reserved for
+    /// Windows, so never given to another volume.
+    fn taken_letters(&self) -> Vec<DriveLetter> {
+        let mut v: Vec<DriveLetter> = self.letters.iter().map(|(_, l)| *l).collect();
+        v.extend(self.windows_letter);
+        v
+    }
+
     fn letter_of(&self, locator: &str) -> Option<DriveLetter> {
         self.letters
             .iter()
@@ -592,18 +600,6 @@ fn format_err(e: &FormatError, what: &'static str) -> PlatformError {
     }
 }
 
-/// Letters in use by any volume.
-fn used_letters() -> Result<Vec<char>, PlatformError> {
-    let vols = volume::volumes().map_err(|e| perr(win_kind(&e), "list volumes"))?;
-    let mut used = vec!['X'];
-    for v in vols {
-        if let Ok(ls) = volume::drive_letters(&v) {
-            used.extend(ls.iter().map(|l| l.letter()));
-        }
-    }
-    Ok(used)
-}
-
 impl WinVolumes {
     fn format_one(&self, n: u32, spec: &VolumeSpec) -> Result<FormattedVolume, PlatformError> {
         // The volume search, the script, the check of the letter just
@@ -616,11 +612,13 @@ impl WinVolumes {
         let letter = if spec.role == PartRole::Windows {
             self.assign_windows_letter(&vol)?
         } else {
-            // Any free letter, never X: and never the reserved Windows one.
-            let mut used = used_letters()?;
-            used.extend(self.shared.borrow().windows_letter.map(DriveLetter::letter));
-            let letter = wintools::pick_letter(&used)
-                .and_then(DriveLetter::new)
+            // Any free letter: never X:, never the reserved Windows one,
+            // never one this agent gave another volume (the CI runner did
+            // not always show a just-assigned letter as taken; BOOT-004,
+            // round 3), and free by both of Windows' checks.
+            let taken = self.shared.borrow().taken_letters();
+            let letter = volume::free_letter(wintools::letter_order(), &taken)
+                .map_err(|e| perr(win_kind(&e), "list drive letters"))?
                 .ok_or(perr(PlatformErrorKind::Refused, "find a free drive letter"))?;
             volume::assign_letter(letter, &vol)
                 .map_err(|e| perr(win_kind(&e), "assign a drive letter"))?;
@@ -687,7 +685,9 @@ impl WinVolumes {
         let mine = volume::drive_letters(vol)
             .map_err(|e| perr(win_kind(&e), "read the volume's drive letters"))?;
         if !mine.contains(&letter) {
-            if used_letters()?.contains(&letter.letter()) {
+            let reported =
+                volume::letters_in_use().map_err(|e| perr(win_kind(&e), "list drive letters"))?;
+            if reported.contains(&letter) || volume::letter_in_use(letter) {
                 return Err(perr(
                     PlatformErrorKind::IdentityMismatch,
                     "the reserved Windows drive letter was taken",
@@ -712,8 +712,9 @@ impl VolumeOps for WinVolumes {
         // with no volume behind it; the letter is held by this agent (never
         // given to another volume) and checked free again under the
         // volume's lock in `format` (fail closed if taken).
-        let letter = wintools::pick_letter(&used_letters()?)
-            .and_then(DriveLetter::new)
+        let taken = sh.taken_letters();
+        let letter = volume::free_letter(wintools::letter_order(), &taken)
+            .map_err(|e| perr(win_kind(&e), "list drive letters"))?
             .ok_or(perr(PlatformErrorKind::Refused, "find a free drive letter"))?;
         sh.windows_letter = Some(letter);
         Ok(letter.root())

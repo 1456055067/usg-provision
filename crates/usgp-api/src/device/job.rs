@@ -434,6 +434,27 @@ pub(crate) async fn progress<S: Store + 'static>(
     if job.state.is_final() {
         return Err(not_running(job.state));
     }
+    // Finding SEC-014: a job past its plan's step or stall timeout has
+    // released its MACs; it is failed here, as the sweep would, before
+    // any report (a success above all) is applied. A lost job reporting
+    // again is judged as running (REQ-JOB-012: Lost -> Failed).
+    let as_running = Job {
+        state: JobState::Running,
+        ..job.clone()
+    };
+    if let Some(o) = overdue(&as_running, &tx.job_steps(job_id).await?, at) {
+        let r = api
+            .fail_overdue_in_tx(&mut tx, &job, o, &[JobState::Running, JobState::Lost], at)
+            .await?;
+        api.commit(tx, &[r]).await?;
+        return Err(not_running(JobState::Failed).detail(
+            Detail::new()
+                .with("job_id", &job_id.to_string())
+                .with("seq", &p.seq)
+                .with("event", p.event.as_str())
+                .with("overdue", o.reason),
+        ));
+    }
     let ack = |seq: u64, state: JobState| ProgressAckV1 {
         ack_seq: seq,
         job_state: state,
@@ -591,6 +612,10 @@ pub(crate) async fn progress<S: Store + 'static>(
             // Finding SEC-013.1: the job stops holding its MACs and its
             // stops appear in one step for any concurrent confirmation.
             tx.lock_mac_claims().await?;
+            // Finding SEC-014: second guard. Its MACs must still be its
+            // own: no other session's running job and no stop, under the
+            // claim lock.
+            super::confirm::claims_free(&mut tx, &job.macs, s.id, at).await?;
             // Step 5 changes state with its own records (finding NIST-009).
             let last = Step::REPORT_RESTART;
             if state_of(&steps, last) == Some(StepState::Pending) {
@@ -689,6 +714,34 @@ pub(crate) async fn progress<S: Store + 'static>(
 }
 
 impl<S: Store + 'static> Api<S> {
+    /// Fails an overdue job in `tx` (from one of `from`) and appends its
+    /// `job.failed` record by the server (findings SEC-012, SEC-014).
+    pub(crate) async fn fail_overdue_in_tx(
+        &self,
+        tx: &mut S::Tx,
+        job: &Job,
+        o: Overdue,
+        from: &[JobState],
+        at: UnixMicros,
+    ) -> Result<usgp_audit::AuditRecord, ApiError> {
+        let f = server_failure(o.step, FailureCategory::Timeout, o.reason)?;
+        let history = fail_in_tx(tx, job, from, &f, at).await?;
+        let d = crate::context::system_draft("job.failed", Outcome::Failure)
+            .target("job", &job.id.to_string())
+            .reason(o.reason)
+            .detail(
+                Detail::new()
+                    .with("step", &o.step.get())
+                    .with("kind", o.step.kind().as_str())
+                    .with("category", FailureCategory::Timeout.as_str())
+                    .with("timeout_s", &o.timeout_s)
+                    .with("failed_by", "server")
+                    .with("from_state", job.state.as_str())
+                    .with("steps", &history),
+            );
+        self.append(tx, &d).await
+    }
+
     /// The timeout sweep (maintenance; finding SEC-012, REQ-JOB-011):
     /// every running job past its signed plan's step timeout or stall
     /// timeout is failed (category `timeout`, reason `step_timeout` or
@@ -721,21 +774,9 @@ impl<S: Store + 'static> Api<S> {
                 tx.rollback().await;
                 continue;
             };
-            let f = server_failure(o.step, FailureCategory::Timeout, o.reason)?;
-            let history = fail_in_tx(&mut tx, &job, &[JobState::Running], &f, at).await?;
-            let d = crate::context::system_draft("job.failed", Outcome::Failure)
-                .target("job", &job.id.to_string())
-                .reason(o.reason)
-                .detail(
-                    Detail::new()
-                        .with("step", &o.step.get())
-                        .with("kind", o.step.kind().as_str())
-                        .with("category", FailureCategory::Timeout.as_str())
-                        .with("timeout_s", &o.timeout_s)
-                        .with("failed_by", "server")
-                        .with("steps", &history),
-                );
-            let r = self.append(&mut tx, &d).await?;
+            let r = self
+                .fail_overdue_in_tx(&mut tx, &job, o, &[JobState::Running], at)
+                .await?;
             self.commit(tx, &[r]).await?;
             failed = failed.saturating_add(1);
         }

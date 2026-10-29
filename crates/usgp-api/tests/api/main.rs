@@ -28,6 +28,8 @@ mod fix_round1;
 #[cfg(test)]
 mod fix_round2;
 #[cfg(test)]
+mod fix_round3;
+#[cfg(test)]
 mod hardening;
 #[cfg(test)]
 mod jobs;

@@ -46,15 +46,15 @@
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use usgp_audit::Detail;
-use usgp_db::{
-    ChosenPackage, DbError, DeviceSession, JobTimeouts, NewJob, RepoTx, SessionAuth, Store,
-};
+use usgp_db::{ChosenPackage, DbError, JobTimeouts, NewJob, RepoTx, SessionAuth, Store};
 use usgp_proto::device::{ConfirmV1, ConfirmedV1, SessionState};
 use usgp_proto::job_plan::{
     LayoutPolicyV1, PlanDeviceV1, PlanImageV1, PlanPackageV1, PlanStepV1, PlanWipeV1,
     RetryPolicyV1, SCHEMA_V1, WipeScope,
 };
-use usgp_proto::{JobId, JobPlanV1, PayloadType, PlanDiskV1, Step, UnixMicros, codes};
+use usgp_proto::{
+    JobId, JobPlanV1, MacList, PayloadType, PlanDiskV1, SessionId, Step, UnixMicros, codes,
+};
 
 use super::auth::{DeviceCtx, require};
 use super::handlers::lock_live;
@@ -71,24 +71,26 @@ use crate::manifest::envelope;
 /// The event the wipe guard requires (WU-7 contract).
 pub const WIPE_AUTHORISED: &str = "disk.wipe.authorised";
 
-/// Refuses (409 `in_use`) if a MAC the session claims has an uncleared
-/// boot stop on any boot service, or belongs to a running job of another
-/// session (decision 0023 item 2). A running job already past its plan's
+/// Refuses (409 `in_use`) if one of `macs` has an uncleared boot stop on
+/// any boot service, or belongs to a running job of a session other than
+/// `own` (decision 0023 item 2). A running job already past its plan's
 /// step or stall timeout does not hold its MACs (finding SEC-012; the
 /// sweep fails it). The caller holds the claim lock (finding SEC-013.1).
-async fn claims_free<T: RepoTx>(
+/// Used at confirmation and again when a job succeeds (finding SEC-014).
+pub(crate) async fn claims_free<T: RepoTx>(
     tx: &mut T,
-    cur: &DeviceSession,
+    macs: &MacList,
+    own: SessionId,
     at: UnixMicros,
 ) -> Result<(), ApiError> {
-    let stops = tx.active_boot_stops_for_macs(&cur.macs).await?;
-    let running: Vec<JobId> = tx.running_jobs_for_macs(&cur.macs).await?;
+    let stops = tx.active_boot_stops_for_macs(macs).await?;
+    let running: Vec<JobId> = tx.running_jobs_for_macs(macs).await?;
     let mut others = Vec::with_capacity(running.len());
     for id in running {
         let Some(j) = tx.job(id).await? else {
             continue;
         };
-        if j.session_id == cur.id {
+        if j.session_id == own {
             continue;
         }
         let steps = tx.job_steps(id).await?;
@@ -107,7 +109,15 @@ async fn claims_free<T: RepoTx>(
     )
     .detail(
         Detail::new()
-            .with("macs", &macs_text(cur))
+            .with(
+                "macs",
+                &macs
+                    .as_slice()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .with("claimed", "macs")
             .with(
                 "stopped_macs",
@@ -209,7 +219,7 @@ pub(crate) async fn confirm<S: Store + 'static>(
     // Finding SEC-013.1: held until the job row commits, so a second
     // confirmation claiming one of these MACs sees this job running.
     tx.lock_mac_claims().await?;
-    claims_free(&mut tx, &cur, at).await?;
+    claims_free(&mut tx, &cur.macs, cur.id, at).await?;
     let previous = tx.previous_failed_job(&cur.macs).await?;
     let disk_detail = || {
         Detail::new()

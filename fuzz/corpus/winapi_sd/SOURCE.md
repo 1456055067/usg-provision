@@ -5,9 +5,9 @@ descriptors assembled in the generator from the layout of
 `specs/standards/reparse-and-security-descriptors.md` (topic 24 §7 to §9),
 with example SIDs (S-1-5-18, S-1-5-32-544, S-1-5-32-545) and
 access-allowed ACEs. The SIDs are test data: their meaning is not
-relied on, only their SID structure (CR-RV1-002). None comes from a WIM, a file system, a Windows
-installation or any product or deployment (fuzz/README.md, seed origin
-rule). The whole input is the descriptor.
+relied on, only their SID structure (CR-RV1-002). None comes from a
+WIM, a file system, a Windows installation or any product or deployment
+(fuzz/README.md, seed origin rule). The whole input is the descriptor.
 
 Regenerate (from `fuzz/`; function `sd_seeds`):
 

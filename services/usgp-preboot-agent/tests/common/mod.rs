@@ -444,6 +444,13 @@ impl Server {
             .target("boot_service", &b.id.to_string());
             self.api.chain().append(&mut tx, &d).await.unwrap();
             tx.commit().await.unwrap();
+            // The device listener admits connections only from sources a
+            // cached active boot service serves (SEC-001, group A round 2).
+            // Its table was loaded at start and a miss reloads it at most
+            // once a second, so a device connecting just after enrolment
+            // was closed during the TLS handshake. Reload it now, as the
+            // listener's own refresh would within `boot_service_refresh`.
+            self.api.refresh_device_boot_services().await.unwrap();
         });
         b.id
     }

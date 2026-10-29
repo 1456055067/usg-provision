@@ -56,7 +56,6 @@ use usgp_winapi::disk::{
 };
 use usgp_winapi::diskpart::FsKind;
 use usgp_winapi::format::{self, FormatEnv, FormatTarget};
-use usgp_winapi::paths::DriveLetter;
 use usgp_winapi::volume;
 
 const VHD_MIB: u64 = 1024;
@@ -372,12 +371,19 @@ fn vhd_raw_io_update_and_volume_letters() {
     });
     assert_eq!(volume::file_system_name(&vol).expect("fs name"), "NTFS");
 
-    let letter = ('P'..='W')
-        .filter_map(DriveLetter::new)
-        .find(|l| volume::volume_at(*l).is_err())
+    let letter = volume::free_letter('P'..='W', &[])
+        .expect("list letters")
         .expect("a free letter");
     volume::assign_letter(letter, &vol).expect("assign letter");
     assert_eq!(volume::volume_at(letter).expect("volume at letter"), vol);
+    // Round 3 observation for CI: does Windows report a just-assigned
+    // letter as taken? The pickers do not rely on it (they also exclude
+    // the letters they gave out).
+    println!(
+        "LETTER-OBS just-assigned {letter:?}: letter_in_use {}, reported {}",
+        volume::letter_in_use(letter),
+        volume::letters_in_use().expect("letters").contains(&letter)
+    );
     assert!(
         volume::drive_letters(&vol)
             .expect("letters")
@@ -554,9 +560,11 @@ fn boot004_recovery_typed_partition_formats() {
             label,
         };
         let outcome = format::wait_for_volume(&t, Duration::from_secs(60)).and_then(|vol| {
-            let letter = ('P'..='W')
-                .filter_map(DriveLetter::new)
-                .find(|l| volume::volume_at(*l).is_err())
+            // The letters this test already gave out are excluded as
+            // well as Windows' two checks, as the agent does (round 3: on
+            // the CI runner the ESP's new letter was picked again).
+            let letter = volume::free_letter('P'..='W', &letters)
+                .map_err(format::FormatError::Os)?
                 .expect("a free letter");
             volume::assign_letter(letter, &vol).map_err(format::FormatError::Os)?;
             letters.push(letter);

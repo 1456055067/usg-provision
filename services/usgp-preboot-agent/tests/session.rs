@@ -296,11 +296,20 @@ fn approval_without_any_typing() {
             .run(&facts)
         });
         // Nothing is typed while waiting: the approval arrives by polling.
-        drv.wait_for("Display code:   ABC-DEF");
-        drv.wait_for("Choose what to install");
-        drv.send("c");
-        drv.wait_for("Cancelled");
-        drv.send("s");
+        // A failed check closes the input so the agent ends and the panic
+        // is re-raised, rather than the scope hanging (round 3).
+        let driven = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drv.wait_for("Display code:   ABC-DEF");
+            drv.wait_for("Choose what to install");
+            drv.send("c");
+            drv.wait_for("Cancelled");
+            drv.send("s");
+        }));
+        if let Err(p) = driven {
+            drv.close();
+            let _ = agent.join();
+            std::panic::resume_unwind(p);
+        }
         agent.join().unwrap()
     });
     assert_eq!(end.outcome, Outcome::Cancelled);

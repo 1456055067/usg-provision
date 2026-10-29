@@ -45,7 +45,10 @@ env:
 jobs:
   gates:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # A warm run takes about 8 min. 60 leaves room for a cold cache; the
+    # test steps carry their own bounds, so a hung test fails in minutes
+    # with its step named instead of using up the job (run 40910029759).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,8 +82,15 @@ jobs:
           cargo clippy --workspace --all-targets --locked
           --features test-pki,testkit,dism-samples,pg-integration,large-tests
           -- -D warnings
-      - run: cargo test --workspace --locked
-      - run: cargo test --workspace --doc --locked
+      - name: cargo test --workspace --locked
+        # About 3 min warm. A test that never ends (run 40910029759: four
+        # qa_m3 agent tests) fails here, named, instead of cancelling the
+        # job.
+        timeout-minutes: 25
+        run: cargo test --workspace --locked
+      - name: cargo test --workspace --doc --locked
+        timeout-minutes: 15
+        run: cargo test --workspace --doc --locked
       - name: Feature-gated test evidence (usgp-crypto test-pki, usgp-image testkit)
         # Per package, so the mTLS (REQ-RBAC-005, REQ-IMG-053) and WIM
         # negative/XPRESS (REQ-IMG-037/038) tests do not depend on another
@@ -964,6 +974,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: pg-integration tests
+        # About 1.5 min warm, after the build step above. Bounded so a
+        # hung test fails here, named (run 40910029759), and the database
+        # check and removal steps still run.
+        timeout-minutes: 25
         run: |
           set -uo pipefail
           log="$RUNNER_TEMP/pg-tests.log"

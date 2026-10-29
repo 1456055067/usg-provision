@@ -1252,6 +1252,11 @@ closed_enum!(
         /// Agent only: the disk's partition table could not be described
         /// for the operator (REQ-DISK-006 needs the partitions shown).
         PartitionTableUndescribable => "partition_table_undescribable",
+        /// Agent only: another otherwise eligible disk has the same model,
+        /// bus, size and sector sizes and neither reports a serial number,
+        /// so the person could not tell which disk would be erased
+        /// (REQ-DISK-006; SEC-003, fix round 1).
+        IndistinguishableDisks => "indistinguishable_disks",
     }
 );
 

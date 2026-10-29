@@ -43,7 +43,6 @@ pub(crate) mod operators;
 pub(crate) mod packages;
 
 use std::future::Future;
-use std::net::IpAddr;
 
 use usgp_audit::AuditTx;
 use usgp_common::Sha256Digest;
@@ -61,7 +60,7 @@ use crate::model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
     DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
     NewDeviceSession, NewJob, Operator, OperatorStatus, Package, PackageRef, ReadyContent, Reason,
-    SessionAuth, StoredManifest, Upload,
+    SessionAuth, SessionScope, StoredManifest, Upload,
 };
 
 /// A source of transactions.
@@ -400,6 +399,14 @@ pub trait RepoTx: AuditTx + Send + Sized {
         at: UnixMicros,
     ) -> impl Future<Output = Result<(), DbError>> + Send;
 
+    /// Uncleared boot stops, on any boot service, for any MAC in `macs`,
+    /// ordered by creation time (decision 0023 item 2: a claimed MAC that
+    /// is already stopped is refused at confirmation).
+    fn active_boot_stops_for_macs(
+        &mut self,
+        macs: &MacList,
+    ) -> impl Future<Output = Result<Vec<BootStop>, DbError>> + Send;
+
     /// The current boot-policy generation of a service (0 before the
     /// first).
     fn boot_policy_generation(
@@ -413,6 +420,17 @@ pub trait RepoTx: AuditTx + Send + Sized {
         &mut self,
         id: BootServiceId,
     ) -> impl Future<Output = Result<u64, DbError>> + Send;
+
+    /// Raises the generation to `to` (administrative role; finding
+    /// NIST-013: after a database restore, relays hold a higher
+    /// generation than the restored one). [`DbError::Conflict`] unless
+    /// `to` is above the current generation (it only increases);
+    /// [`DbError::InvalidArgument`] if `to` is 0 or above `i64::MAX`.
+    fn raise_boot_policy_generation(
+        &mut self,
+        id: BootServiceId,
+        to: u64,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
 
     // ---------------------------------------------------- operator codes
 
@@ -491,12 +509,13 @@ pub trait RepoTx: AuditTx + Send + Sized {
     /// [`RepoTx::lock_upload_quota`]).
     fn lock_device_session_quota(&mut self) -> impl Future<Output = Result<(), DbError>> + Send;
 
-    /// Number of sessions in `states` (every state if empty), from one
-    /// source address or all.
+    /// Number of sessions in `states` (every state if empty) within
+    /// `scope`: all, one source network (an IPv4 address or an IPv6 /64,
+    /// [`crate::model::source_network`]) or one boot service.
     fn count_device_sessions(
         &mut self,
         states: &[SessionState],
-        source_ip: Option<IpAddr>,
+        scope: SessionScope,
     ) -> impl Future<Output = Result<u64, DbError>> + Send;
 
     /// Records that the device was seen at `at` (never moves back). Not a
@@ -554,11 +573,13 @@ pub trait RepoTx: AuditTx + Send + Sized {
     ) -> impl Future<Output = Result<(), DbError>> + Send;
 
     /// Expires every waiting or authorised session whose expiry is at or
-    /// before `at`, and returns their ids (one `device.session.expired`
-    /// record each is the caller's).
+    /// before `at`, and every waiting (unauthorised) session last seen at
+    /// or before `idle_before` (finding SEC-001), and returns their ids
+    /// (one `device.session.expired` record each is the caller's).
     fn expire_device_sessions(
         &mut self,
         at: UnixMicros,
+        idle_before: UnixMicros,
     ) -> impl Future<Output = Result<Vec<SessionId>, DbError>> + Send;
 
     // --------------------------------------------------------------- jobs
@@ -596,6 +617,13 @@ pub trait RepoTx: AuditTx + Send + Sized {
         &mut self,
         id: JobId,
     ) -> impl Future<Output = Result<Vec<JobStep>, DbError>> + Send;
+
+    /// Running jobs sharing a MAC with `macs`, ordered by start time
+    /// (decision 0023 item 2).
+    fn running_jobs_for_macs(
+        &mut self,
+        macs: &MacList,
+    ) -> impl Future<Output = Result<Vec<JobId>, DbError>> + Send;
 
     /// The latest failed or lost job sharing a MAC with `macs`
     /// (REQ-JOB-009 `previous_job_id`).
@@ -937,6 +965,21 @@ impl RepoTx for crate::pool::PgTx {
         boot_services::generation(self, id).await
     }
 
+    async fn active_boot_stops_for_macs(
+        &mut self,
+        macs: &MacList,
+    ) -> Result<Vec<BootStop>, DbError> {
+        boot_services::active_stops_for_macs(self, macs).await
+    }
+
+    async fn raise_boot_policy_generation(
+        &mut self,
+        id: BootServiceId,
+        to: u64,
+    ) -> Result<(), DbError> {
+        boot_services::raise_generation(self, id, to).await
+    }
+
     async fn bump_boot_policy_generation(&mut self, id: BootServiceId) -> Result<u64, DbError> {
         boot_services::bump_generation(self, id).await
     }
@@ -1007,9 +1050,9 @@ impl RepoTx for crate::pool::PgTx {
     async fn count_device_sessions(
         &mut self,
         states: &[SessionState],
-        source_ip: Option<IpAddr>,
+        scope: SessionScope,
     ) -> Result<u64, DbError> {
-        devices::count(self, states, source_ip).await
+        devices::count(self, states, scope).await
     }
 
     async fn touch_device_session(&mut self, id: SessionId, at: UnixMicros) -> Result<(), DbError> {
@@ -1056,8 +1099,12 @@ impl RepoTx for crate::pool::PgTx {
         devices::set_state(self, id, from, to, reason, at).await
     }
 
-    async fn expire_device_sessions(&mut self, at: UnixMicros) -> Result<Vec<SessionId>, DbError> {
-        devices::expire(self, at).await
+    async fn expire_device_sessions(
+        &mut self,
+        at: UnixMicros,
+        idle_before: UnixMicros,
+    ) -> Result<Vec<SessionId>, DbError> {
+        devices::expire(self, at, idle_before).await
     }
 
     async fn insert_job(&mut self, j: &NewJob) -> Result<(), DbError> {
@@ -1082,6 +1129,10 @@ impl RepoTx for crate::pool::PgTx {
 
     async fn job_steps(&mut self, id: JobId) -> Result<Vec<JobStep>, DbError> {
         jobs::steps(self, id).await
+    }
+
+    async fn running_jobs_for_macs(&mut self, macs: &MacList) -> Result<Vec<JobId>, DbError> {
+        jobs::running_for_macs(self, macs).await
     }
 
     async fn previous_failed_job(&mut self, macs: &MacList) -> Result<Option<JobId>, DbError> {

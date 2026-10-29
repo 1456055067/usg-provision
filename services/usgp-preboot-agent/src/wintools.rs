@@ -1,7 +1,7 @@
 //! OS-neutral pieces of the Windows backend, kept apart so they are tested
-//! on every host: bounded child processes, the DiskPart script, drive
-//! letter choice, volume matching by extents, the BCDBoot command and the
-//! partition kind from a GPT type.
+//! on every host: bounded child processes, the DiskPart script and its
+//! file, drive letter choice, volume matching by extents, the BCDBoot and
+//! `wpeutil` commands and the partition kind from a GPT type.
 //!
 //! Compiled on Windows (used by `platform_win`) and in tests.
 
@@ -13,9 +13,12 @@
 //   exactly the planned extent on the chosen disk.
 // - SPEC: specs/disk.md#REQ-DISK-008, #REQ-DISK-015
 // - SPEC: specs/boot-network.md#REQ-BOOT-066 (BCDBoot from the applied
-//   image, naming the ESP; uefi-boot-manager.md §9.1)
+//   image, naming the ESP; uefi-boot-manager.md §9.1, §9.4)
+// - SPEC: specs/standards/winpe.md §5.2 (wpeutil Reboot, Shutdown), §11
+//   (DiskPart select volume, format; OPEN-WINPE-2, -3)
 
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -23,6 +26,8 @@ use std::time::{Duration, Instant};
 use usgp_disk::Guid;
 use usgp_disk::guid::types;
 use usgp_proto::disk::{FileSystem, PartitionKind};
+
+use crate::host::PowerAction;
 
 /// How often a running tool is checked.
 const POLL: Duration = Duration::from_millis(200);
@@ -81,6 +86,17 @@ pub fn run_bounded(mut cmd: Command, limit: Duration) -> Result<(), ToolError> {
 /// The DiskPart script that formats the volume at `letter` (plan section
 /// 1.2(c) step 4): it selects the volume by the letter we assigned, never
 /// a disk by number. `label` is one of our fixed labels.
+///
+/// SPEC: `specs/standards/winpe.md` §11 (SR-7). `select volume=<d>` gives
+/// focus to the volume with drive letter `<d>` (the page's `=` form);
+/// `format fs=<ntfs|fat32> quick label=<label>` formats the volume with
+/// focus. No `noerr`: without it an error makes DiskPart exit with an
+/// error code. The labels contain no space, so they are not quoted.
+///
+/// [project rule] (plan section 1.2(c); CR-002): the labels (`System`,
+/// `Windows`, `Recovery`; `usgp-deploy` `LABEL_*`) are this project's
+/// choice. Microsoft's UEFI/GPT deployment sample uses the same labels
+/// (`winpe.md` §11, SRC-087); that is not a Microsoft requirement.
 #[must_use]
 pub fn diskpart_script(letter: char, fs: FileSystem, label: &str) -> String {
     let fs = match fs {
@@ -101,6 +117,12 @@ pub fn fs_name(fs: FileSystem) -> &'static str {
 
 /// Letters tried for new volumes, most preferred first. `A`, `B`, `C`
 /// and `X` (the Windows PE system letter) are never used.
+///
+/// [project rule] (plan section 1.2(c); CR-002): the order is this
+/// project's choice. Microsoft's UEFI/GPT deployment sample happens to use
+/// the same temporary letters, W for Windows, S for the system partition
+/// and R for recovery (`specs/standards/winpe.md` §11, SRC-087), and says
+/// they are temporary; that is not a Microsoft requirement.
 const LETTER_ORDER: &str = "WSRTUVQPONMLKJIHGFED";
 
 /// The first free letter, given the letters in use.
@@ -145,6 +167,23 @@ pub fn match_volume(volumes: &[Vec<Extent>], disk: u32, start: u64, len: u64) ->
 /// at `esp` (`uefi-boot-manager.md` §9.1: BCDBoot from the applied image,
 /// against the applied Windows directory, naming the system partition
 /// with `/s`; plan section 1.2(c)). Returns the program and its arguments.
+///
+/// SPEC: `uefi-boot-manager.md` §9.4 (SR-7):
+///
+/// - form `bcdboot <source> /s <volume letter>`: `<source>` first, as
+///   `<drive>:\Windows` of the applied image; `/s` with the system
+///   partition's letter written with a colon (`S:`);
+/// - which bcdboot.exe: the copy in the applied image,
+///   `\Windows\System32\bcdboot.exe` on the Windows partition, as
+///   Microsoft's apply flow and UEFI sample do;
+/// - no `/f`: allowed only with `/s`, and when omitted the default is
+///   `UEFI` on a UEFI system, which WinPE booted in UEFI mode is (the
+///   agent refuses BIOS mode first, REQ-PE-020);
+/// - no `/l`: the default locale.
+///
+/// §9.4 also says that with `/s` BCDBoot creates no firmware (NVRAM)
+/// entry; the engine writes the boot option itself (step 4,
+/// REQ-BOOT-066; OPEN-UBM-1).
 #[must_use]
 pub fn bcdboot_command(windows: char, esp: char) -> (PathBuf, Vec<String>) {
     let program = Path::new(&format!("{windows}:\\"))
@@ -159,6 +198,56 @@ pub fn bcdboot_command(windows: char, esp: char) -> (PathBuf, Vec<String>) {
             format!("{esp}:"),
         ],
     )
+}
+
+/// The `wpeutil` command for `action`: `Reboot` or `Shutdown`, one per
+/// invocation, no argument, spelt as documented
+/// (`specs/standards/winpe.md` §5.2, SR-7; CR-SR7-001). Whether `wpeutil`
+/// command names are case-insensitive is not stated, so the documented
+/// capitalisation is used.
+#[must_use]
+pub fn wpeutil_command(action: PowerAction) -> &'static str {
+    match action {
+        PowerAction::Restart => "Reboot",
+        PowerAction::Shutdown => "Shutdown",
+    }
+}
+
+/// Writes the DiskPart script `text` to a new file in `dir` with a name
+/// made from `random` (16 bytes from the DRBG), created with create-new
+/// so an existing file of that name is never reused or followed
+/// (SEC-008). Returns its path. On a write error the file is removed.
+///
+/// # Errors
+///
+/// The I/O error, including `AlreadyExists`.
+pub fn write_script_new(dir: &Path, random: [u8; 16], text: &str) -> io::Result<PathBuf> {
+    let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("usgp-format-{name}.txt"));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    if let Err(e) = f.write_all(text.as_bytes()).and_then(|()| f.sync_all()) {
+        drop(f);
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    Ok(path)
+}
+
+/// `true` if the drive letter still names the volume we resolved, right
+/// before DiskPart runs (BOOT-001, REQ-DISK-015): the volume at the
+/// letter is `expected` (same volume GUID path, compared ignoring ASCII
+/// case), and that volume's extents are still exactly the planned one.
+#[must_use]
+pub fn letter_still_names(
+    at_letter: Option<&str>,
+    expected: &str,
+    extents: &[Extent],
+    want: Extent,
+) -> bool {
+    at_letter.is_some_and(|v| v.eq_ignore_ascii_case(expected)) && extents == [want]
 }
 
 /// The partition kind of a GPT type (`gpt.md` §9).
@@ -223,6 +312,69 @@ mod tests {
         let (p, a) = bcdboot_command('W', 'S');
         assert!(p.to_string_lossy().contains("bcdboot.exe"));
         assert_eq!(a, vec!["W:\\Windows", "/s", "S:"]);
+    }
+
+    #[test]
+    fn wpeutil_words_are_the_documented_ones() {
+        assert_eq!(wpeutil_command(PowerAction::Restart), "Reboot");
+        assert_eq!(wpeutil_command(PowerAction::Shutdown), "Shutdown");
+    }
+
+    #[test]
+    fn script_files_are_new_and_random_named() {
+        let dir = std::env::temp_dir().join(format!("usgp-wintools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = [0xABu8; 16];
+        let p = write_script_new(&dir, r, "select volume=W\r\n").unwrap();
+        assert_eq!(
+            p.file_name().unwrap().to_str().unwrap(),
+            "usgp-format-abababababababababababababababab.txt"
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "select volume=W\r\n");
+        // The same name again is refused, never overwritten.
+        let e = write_script_new(&dir, r, "other").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "select volume=W\r\n");
+        // A different random value gives a different file.
+        let q = write_script_new(&dir, [1u8; 16], "x").unwrap();
+        assert_ne!(p, q);
+        #[cfg(unix)]
+        {
+            // A planted link at the name is not followed.
+            let target = dir.join("target");
+            std::fs::write(&target, "keep").unwrap();
+            let r2 = [2u8; 16];
+            let planted = dir.join("usgp-format-02020202020202020202020202020202.txt");
+            std::os::unix::fs::symlink(&target, &planted).unwrap();
+            assert!(write_script_new(&dir, r2, "x").is_err());
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn letter_must_still_name_the_resolved_volume() {
+        let v = "\\\\?\\Volume{1}\\";
+        let want = (3, 1 << 20, 100);
+        assert!(letter_still_names(Some(v), v, &[want], want));
+        assert!(letter_still_names(
+            Some(&v.to_ascii_lowercase()),
+            v,
+            &[want],
+            want
+        ));
+        assert!(!letter_still_names(None, v, &[want], want), "letter gone");
+        assert!(
+            !letter_still_names(Some("\\\\?\\Volume{2}\\"), v, &[want], want),
+            "letter moved to another volume"
+        );
+        assert!(
+            !letter_still_names(Some(v), v, &[(4, 1 << 20, 100)], want),
+            "volume on another disk"
+        );
+        assert!(!letter_still_names(Some(v), v, &[], want));
+        assert!(!letter_still_names(Some(v), v, &[want, want], want));
     }
 
     #[test]

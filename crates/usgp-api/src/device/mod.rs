@@ -6,7 +6,8 @@
 //! - [`routes`]: the device route table.
 //! - [`router`]: per-request pipeline (route, bearer session, handler,
 //!   audit).
-//! - [`auth`]: bearer-token sessions, bound to one session, with expiry.
+//! - [`auth`]: bearer-token sessions, bound to one session and its source
+//!   network, with expiry (decision 0023 item 1).
 //! - `handlers`, `confirm`, `job`, `offer`: the routes.
 //! - [`limits`]: settings and per-source rate limits.
 //! - [`server`]: the accept loop.
@@ -18,11 +19,16 @@
 //! as the change (decision 0015 item 1, 0018 item 10).
 
 // COMPLIANCE MAPPING:
-// - NIST 800-53: AC-3, IA-2 - bearer session on every route but open;
-//   nothing listed before authorisation.
+// - NIST 800-53: AC-3, SC-23, AC-12 - bearer session on every route but
+//   open, bound to its source network and expiring; nothing listed before
+//   authorisation. The session's authorisation (operator code or approval)
+//   is IA-11 re-authentication material, not IA-2 user identification.
+// - NIST 800-53: IA-3 (partial) - see the POAM in `auth`.
 // - NIST 800-53: AU-2, AU-3, AU-12 - device choices and job state changes
 //   audited (decision 0018 item 10).
-// - NIST 800-53: SC-5 - per-source rate limits; chunk concurrency per job.
+// - NIST 800-53: SC-5 - per-source and global rate limits, pending caps
+//   per source network, per boot service and in total; chunk concurrency
+//   per job.
 // - SPEC: specs/targeting.md#REQ-TGT-012 to #REQ-TGT-016
 // - Decisions 0018, 0020
 
@@ -42,7 +48,7 @@ use std::sync::{Mutex, PoisonError};
 use usgp_proto::{BootServiceId, JobId};
 
 use crate::context::AlarmGate;
-use limits::{DeviceConfig, PerSourceRate};
+use limits::{DeviceConfig, GlobalRate, PerSourceRate};
 
 pub use limits::JobSettings;
 pub use server::serve_device;
@@ -58,6 +64,8 @@ const MAX_CONTENT_READS_TRACKED: usize = 65_536;
 pub(crate) struct DeviceState {
     /// Session opens per source.
     pub(crate) opens: PerSourceRate,
+    /// Session opens from all sources (finding SEC-001).
+    pub(crate) opens_total: GlobalRate,
     /// Code attempts per source.
     pub(crate) code_attempts: PerSourceRate,
     /// Chunk requests in progress per job.
@@ -72,6 +80,7 @@ impl DeviceState {
     pub(crate) fn new(c: &DeviceConfig) -> Self {
         Self {
             opens: PerSourceRate::new(c.session_opens_per_ip_per_min),
+            opens_total: GlobalRate::new(c.session_opens_per_min),
             code_attempts: PerSourceRate::new(c.code_attempts_per_ip_per_min),
             chunk_slots: Mutex::new(HashMap::new()),
             content_reads: Mutex::new(HashSet::new()),

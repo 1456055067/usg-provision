@@ -35,7 +35,6 @@
 // - SPEC: specs/operator-access.md#REQ-AUD-006
 // - Decision 0015 item 1
 
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::OwnedMutexGuard;
@@ -58,7 +57,7 @@ use crate::model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
     DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
     NewDeviceSession, NewJob, Operator, OperatorStatus, Package, PackageRef, ReadyContent, Reason,
-    SessionAuth, StoredManifest, Upload,
+    SessionAuth, SessionScope, StoredManifest, Upload,
 };
 use crate::repo::{RepoTx, Store};
 
@@ -1140,6 +1139,48 @@ impl RepoTx for MemoryTx {
             .map_or(0, |(_, g)| *g))
     }
 
+    async fn active_boot_stops_for_macs(
+        &mut self,
+        macs: &MacList,
+    ) -> Result<Vec<BootStop>, DbError> {
+        self.check()?;
+        let mut v: Vec<BootStop> = self
+            .work
+            .boot_stops
+            .iter()
+            .filter(|s| s.cleared_at.is_none() && macs.as_slice().contains(&s.mac))
+            .copied()
+            .collect();
+        v.sort_by_key(|s| (s.created_at, s.id));
+        Ok(v)
+    }
+
+    async fn raise_boot_policy_generation(
+        &mut self,
+        id: BootServiceId,
+        to: u64,
+    ) -> Result<(), DbError> {
+        if to == 0 || i64::try_from(to).is_err() {
+            return Err(DbError::InvalidArgument { what: "generation" });
+        }
+        self.check()?;
+        if !self.work.boot_services.iter().any(|b| b.id == id) {
+            return Err(self.abort(DbError::Constraint {
+                what: "update boot_policy_generation",
+            }));
+        }
+        match self.work.generations.iter_mut().find(|(b, _)| *b == id) {
+            Some((_, g)) if *g >= to => {
+                return Err(DbError::Conflict {
+                    what: "boot_policy_generation",
+                });
+            }
+            Some((_, g)) => *g = to,
+            None => self.work.generations.push((id, to)),
+        }
+        self.write()
+    }
+
     async fn bump_boot_policy_generation(&mut self, id: BootServiceId) -> Result<u64, DbError> {
         self.write()?;
         if !self.work.boot_services.iter().any(|b| b.id == id) {
@@ -1387,7 +1428,7 @@ impl RepoTx for MemoryTx {
     async fn count_device_sessions(
         &mut self,
         states: &[SessionState],
-        source_ip: Option<IpAddr>,
+        scope: SessionScope,
     ) -> Result<u64, DbError> {
         self.check()?;
         let n = self
@@ -1395,7 +1436,7 @@ impl RepoTx for MemoryTx {
             .sessions
             .iter()
             .filter(|s| states.is_empty() || states.contains(&s.state))
-            .filter(|s| source_ip.is_none_or(|ip| s.source_ip == ip))
+            .filter(|s| scope.contains(s))
             .count();
         u64::try_from(n).map_err(|_| DbError::Corrupt { what: "count" })
     }
@@ -1541,13 +1582,20 @@ impl RepoTx for MemoryTx {
         Ok(())
     }
 
-    async fn expire_device_sessions(&mut self, at: UnixMicros) -> Result<Vec<SessionId>, DbError> {
+    async fn expire_device_sessions(
+        &mut self,
+        at: UnixMicros,
+        idle_before: UnixMicros,
+    ) -> Result<Vec<SessionId>, DbError> {
         self.check()?;
         let reason = ErrorCode::new(crate::repo::devices::EXPIRED_REASON)
             .map_err(|_| DbError::Corrupt { what: "end_reason" })?;
         let mut ids = Vec::new();
         for s in &mut self.work.sessions {
-            if LIVE_SESSION.contains(&s.state) && s.expires_at <= at {
+            let due = LIVE_SESSION.contains(&s.state) && s.expires_at <= at;
+            let idle =
+                s.state == SessionState::AwaitingAuthorisation && s.last_seen_at <= idle_before;
+            if due || idle {
                 s.state = SessionState::Expired;
                 s.ended_at = Some(at);
                 s.end_reason = Some(reason.clone());
@@ -1680,6 +1728,18 @@ impl RepoTx for MemoryTx {
             .collect();
         v.sort_by_key(|s| s.step);
         Ok(v)
+    }
+
+    async fn running_jobs_for_macs(&mut self, macs: &MacList) -> Result<Vec<JobId>, DbError> {
+        self.check()?;
+        let mut v: Vec<&Job> = self
+            .work
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Running && j.macs.overlaps(macs))
+            .collect();
+        v.sort_by_key(|j| (j.started_at, j.id));
+        Ok(v.into_iter().map(|j| j.id).collect())
     }
 
     async fn previous_failed_job(&mut self, macs: &MacList) -> Result<Option<JobId>, DbError> {

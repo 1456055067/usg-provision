@@ -1,6 +1,6 @@
 //! Test-only metadata writer (feature `testkit`): encodes a directory tree
 //! the way our DISM samples lay it out (OBS-024 to OBS-036), so that apply
-//! tests and fuzz seeds use synthetic images only (decision 0006 item 4).
+//! tests and fuzz seeds use synthetic images only (decision 0006 items 1-3).
 //!
 //! Layout written: the security block (OBS-024), the root entry at the
 //! next multiple of 8, then each directory's list (breadth first), each

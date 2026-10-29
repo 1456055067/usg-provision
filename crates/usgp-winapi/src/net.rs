@@ -7,8 +7,9 @@
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-10 (Information Input Validation), SI-16 (Memory
-//   Protection) - bounded, range-checked list walk; IA-3 (Device
-//   Identification and Authentication)
+//   Protection) - bounded, range-checked list walk; supports IA-3 (Device
+//   Identification and Authentication) by reporting identifiers only; IA-3
+//   is partial (no device authentication; POAM: IA-3 (TB-2) in usgp-api)
 // - SPEC: specs/preinstall-env.md REQ-PE-014; plan §3.1 DeviceHelloV1
 // - DECISION: docs/decisions/0019-windows-api-binding.md
 

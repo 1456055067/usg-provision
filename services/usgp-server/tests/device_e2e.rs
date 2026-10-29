@@ -11,6 +11,7 @@
 //! | code authorisation → package → disk → confirm → verified plan → verified chunks → progress → success; relay policy shows the stop; the operator's clear (`POST /v1/boot-stops/{id}/clear`) lifts it; disabled relay refused; chain intact | `device_session_to_success_and_boot_stop` |
 //! | `boot-service enrol` refusals (operator certificate, duplicate, name, no EKU, bad subnet) and `operator enrol` of a relay certificate | `boot_service_admin_refusals` |
 //! | listener off: the device port is not bound and `server.start` says so | `device_listener_off_by_default` |
+//! | `boot-service raise-generation` after a restore: raised and recorded; equal, lower, 0 and unknown service refused (finding NIST-013) | `raise_generation_after_restore` |
 
 #[cfg(test)]
 pub mod common;
@@ -328,6 +329,73 @@ mod device_e2e {
             .await
             .unwrap();
         assert!(report.is_intact(), "{report:?}");
+    }
+
+    /// Finding NIST-013: an administrator raises a boot service's
+    /// boot-policy generation after a database restore; it never goes
+    /// down or stays equal; each attempt is recorded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raise_generation_after_restore() {
+        let f = Fixture::new("bs-raise");
+        let store = MemoryStore::new();
+        enrol_admin(&f, &store).await;
+        let c = chain();
+        let relay = relay_cert(&f, "relay raise");
+        let bs = boot_service_cmd::enrol(
+            &store,
+            &c,
+            &who(),
+            &enrolment(&relay, "Relay Raise", &["10.9.0.0/16"]),
+        )
+        .await
+        .unwrap();
+        // Before any stop change the generation is 0; raise to 500.
+        assert_eq!(
+            boot_service_cmd::raise_generation(&store, &c, &who(), bs.id, 500)
+                .await
+                .unwrap(),
+            0
+        );
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.boot_policy_generation(bs.id).await.unwrap(), 500);
+        tx.rollback().await;
+        for to in [500, 499] {
+            assert!(matches!(
+                boot_service_cmd::raise_generation(&store, &c, &who(), bs.id, to).await,
+                Err(BootServiceCmdError::Refused("generation_not_higher"))
+            ));
+        }
+        assert!(matches!(
+            boot_service_cmd::raise_generation(&store, &c, &who(), bs.id, 0).await,
+            Err(BootServiceCmdError::Invalid(_))
+        ));
+        assert!(matches!(
+            boot_service_cmd::raise_generation(
+                &store,
+                &c,
+                &who(),
+                usgp_proto::BootServiceId::from_random_bytes([4; 16]),
+                900
+            )
+            .await,
+            Err(BootServiceCmdError::Refused("boot_service_not_found"))
+        ));
+        let records = store.audit_records();
+        let raised: Vec<_> = records
+            .iter()
+            .filter(|r| r.event == boot_service_cmd::GENERATION_RAISED)
+            .collect();
+        assert_eq!(raised.len(), 1);
+        assert_eq!(raised[0].actor_kind, "local_user");
+        assert!(raised[0].detail.contains("\"previous_generation\":\"0\""));
+        assert!(raised[0].detail.contains("\"generation\":\"500\""));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.event == boot_service_cmd::GENERATION_RAISE_REFUSED)
+                .count(),
+            3
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

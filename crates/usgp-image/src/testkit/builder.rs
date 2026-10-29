@@ -37,7 +37,7 @@
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SA-11 (Developer Testing and Evaluation)
 // - SPEC: specs/standards/wim.md §2 to §8 (layout written)
-// - DECISION: docs/decisions/0006 item 4 (test files only from this
+// - DECISION: docs/decisions/0006 items 1-3 (test files only from this
 //   builder or our own DISM samples)
 
 use std::collections::HashMap;

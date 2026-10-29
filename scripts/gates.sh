@@ -119,7 +119,7 @@ pure_rust_ws() {
 no_test_features_shipped() {
   local hits
   hits="$(cargo tree --locked --workspace -e features,normal,build --target all --prefix none \
-    | grep -E '(feature "(test-pki|testkit|dism-samples|pg-integration|large-tests)"|^x509-cert feature "builder")' \
+    | grep -E '(feature "(test-pki|testkit|dism-samples|pg-integration|large-tests|parse-testkit|sink-testkit)"|^x509-cert feature "builder")' \
     | sort -u)" || true
   if [ -n "$hits" ]; then
     echo "test-only features reach the shipped build graph:"
@@ -127,6 +127,34 @@ no_test_features_shipped() {
     return 1
   fi
   echo "test-only features: none in the shipped build graph"
+}
+
+# NIST-010 (CM-7): the agent's Windows build graph (as the windows-agent job
+# and the release pair build it, -p alone) must not enable `sim`, the
+# simulated platform. Inverted on usgp-deploy, because a command-line
+# feature of the root package shows only in the inverted tree. The query is
+# checked first against `--features sim`, so a query that stops matching
+# fails instead of passing. (Off Windows the agent is sim-only by design;
+# that build is never shipped: see the fips-linkage and windows-agent jobs.)
+# shellcheck disable=SC2317,SC2329 # invoked indirectly, through `run`
+no_sim_in_windows_agent() {
+  local q=(cargo tree --locked -e "features,normal,build" --target x86_64-pc-windows-msvc
+    -i usgp-deploy --prefix none) hits
+  hits="$("${q[@]}" -p usgp-preboot-agent --features sim | grep -F 'feature "sim"')" || true
+  if [ -z "$hits" ]; then
+    echo "sim gate self-check: --features sim was not detected; the query is broken"
+    return 1
+  fi
+  hits="$({
+    "${q[@]}" -p usgp-preboot-agent
+    "${q[@]}" --workspace
+  } | grep -F 'feature "sim"' | sort -u)" || true
+  if [ -n "$hits" ]; then
+    echo "sim reaches the Windows agent build graph:"
+    echo "$hits"
+    return 1
+  fi
+  echo "sim: not in the Windows agent build graph (self-check detected --features sim)"
 }
 
 # free_gib <dir>: whole GiB available on the file system holding <dir>.
@@ -167,6 +195,7 @@ run cargo test --locked --workspace --doc
 run cargo test --locked -p usgp-crypto --features test-pki
 run cargo test --locked -p usgp-image --features testkit
 run no_test_features_shipped
+run no_sim_in_windows_agent
 run cargo build --locked --workspace --bins
 # Start-up contract (plan section 3.6): every binary checks FIPS mode first;
 # usgp-relay and usgp-server --self-check exit 0 (inside
@@ -302,8 +331,12 @@ done
 
 # Advisories and sources only: the fuzz workspace uses libfuzzer-sys
 # (decision 0002), which the main policy bans (as in CI).
-run cargo audit --file fuzz/Cargo.lock
-run cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories sources
+# CR-SR7-006: commands run here with fuzz/Cargo.toml ignore
+# fuzz/.cargo/config.toml, so name the build directory it sets; otherwise
+# they may create fuzz/target/, which the names gate scans (decision 0005).
+run env CARGO_TARGET_DIR="$root/target/fuzz" cargo audit --file fuzz/Cargo.lock
+run env CARGO_TARGET_DIR="$root/target/fuzz" \
+  cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories sources
 run_in fuzz cargo fmt --all --check
 run_in fuzz cargo clippy --locked --all-targets -- -D warnings
 # <target>:<max_len>, as the CI fuzz-smoke matrix (impl-notes-wu8, -wu9;
@@ -314,7 +347,8 @@ fuzz_targets="dhcp_packet:1600 tftp_packet:4096 wim_header:1024 wim_xml:16384
   gpt_readback:65536 efi_load_option:8192 wim_metadata:65536
   wim_apply_plan:65536 tftp_window:1024 tftp_name:512
   device_session_msgs:16384 job_plan:16384 boot_manifest:16384
-  pe_coff:4096 agent_config:4096 relay_boot_policy:256 relay_feed_url:1024"
+  pe_coff:4096 agent_config:4096 relay_boot_policy:256 relay_feed_url:1024
+  agent_http_head:16448 winapi_sd:65536 winapi_reparse:4096"
 # QA-003: libFuzzer counts time the host spends asleep against the unit
 # being run, so a macOS sleep during a timed run reads as a timeout. On
 # Darwin every fuzz run is wrapped in `caffeinate -i` (no idle sleep while

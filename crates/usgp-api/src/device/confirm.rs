@@ -22,8 +22,16 @@
 //! The plan carries no secret (REQ-TGT-015).
 
 // COMPLIANCE MAPPING:
-// - NIST 800-53: AU-2, AU-3, AU-12, AU-10 (basis) - the wipe authorisation
-//   is recorded before the plan exists; the plan names the record.
+// - NIST 800-53: AU-2, AU-3, AU-12 - the wipe authorisation is recorded
+//   before the plan exists; the plan names the record, and the record
+//   names how the session was authorised (`auth_method`, with
+//   `auth_code_id` or `approved_by_operator`; finding NIST-006).
+// - NIST 800-53: AU-10 (basis only) - the person who confirms the wipe at
+//   the device is not identified; the record binds the confirmation to the
+//   session and its authorisation, not to a person.
+// - NIST 800-53: SI-10, CM-3 - claimed MACs already stopped from network
+//   boot, or held by another running job, are refused (decision 0023
+//   item 2).
 // - NIST 800-53: AU-5 - an audit failure refuses the confirmation.
 // - NIST 800-53: SI-7(6), SC-13 - plan signed with the plan key (ECDSA
 //   P-384, FIPS module), bound to the agent's nonce.
@@ -38,7 +46,7 @@
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use usgp_audit::Detail;
-use usgp_db::{ChosenPackage, DbError, NewJob, RepoTx, Store};
+use usgp_db::{ChosenPackage, DbError, DeviceSession, NewJob, RepoTx, SessionAuth, Store};
 use usgp_proto::device::{ConfirmV1, ConfirmedV1, SessionState};
 use usgp_proto::job_plan::{
     LayoutPolicyV1, PlanDeviceV1, PlanImageV1, PlanPackageV1, PlanStepV1, PlanWipeV1,
@@ -54,11 +62,51 @@ use crate::context::Api;
 use crate::error::ApiError;
 use crate::handlers::auth_codes::{keys_unavailable, random};
 use crate::handlers::sessions::macs_text;
-use crate::handlers::{json_response, parse_json, read_body};
+use crate::handlers::{json_response, parse_device_json, read_body};
 use crate::manifest::envelope;
 
 /// The event the wipe guard requires (WU-7 contract).
 pub const WIPE_AUTHORISED: &str = "disk.wipe.authorised";
+
+/// Refuses (409 `in_use`) if a MAC the session claims has an uncleared
+/// boot stop on any boot service, or belongs to a running job of another
+/// session (decision 0023 item 2).
+async fn claims_free<T: RepoTx>(tx: &mut T, cur: &DeviceSession) -> Result<(), ApiError> {
+    let stops = tx.active_boot_stops_for_macs(&cur.macs).await?;
+    let running: Vec<JobId> = tx.running_jobs_for_macs(&cur.macs).await?;
+    let mut others = Vec::with_capacity(running.len());
+    for id in running {
+        if tx.job(id).await?.is_some_and(|j| j.session_id != cur.id) {
+            others.push(id);
+        }
+    }
+    if stops.is_empty() && others.is_empty() {
+        return Ok(());
+    }
+    let list = |v: Vec<String>| v.join(",");
+    Err(ApiError::conflict(
+        codes::IN_USE,
+        "a network address this device reports is already stopped from network boot or in \
+         use by another running job; an operator must clear the stop or the job must finish",
+    )
+    .detail(
+        Detail::new()
+            .with("macs", &macs_text(cur))
+            .with("claimed", "macs")
+            .with(
+                "stopped_macs",
+                &list(stops.iter().map(|b| b.mac.to_string()).collect()),
+            )
+            .with(
+                "boot_stop_ids",
+                &list(stops.iter().map(|b| b.id.to_string()).collect()),
+            )
+            .with(
+                "running_job_ids",
+                &list(others.iter().map(ToString::to_string).collect()),
+            ),
+    ))
+}
 
 fn mismatch(what: &str) -> ApiError {
     ApiError::conflict(
@@ -98,7 +146,7 @@ pub(crate) async fn confirm<S: Store + 'static>(
     let keys = api.provisioning_keys().ok_or_else(keys_unavailable)?;
     let c = &api.config().device;
     let body = read_body(req, c.max_json_bytes).await?;
-    let confirm = parse_json!(ConfirmV1, &body, c.max_json_bytes)?;
+    let confirm = parse_device_json!(ConfirmV1, &body, c.max_json_bytes)?;
     let at = api.now()?;
     let job_id = JobId::from_random_bytes(random::<16>()?);
 
@@ -138,6 +186,11 @@ pub(crate) async fn confirm<S: Store + 'static>(
             "the chosen disk is smaller than the package needs",
         ));
     }
+    // Decision 0023 item 2 (findings SEC-002, BOOT-005): the MACs this
+    // session claims become boot stops when its job succeeds, so a MAC
+    // that is already stopped, or held by a running job of another
+    // session, is refused here.
+    claims_free(&mut tx, &cur).await?;
     let previous = tx.previous_failed_job(&cur.macs).await?;
     let disk_detail = || {
         Detail::new()
@@ -151,6 +204,17 @@ pub(crate) async fn confirm<S: Store + 'static>(
             .with("package_id", &chosen.id.to_string())
             .with("revision", &chosen.revision)
             .with("macs", &macs_text(&cur))
+            .with("claimed", "macs")
+    };
+    // NIST-006 (AU-3): how the session was authorised, and by what.
+    let auth_detail = |d: Detail| match cur.auth {
+        Some(SessionAuth::Code(id)) => d
+            .with("auth_method", "code")
+            .with("auth_code_id", &id.to_string()),
+        Some(SessionAuth::Approval(op)) => d
+            .with("auth_method", "approval")
+            .with("approved_by_operator", &op.to_string()),
+        None => d.with("auth_method", "none"),
     };
 
     // 1. job.created, 2. disk.wipe.authorised: both before the job row.
@@ -166,7 +230,9 @@ pub(crate) async fn confirm<S: Store + 'static>(
         .ok(WIPE_AUTHORISED)
         .target("job", &job_id.to_string())
         .initiated_by(r_created.seq)
-        .detail(disk_detail().with("scope", WipeScope::TablesAndVolumeHeads1Mib.as_str()));
+        .detail(auth_detail(
+            disk_detail().with("scope", WipeScope::TablesAndVolumeHeads1Mib.as_str()),
+        ));
     let r_wipe = api.append(&mut tx, &wipe).await?;
 
     // 3. The plan payload names the wipe record.

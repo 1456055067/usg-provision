@@ -33,7 +33,7 @@ use super::conv::{
 };
 use crate::error::DbError;
 use crate::model::{ChosenPackage, Job, JobStep, NewJob};
-use crate::pool::PgTx;
+use crate::pool::{Bookkeeping, PgTx};
 
 const COLUMNS: &str = "id, session_id, boot_service_id, package_id, package_revision, \
      image_content_id, edition_index, disk, layout, macs, state, current_step, failure_step, \
@@ -210,6 +210,20 @@ pub(crate) async fn steps(tx: &mut PgTx, id: JobId) -> Result<Vec<JobStep>, DbEr
         .query("list job_step", &sql, &[&to_uuid(id.as_bytes())])
         .await?;
     rows.iter().map(step_from_row).collect()
+}
+
+pub(crate) async fn running_for_macs(tx: &mut PgTx, macs: &MacList) -> Result<Vec<JobId>, DbError> {
+    let rows = tx
+        .query(
+            "list job by mac",
+            "SELECT id FROM job WHERE state = 'running' AND macs && $1::bytea[] \
+             ORDER BY started_at_us, id",
+            &[&mac_params(macs)],
+        )
+        .await?;
+    rows.iter()
+        .map(|r| col_id(r, "id", JobId::from_bytes))
+        .collect()
 }
 
 pub(crate) async fn previous_failed(
@@ -415,11 +429,7 @@ pub(crate) async fn record_progress(
     let uid = to_uuid(id.as_bytes());
     let n = tx
         .execute_bookkeeping(
-            "update job progress",
-            "UPDATE job SET last_seq = $2, last_report_at_us = $3, \
-             bytes_done = COALESCE($4, bytes_done), bytes_total = COALESCE($5, bytes_total) \
-             WHERE id = $1 AND state IN ('running', 'lost') AND last_seq < $2 \
-             AND COALESCE($4, bytes_done, 0) <= COALESCE($5, bytes_total, $4, bytes_done, 0)",
+            Bookkeeping::JobProgress,
             &[
                 &uid,
                 &to_i64(seq, "seq")?,

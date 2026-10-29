@@ -104,7 +104,29 @@ mod config_m3 {
             "progress_min_interval_ms = 2000",
             "progress_min_interval_ms = 500",
         );
+        // Finding SEC-001 settings.
+        let t = with(
+            &t,
+            "max_pending_sessions_per_boot_service = 32",
+            "max_pending_sessions_per_boot_service = 8",
+        );
+        let t = with(
+            &t,
+            "unauthorised_idle_timeout_s = 120",
+            "unauthorised_idle_timeout_s = 300",
+        );
+        let t = with(
+            &t,
+            "session_opens_per_min = 120",
+            "session_opens_per_min = 60",
+        );
         let c = parse_text(&t, None).unwrap();
+        assert_eq!(c.api.device.max_pending_sessions_per_boot_service, 8);
+        assert_eq!(
+            c.api.device.unauthorised_idle_timeout,
+            Duration::from_secs(300)
+        );
+        assert_eq!(c.api.device.session_opens_per_min, 60);
         assert_eq!(c.api.device.poll_ms, 5000);
         assert_eq!(c.api.device.code_max_ttl, Duration::from_secs(7200));
         assert_eq!(c.api.device.jobs.lost_after, Duration::from_secs(600));
@@ -252,6 +274,22 @@ mod config_m3 {
                 "device_api.max_pending_sessions",
             ),
             ("poll_ms = 2000", "poll_ms = 100", "device_api.poll_ms"),
+            // Finding SEC-001.
+            (
+                "max_pending_sessions_per_boot_service = 32",
+                "max_pending_sessions_per_boot_service = 65",
+                "device_api.max_pending_sessions_per_boot_service",
+            ),
+            (
+                "unauthorised_idle_timeout_s = 120",
+                "unauthorised_idle_timeout_s = 10",
+                "device_api.unauthorised_idle_timeout_s",
+            ),
+            (
+                "session_opens_per_min = 120",
+                "session_opens_per_min = 0",
+                "device_api.session_opens_per_min",
+            ),
             (
                 "default_ttl_s = 900",
                 "default_ttl_s = 7200",

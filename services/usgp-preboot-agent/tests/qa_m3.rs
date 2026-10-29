@@ -431,7 +431,11 @@ fn install_beside_removable_and_boot_disks_touches_only_the_target() {
     assert!(stops[0].seq > last_step);
     assert_eq!(stops[0].actor_kind, "device_session");
     let completed = s.events("job.step.completed");
-    assert_eq!(completed.len(), 4, "one record per completed step 1..4");
+    assert_eq!(
+        completed.len(),
+        5,
+        "one record per completed step 1..5 (NIST-009)"
+    );
     assert!(
         completed
             .iter()

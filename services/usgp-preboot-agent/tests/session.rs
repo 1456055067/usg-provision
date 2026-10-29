@@ -34,6 +34,7 @@ struct Fake {
     attempts: u32,
     packages: Vec<serde_json::Value>,
     confirm_failure: Option<ApiFailure>,
+    open_failure: Option<ApiFailure>,
     calls: Vec<String>,
     ends: Vec<EndSessionV1>,
     hellos: Vec<DeviceHelloV1>,
@@ -64,6 +65,9 @@ impl DeviceApi for Fake {
     fn open(&mut self, hello: &DeviceHelloV1) -> Result<SessionOpenedV1, ApiFailure> {
         self.calls.push("open".into());
         self.hellos.push(hello.clone());
+        if let Some(f) = self.open_failure.clone() {
+            return Err(f);
+        }
         self.state = Some(SessionState::AwaitingAuthorisation);
         Ok(SessionOpenedV1 {
             session_id: SessionId::from_random_bytes([3; 16]),
@@ -456,4 +460,49 @@ fn a_refused_confirmation_returns_to_the_disk_choice() {
     assert_eq!(end.outcome, Outcome::Cancelled);
     assert!(screens.contains("The confirmation was not accepted"));
     assert_eq!(api.calls.last().map(String::as_str), Some("cancel"));
+}
+
+/// SEC-001 / decision 0023: no boot service serves this device's network,
+/// so the server opens no session (403 `forbidden`). A named screen, not
+/// "cannot reach the server".
+#[test]
+fn no_boot_service_has_its_own_screen() {
+    let mut api = fake();
+    api.open_failure = Some(refusal(403, codes::FORBIDDEN, None));
+    let mut h = host("noservice");
+    let (end, screens, _) = run(&mut api, &mut h, &["s"]);
+    assert_eq!(
+        end.outcome,
+        Outcome::Stopped(usgp_preboot_agent::session::StopReason::NoBootService)
+    );
+    assert_eq!(end.outcome.exit_code(), 2);
+    assert!(screens.contains("This boot service is not set up for this device"));
+    assert!(!screens.contains("Cannot reach the provisioning server"));
+    assert_eq!(api.calls, ["open"]);
+}
+
+/// Decision 0023 item 2: the claimed MACs are on the wipe screen, and 409
+/// `in_use` at confirmation stops with a named reason (choosing another
+/// disk cannot help).
+#[test]
+fn claimed_macs_are_shown_and_in_use_stops() {
+    let d = temp_dir("inuse");
+    let mut api = fake();
+    api.confirm_failure = Some(refusal(409, codes::IN_USE, None));
+    let mut h = SimHost::new(&d, &d.join("fw.json"), mac(5));
+    let target = disk_file(&d, "t.img", 70 * GB);
+    h.disks = vec![spec(target.clone(), 0)];
+    let before = common::ends_digest(&target, 4 << 20);
+    let (end, screens, _) = run(&mut api, &mut h, &["0123456789", "1", "1", "WIPE", "s"]);
+    assert!(
+        matches!(end.outcome, Outcome::NotConfirmed(_)),
+        "{:?}",
+        end.outcome
+    );
+    assert!(screens.contains("network boot is stopped for these addresses"));
+    assert!(screens.contains(&mac(5).to_string()));
+    assert!(screens.contains("already in a provisioning job or stopped from network boot"));
+    assert!(!screens.contains("Choose the disk again"));
+    assert_eq!(api.calls.last().map(String::as_str), Some("confirm"));
+    assert_eq!(common::ends_digest(&target, 4 << 20), before);
 }

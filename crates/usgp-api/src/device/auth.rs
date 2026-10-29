@@ -3,13 +3,22 @@
 //! Every route except open carries `Authorization: Bearer <token>`. The
 //! token is 32 DRBG bytes (base64url), sent once in the open response;
 //! the server keeps only its SHA-256 and finds the session by it. The
-//! token is bound to that one session:
+//! token is bound to that one session and to the session's source
+//! network, with an expiry (decision 0023 item 1, amending decision
+//! 0020):
 //!
+//! - a request from another source network (another IPv4 address, or an
+//!   address outside the IPv6 /64 the session was opened from) is refused
+//!   401 `invalid_token` and audited, as an unknown token is;
 //! - before the wipe confirmation, the session expires at `expires_at`
-//!   (pending TTL, OPEN-TGT-1); an expired session is moved to `expired`
-//!   (audited) on its next request and answers 403 `session_ended`;
+//!   (pending TTL, OPEN-TGT-1), and a session never authorised expires
+//!   sooner when not heard from for `unauthorised_idle_timeout` (finding
+//!   SEC-001); an expired session is moved to `expired` (audited) on its
+//!   next request and answers 403 `session_ended`;
 //! - after the confirmation, it reaches only its own job (chunk fetch and
-//!   progress while the job is unfinished) and its own status;
+//!   progress while the job is unfinished) and its own status, and it
+//!   lapses with the job's lost-job timeout ([`confirmed_lapse_at`]): 403
+//!   `session_ended` on every route, audited;
 //! - a refused, cancelled, expired or ended session reads its status only.
 //!
 //! A missing, malformed or unknown token is 401 `invalid_token` with
@@ -17,25 +26,45 @@
 //! per-source cap.
 
 // COMPLIANCE MAPPING:
-// - NIST 800-53: IA-2, IA-3 - every device request names its session by a
-//   DRBG token; the token is the session's only handle.
+// - NIST 800-53: SC-23 (Session Authenticity) - every device request names
+//   its session by a DRBG token, the session's only handle, bound to that
+//   session and to its source network (decision 0023 item 1).
+// - NIST 800-53: AC-12 (Session Termination) - pending sessions expire,
+//   idle unauthorised ones sooner; a confirmed session lapses with its
+//   job's lost-job timeout; final sessions only read their status.
+// - NIST 800-53: IA-11 (Re-authentication) - the token carries an
+//   authorisation (operator code or approval) that ends with the session;
+//   nothing outlives it.
+// - NIST 800-53: IA-3 (Device Identification and Authentication) -
+//   PARTIAL: the device is identified only by claimed values (MACs) and
+//   its source network; it holds no credential of its own.
 // - NIST 800-53: IA-5(1) / SC-28 - only the token's SHA-256 is stored; the
 //   token is zeroized after hashing and never logged.
-// - NIST 800-53: AC-12 (Session Termination) - pending sessions expire;
-//   final sessions only read their status.
-// - NIST 800-53: SC-23 (Session Authenticity) - token bound to one session.
 // - SPEC: specs/targeting.md#REQ-TGT-012, #REQ-TGT-015
-// - Decision 0020 (consequences: authorised token, bound and expiring)
+// - Decision 0020 (consequences: authorised token, bound and expiring), as
+//   amended by decision 0023 item 1
 // - RFC 6750 §2.1, §3 (Bearer, WWW-Authenticate)
+
+// POAM: IA-3 (TB-2) - the pre-boot device has no credential of its own
+// (decision 0020); a token is bound only to its source network, so a host
+// on the same network (the same IPv4 address, or the same IPv6 /64) that
+// learns a token can use it until the session ends or lapses (decision
+// 0023 item 1 residual). Device attestation is not in M3.
+
+// POAM: SC-23/AC-12 (decision 0023 item 1 residual) - the token is bound to
+// the source network, not to the TLS channel (no channel binding over
+// HTTP/1.1 bearer tokens here); a confirmed session stays usable for up to
+// twice `jobs.lost_after_s` after its job was last heard from, so a lost
+// job can be resumed (REQ-JOB-012).
 
 use std::net::IpAddr;
 
 use hyper::StatusCode;
 use hyper::header::{self, HeaderMap};
 use usgp_audit::{Actor, AuditDraft, Detail, Interface, Outcome};
-use usgp_db::{DbError, DeviceSession, RepoTx, Store};
+use usgp_db::{DbError, DeviceSession, Job, RepoTx, Store, source_network};
 use usgp_proto::device::SessionState;
-use usgp_proto::{SessionId, SessionToken, codes};
+use usgp_proto::{SessionId, SessionToken, UnixMicros, codes};
 
 use super::routes::DeviceRoute;
 use crate::context::{Api, system_draft};
@@ -49,6 +78,61 @@ pub const DEVICE_WWW_AUTHENTICATE: &str = "Bearer realm=\"usg-provision-device\"
 
 /// End reason of an expired session.
 pub(crate) const SESSION_EXPIRED: &str = "session_expired";
+
+/// Audit reason when a confirmed session's token has lapsed.
+pub(crate) const SESSION_LAPSED: &str = "session_lapsed";
+
+/// `t` plus `d` (saturating).
+fn plus(t: UnixMicros, d: std::time::Duration) -> UnixMicros {
+    let us = i64::try_from(d.as_micros()).unwrap_or(i64::MAX);
+    UnixMicros::new(t.as_micros().saturating_add(us)).unwrap_or(t)
+}
+
+/// `t` minus `d` (saturating at 0).
+fn minus(t: UnixMicros, d: std::time::Duration) -> UnixMicros {
+    let us = i64::try_from(d.as_micros()).unwrap_or(i64::MAX);
+    UnixMicros::new(t.as_micros().saturating_sub(us).max(0)).unwrap_or(t)
+}
+
+/// True if a pending session is due to expire at `at`: past its TTL, or
+/// never authorised and not heard from since `idle` before `at` (finding
+/// SEC-001).
+pub(crate) fn pending_due(s: &DeviceSession, at: UnixMicros, idle: std::time::Duration) -> bool {
+    PENDING.contains(&s.state)
+        && (at >= s.expires_at
+            || (s.state == SessionState::AwaitingAuthorisation
+                && s.last_seen_at <= minus(at, idle)))
+}
+
+/// When a confirmed session's token lapses (decision 0023 item 1: "a
+/// confirmed session expires with its job's lost-job timeout").
+///
+/// - Unfinished job: one `lost_after` after the job was declared lost,
+///   that is, `2 × lost_after` after it was last heard from (its last
+///   report, or its start). Until then a lost job can still be resumed
+///   (REQ-JOB-012: Lost → Running when the device reports again).
+/// - Finished job: `lost_after` after it finished (the agent can still
+///   read its status, then nothing).
+#[must_use]
+pub fn confirmed_lapse_at(job: &Job, lost_after: std::time::Duration) -> UnixMicros {
+    match job.finished_at {
+        Some(f) if job.state.is_final() => plus(f, lost_after),
+        _ => {
+            let heard = job
+                .last_report_at
+                .unwrap_or(job.started_at)
+                .max(job.started_at);
+            plus(plus(heard, lost_after), lost_after)
+        }
+    }
+}
+
+/// True if the request comes from the session's source network (decision
+/// 0023 item 1: an IPv4 address, or an IPv6 /64).
+#[must_use]
+pub fn same_source_network(s: &DeviceSession, ip: IpAddr) -> bool {
+    source_network(s.source_ip) == source_network(ip)
+}
 
 /// One device request: where from, which route, which session.
 #[derive(Debug, Clone)]
@@ -222,11 +306,12 @@ pub(crate) fn require(s: &DeviceSession, allowed: &[SessionState]) -> Result<(),
 }
 
 impl<S: Store + 'static> Api<S> {
-    /// Moves a pending session past its expiry to `expired` (audited
-    /// `device.session.expired`), and returns the session as it now is.
+    /// Moves a pending session past its expiry, or idle while never
+    /// authorised, to `expired` (audited `device.session.expired`), and
+    /// returns the session as it now is.
     pub(crate) async fn expire_if_due(&self, s: DeviceSession) -> Result<DeviceSession, ApiError> {
         let at = self.now()?;
-        if !PENDING.contains(&s.state) || at < s.expires_at {
+        if !pending_due(&s, at, self.config().device.unauthorised_idle_timeout) {
             return Ok(s);
         }
         let mut tx = self.store().begin().await?;
@@ -241,7 +326,7 @@ impl<S: Store + 'static> Api<S> {
             .await
         {
             Ok(()) => {
-                let d = expired_draft(&s);
+                let d = expired_draft(&s, at >= s.expires_at);
                 let r = self.append(&mut tx, &d).await?;
                 self.commit(tx, &[r]).await?;
             }
@@ -256,8 +341,10 @@ impl<S: Store + 'static> Api<S> {
     }
 
     /// The expiry sweep (maintenance): every pending session past its
-    /// expiry becomes `expired`, one `device.session.expired` record each,
-    /// in one transaction. Returns how many expired.
+    /// expiry, and every never-authorised session idle for
+    /// `device_api.unauthorised_idle_timeout_s`, becomes `expired`, one
+    /// `device.session.expired` record each, in one transaction. Returns
+    /// how many expired.
     ///
     /// # Errors
     ///
@@ -265,8 +352,9 @@ impl<S: Store + 'static> Api<S> {
     /// changed then).
     pub async fn expire_device_sessions(&self) -> Result<usize, ApiError> {
         let at = self.now()?;
+        let idle = self.config().device.unauthorised_idle_timeout;
         let mut tx = self.store().begin().await?;
-        let ids = tx.expire_device_sessions(at).await?;
+        let ids = tx.expire_device_sessions(at, minus(at, idle)).await?;
         if ids.is_empty() {
             tx.rollback().await;
             return Ok(0);
@@ -275,7 +363,8 @@ impl<S: Store + 'static> Api<S> {
         for id in &ids {
             let d = system_draft("device.session.expired", Outcome::Success)
                 .target("device_session", &id.to_string())
-                .reason(SESSION_EXPIRED);
+                .reason(SESSION_EXPIRED)
+                .detail(Detail::new().with("unauthorised_idle_timeout_s", &idle.as_secs()));
             recs.push(self.append(&mut tx, &d).await?);
         }
         self.commit(tx, &recs).await?;
@@ -283,13 +372,46 @@ impl<S: Store + 'static> Api<S> {
     }
 }
 
-fn expired_draft(s: &DeviceSession) -> AuditDraft {
+fn expired_draft(s: &DeviceSession, ttl: bool) -> AuditDraft {
     system_draft("device.session.expired", Outcome::Success)
         .target("device_session", &s.id.to_string())
         .reason(SESSION_EXPIRED)
         .detail(
             Detail::new()
                 .with("macs", &macs_text(s))
-                .with("source_ip", &s.source_ip.to_string()),
+                .with("source_ip", &s.source_ip.to_string())
+                .with("cause", if ttl { "ttl" } else { "idle_unauthorised" }),
         )
+}
+
+impl<S: Store + 'static> Api<S> {
+    /// For a confirmed session: `Some(lapse time)` if its token has lapsed
+    /// at `at` ([`confirmed_lapse_at`]); `None` otherwise (any other state,
+    /// or not yet lapsed).
+    pub(crate) async fn confirmed_lapsed(
+        &self,
+        s: &DeviceSession,
+    ) -> Result<Option<UnixMicros>, ApiError> {
+        if s.state != SessionState::Confirmed {
+            return Ok(None);
+        }
+        let at = self.now()?;
+        let mut tx = self.store().begin().await?;
+        let job = tx.job_by_session(s.id).await;
+        tx.rollback().await;
+        let Some(job) = job? else {
+            return Ok(None);
+        };
+        let lapse = confirmed_lapse_at(&job, self.config().device.jobs.lost_after);
+        Ok((at >= lapse).then_some(lapse))
+    }
+}
+
+/// The refusal for a confirmed session whose token has lapsed.
+pub(crate) fn lapsed_error(lapse: UnixMicros) -> ApiError {
+    state_error(SessionState::Expired).detail(
+        Detail::new()
+            .with("lapse_reason", SESSION_LAPSED)
+            .with("lapsed_at_us", &lapse.as_micros()),
+    )
 }

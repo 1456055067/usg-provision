@@ -242,4 +242,15 @@ mod tests {
         let entry = PARTITION_INFORMATION_GPT::default();
         assert_eq!(DRIVE_LAYOUT.entry.gpt_name_units, entry.Name.len());
     }
+
+    /// The synthetic layouts the fuzz targets and the OS-neutral tests use
+    /// (`parse::testkit`, SEC-004) are the windows-sys ones.
+    #[test]
+    fn fuzzed_layouts_are_the_windows_layouts() {
+        assert_eq!(
+            crate::parse::testkit::SECURITY_DESCRIPTOR,
+            SECURITY_DESCRIPTOR
+        );
+        assert_eq!(crate::parse::testkit::REPARSE, REPARSE);
+    }
 }

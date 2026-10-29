@@ -18,7 +18,11 @@
 //! signed boot-policy pull that stops offering a boot program to devices
 //! whose jobs succeeded ([`feed`], REQ-BOOT-067, decision 0021). The feed
 //! material and the optional cache are loaded in [`prepare`]; the pull
-//! runs as one more serving task.
+//! runs as one more serving task. A manifest with a `[pe_kit]` requires
+//! `[server_feed]` with `enabled = true`: without it start-up is refused
+//! (exit 78; [`check_kit_has_feed`]), because the relay could not stop
+//! booting devices whose jobs succeeded. A manifest without `[pe_kit]`
+//! needs no feed.
 
 // Handles network input and operator files: indexing and slicing that can
 // panic are denied (CLAUDE.md, Engineering Rules).
@@ -127,6 +131,15 @@ pub enum RelayError {
          route of the interface"
     )]
     PrefixUnknown(String),
+    /// The boot manifest has a `[pe_kit]` but `[server_feed]` is not
+    /// enabled, so the relay could not stop offering the PE to devices
+    /// whose jobs succeeded (exit 78; REQ-BOOT-067, CM-6).
+    #[error(
+        "invalid configuration: server_feed: the boot manifest has a [pe_kit], \
+         which requires [server_feed] with enabled = true so that devices whose \
+         provisioning jobs succeeded are not booted again"
+    )]
+    PeKitWithoutFeed,
 }
 
 impl RelayError {
@@ -139,7 +152,8 @@ impl RelayError {
             | Self::Suppression(_)
             | Self::Feed(_)
             | Self::SharedAdminUid(_)
-            | Self::PrefixUnknown(_) => EXIT_CONFIG,
+            | Self::PrefixUnknown(_)
+            | Self::PeKitWithoutFeed => EXIT_CONFIG,
             Self::Net(_) | Self::TaskEnded | Self::Signal(_) => EXIT_FAILURE,
         }
     }
@@ -154,6 +168,7 @@ impl RelayError {
             Self::Feed(e) => e.field(),
             Self::SharedAdminUid(_) => "--admin-uid".to_owned(),
             Self::PrefixUnknown(field) => field.clone(),
+            Self::PeKitWithoutFeed => "server_feed.enabled".to_owned(),
             Self::Net(_) | Self::TaskEnded | Self::Signal(_) => String::new(),
         }
     }
@@ -186,14 +201,15 @@ pub struct Prepared {
     pub feed: Option<Arc<BootPolicyFeed>>,
 }
 
-/// Loads the manifest, verifies every published file, loads the
-/// suppression file (if configured), and with `[server_feed]` loads the
-/// feed material and the verified cache (no network).
+/// Loads the manifest, refuses a `[pe_kit]` without `[server_feed]`,
+/// verifies every published file, loads the suppression file (if
+/// configured), and with `[server_feed]` loads the feed material and the
+/// verified cache (no network).
 ///
 /// # Errors
 ///
-/// [`RelayError::Content`], [`RelayError::Suppression`] or
-/// [`RelayError::Feed`] (exit 78).
+/// [`RelayError::Content`], [`RelayError::PeKitWithoutFeed`],
+/// [`RelayError::Suppression`] or [`RelayError::Feed`] (exit 78).
 pub async fn prepare(config: &RelayConfig) -> Result<Prepared, RelayError> {
     let content = Arc::new(ContentStore::load(
         &config.boot.manifest,
@@ -203,6 +219,7 @@ pub async fn prepare(config: &RelayConfig) -> Result<Prepared, RelayError> {
         config.limits.verify_concurrency,
         &config.trust,
     )?);
+    check_kit_has_feed(content.pe_kit().is_some(), config.server_feed.is_some())?;
     content.recheck_all("startup").await;
     let suppression = Arc::new(match &config.suppression.file {
         Some(path) => {
@@ -238,6 +255,33 @@ pub async fn prepare(config: &RelayConfig) -> Result<Prepared, RelayError> {
         suppression,
         feed,
     })
+}
+
+/// Refuses a boot manifest with a `[pe_kit]` when `[server_feed]` is not
+/// enabled (SEC-005 / NIST-014). A PE kit boots devices into the
+/// provisioning agent; without the signed boot-policy pull the relay has
+/// no stop list, so a device whose job succeeded would be offered the PE
+/// again on every network boot. A manifest without `[pe_kit]` (the M1
+/// format) needs no feed and starts as in M1.
+///
+/// # Errors
+///
+/// [`RelayError::PeKitWithoutFeed`] (exit 78). [`run`] records it as
+/// `relay.start` with outcome `failure`; `main` also records
+/// `relay.config.rejected` with field `server_feed.enabled`.
+///
+// COMPLIANCE MAPPING:
+// - NIST 800-53: CM-6 (Configuration Settings) - an unsafe combination of
+//   settings refuses start-up (fail closed) instead of running silently
+//   without REQ-BOOT-067 enforcement.
+// - NIST 800-53: AU-2 / AU-12 - the refusal is audited.
+// - SPEC: specs/boot-network.md#REQ-BOOT-067 (status note: DEC-0021)
+// - SPEC: specs/preinstall-env.md#REQ-PE-011
+pub fn check_kit_has_feed(has_pe_kit: bool, feed_enabled: bool) -> Result<(), RelayError> {
+    if has_pe_kit && !feed_enabled {
+        return Err(RelayError::PeKitWithoutFeed);
+    }
+    Ok(())
 }
 
 /// Result of [`check`] (`--check-config`).
@@ -707,6 +751,21 @@ mod tests {
         assert_eq!(e.exit_code(), EXIT_CONFIG);
         assert_eq!(e.field(), "--admin-uid");
         assert!(e.to_string().contains("--allow-shared-admin-uid"));
+    }
+
+    /// SEC-005 / NIST-014: a PE kit needs the boot-policy feed; an M1
+    /// manifest (no kit) does not.
+    #[test]
+    fn pe_kit_requires_feed() {
+        let e = check_kit_has_feed(true, false).unwrap_err();
+        assert!(matches!(e, RelayError::PeKitWithoutFeed));
+        assert_eq!(e.exit_code(), EXIT_CONFIG);
+        assert_eq!(e.field(), "server_feed.enabled");
+        assert!(e.to_string().contains("[pe_kit]"), "{e}");
+        assert!(e.to_string().contains("[server_feed]"), "{e}");
+        assert!(check_kit_has_feed(true, true).is_ok());
+        assert!(check_kit_has_feed(false, false).is_ok());
+        assert!(check_kit_has_feed(false, true).is_ok());
     }
 
     #[test]

@@ -61,6 +61,17 @@ macro_rules! parse_json {
 }
 pub(crate) use parse_json;
 
+/// As [`parse_json!`], for the device listener: a parse failure is 400
+/// `invalid_json` with a fixed message and the line and column only,
+/// never the parser's text (finding SEC-006).
+macro_rules! parse_device_json {
+    ($ty:ty, $bytes:expr, $max:expr) => {
+        ::usgp_proto::api::parse_request::<$ty>($bytes, $max)
+            .map_err($crate::handlers::device_request_error)
+    };
+}
+pub(crate) use parse_device_json;
+
 /// Runs the handler for the matched route.
 pub(crate) async fn dispatch<S: Store + 'static>(
     api: &Api<S>,
@@ -143,6 +154,39 @@ pub(crate) fn request_error(e: RequestError) -> ApiError {
     let mut err = ApiError::new(status, body.error.code.clone(), body.error.message.as_str());
     err.body = body;
     err
+}
+
+/// The line and column at the end of a parser description ("... at line
+/// L column C"), if it has them.
+fn line_column(detail: &str) -> Option<(u64, u64)> {
+    let (head, column) = detail.rsplit_once(" column ")?;
+    let (_, line) = head.rsplit_once(" at line ")?;
+    let digits = |t: &str| {
+        (!t.is_empty() && t.len() <= 20 && t.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| t.parse::<u64>().ok())
+            .flatten()
+    };
+    Some((digits(line)?, digits(column)?))
+}
+
+/// Maps a device request parse error: 413 as [`request_error`]; 400
+/// `invalid_json` with a fixed message naming only the line and column.
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-11 (Error Handling) - the device listener answers
+//   unauthenticated senders; its error text is fixed (finding SEC-006).
+pub(crate) fn device_request_error(e: RequestError) -> ApiError {
+    match &e {
+        RequestError::Json { detail } => {
+            let message = match line_column(detail) {
+                Some((l, c)) => {
+                    format!("the request body is not valid for this request (line {l}, column {c})")
+                }
+                None => "the request body is not valid for this request".to_owned(),
+            };
+            ApiError::new(StatusCode::BAD_REQUEST, codes::INVALID_JSON, message)
+        }
+        _ => request_error(e),
+    }
 }
 
 /// Maps a field validation error (422).

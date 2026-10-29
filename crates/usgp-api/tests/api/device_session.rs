@@ -152,6 +152,7 @@ async fn code_flow_to_verified_plan() {
 #[tokio::test]
 async fn approval_bound_to_display_code() {
     let h = Harness::m3().await;
+    h.loopback_service("approval").await;
     let s = h.open_session(&["02:00:00:00:00:03"]).await;
     let r = h
         .get(
@@ -221,6 +222,7 @@ async fn approval_bound_to_display_code() {
 #[tokio::test]
 async fn replayed_revoked_and_expired_codes_refused_alike() {
     let h = Harness::m3().await;
+    h.loopback_service("replay").await;
     let a = h.open_session(&["02:00:00:00:00:04"]).await;
     let b = h.open_session(&["02:00:00:00:00:05"]).await;
     let (_, code) = h.issue_code().await;
@@ -248,7 +250,15 @@ async fn replayed_revoked_and_expired_codes_refused_alike() {
     assert_eq!(r.json()["error"]["attempts_left"], 3);
     // Expired.
     let (_, old) = h.issue_code().await;
-    h.clock.advance(Duration::from_secs(901));
+    // The device keeps polling while it waits (an unauthorised session
+    // idle for 120 s expires, finding SEC-001).
+    for _ in 0..10 {
+        h.clock.advance(Duration::from_secs(91));
+        let r = h
+            .dev("GET", "/v1/device/session", Some(&b.token), None)
+            .await;
+        assert_eq!(r.status, 200);
+    }
     let r = h.submit_code(&b.token, &old).await;
     assert_eq!(r.status, 422);
     // Wrong.
@@ -273,6 +283,7 @@ async fn replayed_revoked_and_expired_codes_refused_alike() {
 #[tokio::test]
 async fn attempt_exhaustion_refuses_session() {
     let h = Harness::m3().await;
+    h.loopback_service("exhaust").await;
     let s = h.open_session(&["02:00:00:00:00:06"]).await;
     for left in (1..=4).rev() {
         let r = h.submit_code(&s.token, "00000-00000").await;
@@ -312,6 +323,7 @@ async fn code_attempts_rate_limited_per_source() {
         ..crate::common::Opts::default()
     })
     .await;
+    h.loopback_service("coderate").await;
     let s = h.open_session(&["02:00:00:00:00:07"]).await;
     let t = h.open_session(&["02:00:00:00:00:08"]).await;
     assert_eq!(h.submit_code(&s.token, "00000-00000").await.status, 422);
@@ -325,6 +337,7 @@ async fn code_attempts_rate_limited_per_source() {
 #[tokio::test]
 async fn expired_session_refused() {
     let h = Harness::m3().await;
+    h.loopback_service("expired").await;
     let s = h.open_session(&["02:00:00:00:00:09"]).await;
     let (_, code) = h.issue_code().await;
     h.clock.advance(Duration::from_secs(3601));
@@ -366,6 +379,7 @@ async fn expired_session_refused() {
 #[tokio::test]
 async fn wrong_token_401() {
     let h = Harness::m3().await;
+    h.loopback_service("wrongtoken").await;
     let _s = h.open_session(&["02:00:00:00:00:0b"]).await;
     let unknown = "A".repeat(43);
     for token in [None, Some("short"), Some(unknown.as_str())] {
@@ -577,10 +591,11 @@ async fn disk_and_package_rules() {
     assert_eq!(r.status, 409);
 }
 
-/// A device outside every served subnet is offered nothing; the
-/// operator is told (REQ-TGT-008); the device can end its session.
+/// Finding SEC-001: a device outside every served subnet gets no
+/// session at all (403, one capped refusal record); the operator still
+/// sees the boot service's own warning (REQ-TGT-008).
 #[tokio::test]
-async fn nothing_to_offer_without_boot_service() {
+async fn no_session_without_boot_service() {
     let h = Harness::m3().await;
     let relay = h.relay_cert("relay elsewhere");
     let bs = h
@@ -594,28 +609,29 @@ async fn nothing_to_offer_without_boot_service() {
     let r = h.get(Who::Admin, &format!("/v1/boot-services/{bs}")).await;
     assert_eq!(r.json()["usable_count"], 0);
     assert_eq!(r.json()["warning"]["code"], "no_usable_package");
-    let s = h.open_session(&["02:00:00:00:00:14"]).await;
-    let (_, code) = h.issue_code().await;
-    assert_eq!(h.submit_code(&s.token, &code).await.status, 200);
-    let r = h
-        .dev("GET", "/v1/device/session/packages", Some(&s.token), None)
-        .await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.json()["packages"], serde_json::json!([]));
-    assert_eq!(h.events("device.session.no_boot_service").len(), 1);
     let r = h
         .dev(
             "POST",
-            "/v1/device/session/end",
-            Some(&s.token),
-            Some(serde_json::json!({
-                "reason": "nothing_to_offer"
-            })),
+            "/v1/device/sessions",
+            None,
+            Some(hello(&["02:00:00:00:00:14"])),
         )
         .await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.json()["state"], "ended");
-    assert_eq!(h.events("device.session.ended").len(), 1);
+    assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.code(), "forbidden");
+    assert!(r.json().get("token").is_none());
+    let refused = h.events("device.session.open_refused");
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].reason.as_deref(), Some("no_boot_service"));
+    assert!(
+        refused[0]
+            .detail
+            .contains("\"boot_service_resolution\":\"none\"")
+    );
+    assert!(h.events("device.session.opened").is_empty());
+    let mut tx = h.store.begin().await.unwrap();
+    assert!(tx.list_device_sessions(&[]).await.unwrap().is_empty());
+    tx.rollback().await;
 }
 
 /// Session opens are capped per source and in total; refusals audited.
@@ -629,6 +645,7 @@ async fn open_caps() {
         ..crate::common::Opts::default()
     })
     .await;
+    h.loopback_service("caps").await;
     h.open_session(&["02:00:00:00:00:15"]).await;
     h.open_session(&["02:00:00:00:00:16"]).await;
     let r = h

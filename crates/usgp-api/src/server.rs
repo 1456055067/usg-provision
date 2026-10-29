@@ -131,18 +131,74 @@ impl TlsAcceptorHandle {
 /// checkpoint timer).
 pub const MAINTENANCE_EVERY: Duration = Duration::from_secs(60);
 
+/// How often at most a failed sweep is reported on the mirror.
+pub const SWEEP_ALARM_EVERY: Duration = Duration::from_secs(300);
+
+/// The sweeps of one maintenance pass that failed (finding NIST-016):
+/// `(sweep, error code)`. Nothing changed for a failed sweep; it runs
+/// again on the next pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceReport {
+    /// The failed sweeps.
+    pub failed: Vec<(&'static str, String)>,
+}
+
 impl<S: Store + 'static> Api<S> {
     /// One maintenance pass: summary of capped unauthenticated refusals,
     /// expired upload sessions, expired device sessions, lost jobs, and a
-    /// checkpoint if one is due.
-    pub async fn maintenance(&self) {
+    /// checkpoint if one is due. A sweep that fails is reported in the
+    /// returned report and on the audit mirror as an unpersisted
+    /// `maintenance.sweep.failed` record (at most once per
+    /// [`SWEEP_ALARM_EVERY`] per sweep; the store or the audit chain may be
+    /// what failed).
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: AU-5 (Response to Audit Logging Process Failures),
+    //   SI-11 - sweep failures are surfaced, not discarded (finding
+    //   NIST-016).
+    pub async fn maintenance(&self) -> MaintenanceReport {
         self.flush_unauthenticated_summary().await;
-        let _ = self.expire_uploads().await;
-        // M3: pending device sessions past their expiry, and running jobs
-        // not heard from for `jobs.lost_after_s`.
-        let _ = self.expire_device_sessions().await;
-        let _ = self.mark_lost_jobs().await;
+        let mut report = MaintenanceReport::default();
+        let uploads = self.expire_uploads().await.map(|_| ());
+        // M3: pending device sessions past their expiry (or idle while
+        // unauthorised), and running jobs not heard from for
+        // `jobs.lost_after_s`.
+        let sessions = self.expire_device_sessions().await.map(|_| ());
+        let jobs = self.mark_lost_jobs().await.map(|_| ());
+        for (sweep, r) in [
+            ("upload_expiry", uploads),
+            ("device_session_expiry", sessions),
+            ("lost_jobs", jobs),
+        ] {
+            if let Err(e) = r {
+                self.sweep_failed(sweep, &e);
+                report.failed.push((sweep, e.code().as_str().to_owned()));
+            }
+        }
         self.checkpoint(false).await;
+        report
+    }
+
+    fn sweep_failed(&self, sweep: &'static str, e: &crate::error::ApiError) {
+        let fire = self
+            .inner
+            .sweep_alarms
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(sweep)
+            .or_insert_with(|| crate::context::AlarmGate::new(SWEEP_ALARM_EVERY))
+            .fire(Instant::now());
+        if let Some(suppressed) = fire {
+            let mut detail = Detail::new()
+                .with("sweep", sweep)
+                .with("suppressed_since_last", &suppressed);
+            if let Some(cause) = &e.internal {
+                detail = detail.with("internal_cause", cause.as_str());
+            }
+            let d = crate::context::system_draft("maintenance.sweep.failed", Outcome::Failure)
+                .reason(e.code().as_str())
+                .detail(detail);
+            usgp_audit::mirror::emit_unpersisted(crate::context::COMPONENT, self.chain(), &d);
+        }
     }
 
     /// Audits a refused handshake (`auth.tls.failed`, plan section 7),
@@ -356,7 +412,8 @@ pub async fn serve<S: Store + 'static>(
     let maintenance = tokio::spawn(async move {
         loop {
             tokio::time::sleep(MAINTENANCE_EVERY).await;
-            m_api.maintenance().await;
+            // Failures are reported on the mirror by `maintenance`.
+            let _report = m_api.maintenance().await;
         }
     });
     let mut shutdown = std::pin::pin!(shutdown);

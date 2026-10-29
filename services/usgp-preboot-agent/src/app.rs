@@ -17,8 +17,10 @@
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-13 (Cryptographic Protection) - FIPS checked before
 //   any network use.
-// - NIST 800-53: SC-8, IA-3 - server authenticated with pinned anchors and
-//   name before anything else is sent.
+// - NIST 800-53: SC-8, IA-5(2) (Public Key-Based Authentication) - the
+//   server is authenticated with pinned anchors and name before anything
+//   else is sent (NIST-002; the device is not authenticated by this, so
+//   no IA-3 claim here).
 // - NIST 800-53: SI-11 - persistent, named start-up errors.
 // - SPEC: specs/preinstall-env.md#REQ-PE-013, #REQ-PE-014, #REQ-PE-015,
 //   #REQ-PE-020

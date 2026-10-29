@@ -22,6 +22,12 @@ name below is created at the start of a run and removed on any exit.
  br-x 10.20.9.0/24 (unconfigured segment)
   |- usgp-relay  relay9 10.20.9.2 (NOT in relay.toml; S4 probe)
   |- usgp-probe  px     10.20.9.9
+
+ S9 only: root namespace usgp-srv0 10.20.250.1/30 <-veth-> usgp-relay srv0
+ 10.20.250.2/30 (usgp-server's operator and relay listener, :18443).
+ The server's device listener is 127.0.0.1:18444 in the root namespace,
+ where the simulated agent runs. PostgreSQL is the container of
+ scripts/pg-test-setup.sh on 127.0.0.1.
 ```
 
 Each leg is a veth pair. The bridge side is named `v<ifname>`, for example
@@ -37,6 +43,9 @@ through 10.20.1.1. Reverse-path filtering is off in every namespace.
 | `lab-relay-agent` | usgp-router | same as the relay |
 | `lab-probe` | usgp-probe | same as the relay |
 | `qemu-system-x86_64` | usgp-lab | `$SUDO_USER` (or `USGP_QEMU_USER`), the owner of the taps |
+| `usgp-server serve` (S9) | root namespace | the QEMU user, which is also its `--admin-uid` (`--allow-shared-admin-uid`, as in the server tests); the admin database key is mode 0000 while it runs |
+| `usgp-preboot-agent --sim` (S9) | root namespace | the QEMU user; disks are regular files |
+| `usgp-relay --config relay-feed.toml` (S9) | usgp-relay | as the relay above; replaces the S1 to S8 relay for S9 only |
 
 ## Simplification: the lab relay agent always broadcasts replies
 
@@ -73,6 +82,7 @@ Effect on the scenarios (finding BOOT-007):
 | 52:54:00:00:01:06 | S6 |
 | 52:54:00:00:01:07 | S7 |
 | 52:54:00:00:01:08, 52:54:00:00:02:08 | S8 |
+| 52:54:00:00:01:09 | S9 (also the simulated agent's MAC, so the job's boot stop names it) |
 
 Each scenario uses its own MAC, so per-client rate limits from one
 scenario do not affect the next.
@@ -111,6 +121,55 @@ IPv4 PXE boot option failed (`failed to load Boot#### "UEFI PXEv4 ...`)
 must come before the disk payload's marker. The `PXE-E16` line and whether
 any IPv6 option was tried are recorded as evidence.
 
+## M3 scenarios S9 and S10 (plan M3 section 10.3)
+
+S9 (BOOT-5 stop, REQ-BOOT-067 and REQ-BOOT-061) runs after S8, as the last
+network scenario:
+
+1. A throwaway CA (openssl, ECDSA P-384, two days, with a CRL) issues the
+   server, operator and relay certificates; the CA key is then deleted.
+   `usgp-server keygen` makes the five server keys. The server is migrated
+   on the pg-test-setup database; the operator and the relay's certificate
+   (as a boot service for 127.0.0.0/8 and 10.20.0.0/16) are enrolled.
+2. `usgp-server serve` starts. The S1 to S8 relay is stopped and the relay
+   is started again with `[server_feed]` (poll 5 s). It must apply the
+   server's signed list (0 stops) before anything else.
+3. `usgp-cli` uploads the synthetic image (`fuzz/corpus/wim_apply_plan/
+   xpress.bin`) and PE (`fuzz/corpus/wim_check/none-1.bin`), declares the
+   edition, makes the package Ready and assigns it to the boot service.
+4. Positive control: the guest PXE-boots the payload.
+5. `usgp-cli code issue`; the agent with `--sim` (MAC 52:54:00:00:01:09, a
+   70 GB sparse target file and a 4 MiB second file) answers the code,
+   package 1, disk 1 and `WIPE` on standard input. The code is never
+   written to the evidence. The job must be Succeeded, the second file
+   unchanged, `sgdisk -v` clean on the target, and one active boot stop
+   listed for the MAC.
+6. The relay applies the next generation with 1 stop. The ESP of the
+   agent-written disk gets a FAT file system (mkfs.fat) holding the disk
+   payload, so the device's own disk is what it falls through to.
+7. Stopped boot: the PXE option fails before the disk marker (as in S6),
+   `boot.device.stopped` names the MAC, and no offer was sent to it.
+8. `usgp-cli boot-stop clear`; the relay applies a later generation with 0
+   stops; the next boot is a normal PXE boot again.
+
+S10 (our GPT under independent firmware, OPEN-GPT-1, GPT-OBS-002) needs no
+network or root. Its disks are rebuilt from two committed seeds made by
+`usgp_disk::GptPlan` (`fuzz/corpus/gpt_readback/SOURCE.md`):
+
+| Case | Disk | Pass condition |
+|------|------|----------------|
+| `s10-512` | `wu14-gpt-512-two-parts.bin`, 512-byte sectors; the ESP (entry 0, type checked with `od`) holds a mkfs.fat file system with the payload as `\EFI\BOOT\BOOTX64.EFI`; `sgdisk -v` clean | the payload marker |
+| `s10-512-primary-bad` | the same with one octet of the primary header changed (its CRC fails) | the payload marker: the firmware used our backup header and array |
+| `s10-512-arrays-bad` | the same with one octet of entry 0 changed in both arrays | no marker, and the firmware's `failed to load Boot####` line for the disk |
+| `s10-4096` | `wu14-gpt-4096-one-part.bin` on a 4096-byte logical sector disk (`logical_block_size=4096`); the basic data partition holds the payload | the payload marker |
+
+The FAT file system is placed at the partition's first LBA, read from the
+table with `od`, never at LBA 0, so the firmware can reach the payload
+only through the partition table. Whether the firmware rewrote the primary
+header from the backup (and the disk then equals what usgp-disk wrote) is
+recorded as information. `s10/gpt-obs-002.txt` holds the run's GPT-OBS-002
+record.
+
 ## Evidence
 
 Each run writes to `target/boot-smoke/run-<UTC time>/` (or
@@ -124,4 +183,8 @@ Each run writes to `target/boot-smoke/run-<UTC time>/` (or
 - `config/` (relay config, manifest, `usgp-cli` output, `--check-config`
   output);
 - `topology.txt` and `environment.txt` (tool versions and SHA-256 of
-  firmware and artifacts).
+  firmware and artifacts);
+- `s9/` (server log, every `usgp-cli` and admin command's output, the
+  agent's screen, `sgdisk` output) and `config/server-s9.toml`,
+  `config/relay-feed.toml`;
+- `s10/` (`sgdisk -v` output and `gpt-obs-002.txt`).

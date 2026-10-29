@@ -75,4 +75,4 @@ pub use limits::{ApiConfig, ApiLimits, ConfigError, ContentConfig, DeviceConfig}
 pub use manifest::ContentKeys;
 pub use rbac::Permission;
 pub use routes::{ROUTES, RouteId, RouteSpec};
-pub use server::{TlsAcceptorHandle, serve};
+pub use server::{MaintenanceReport, TlsAcceptorHandle, serve};

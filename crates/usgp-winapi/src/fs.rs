@@ -17,6 +17,10 @@
 //!   structural check (topic 24).
 //! - A descriptor's SACL is applied when `SeSecurityPrivilege` is held,
 //!   and refused by name otherwise; it is never dropped.
+//! - Privileges (AC-6, NIST-001): restore and backup are enabled for the
+//!   writer's life (the apply step) and disabled when it is dropped; the
+//!   security privilege only around a descriptor set with a SACL, and the
+//!   create-symbolic-link privilege only around a reparse-point set.
 //!
 //! Semantics: topic 23 §20 to §24 (SR-3c, DRAFT, audit pending) and
 //! topic 24. Still open there: OPEN-WAPI-7 (protected and auto-inherited
@@ -29,7 +33,8 @@
 // - SPEC: specs/standards/reparse-and-security-descriptors.md §2-§9
 // - NIST 800-53: SI-10 (Information Input Validation) - checked
 //   components under one root; SI-7 - only verified image content reaches
-//   here; AC-3 - descriptors applied as stored
+//   here; AC-3 - descriptors applied as stored; AC-6 - privileges enabled
+//   only while used
 // - SPEC: specs/preinstall-env.md REQ-PE-017; specs/standards/wim.md §6
 // - DECISION: docs/decisions/0019-windows-api-binding.md
 
@@ -58,7 +63,7 @@ use crate::ffi;
 use crate::fsquery;
 use crate::fsvalues::{attributes_to_send, filetime_to_system_time, is_safe_component};
 use crate::parse::to_wide_nul;
-use crate::privilege::{self, Privilege};
+use crate::privilege::{self, EnabledPrivilege, Privilege};
 
 /// The attribute bits the writer sets; the rest are never set directly.
 pub const SETTABLE_ATTRIBUTES: u32 = FILE_ATTRIBUTE_READONLY
@@ -68,6 +73,9 @@ pub const SETTABLE_ATTRIBUTES: u32 = FILE_ATTRIBUTE_READONLY
     | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+/// Topic 23 §26: open-reparse-point opens a reparse point itself, never
+/// its target; backup semantics is needed for a directory handle and marks
+/// a backup or restore open (§23).
 const META_FLAGS: u32 = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
 
 fn os(op: &'static str) -> impl FnOnce(io::Error) -> WinApiError {
@@ -78,17 +86,18 @@ fn os(op: &'static str) -> impl FnOnce(io::Error) -> WinApiError {
 #[derive(Debug)]
 pub struct TreeWriter {
     root: PathBuf,
-    symlink_privilege: bool,
-    security_privilege: bool,
     open: Option<(PathBuf, File)>,
     reparse: BTreeSet<Vec<String>>,
+    /// Restore and backup, enabled for the writer's life; disabled when it
+    /// is dropped. Declared last so the open file is closed first.
+    _privileges: [EnabledPrivilege; 2],
 }
 
 impl TreeWriter {
     /// A writer rooted at `root`, an existing directory that is not a
-    /// reparse point (typically a volume root). Enables the restore
-    /// privilege, which applying owners and short names needs; fails if
-    /// the process token does not hold it.
+    /// reparse point (typically a volume root). Enables the restore and
+    /// backup privileges until the writer is dropped; fails if the process
+    /// token does not hold them.
     pub fn new(root: &Path) -> Result<Self> {
         let root = fsquery::verbatim(root)?;
         let md = std::fs::symlink_metadata(&root).map_err(os("read root"))?;
@@ -100,14 +109,13 @@ impl TreeWriter {
         // Topic 23 §23: restore (owners, writes whatever the ACL) and
         // backup (reads whatever the ACL), with backup semantics on every
         // metadata open.
-        privilege::enable(Privilege::Restore)?;
-        privilege::enable(Privilege::Backup)?;
+        let restore = privilege::scoped(Privilege::Restore)?;
+        let backup = privilege::scoped(Privilege::Backup)?;
         Ok(Self {
             root,
-            symlink_privilege: false,
-            security_privilege: false,
             open: None,
             reparse: BTreeSet::new(),
+            _privileges: [restore, backup],
         })
     }
 
@@ -287,7 +295,8 @@ impl TreeWriter {
     /// Privilege: topic 24 §6 and topic 23 §24 say the caller must hold
     /// `SeCreateSymbolicLinkPrivilege`, without limiting that to
     /// symbolic-link tags, so it is enabled for both kinds (fail closed;
-    /// see the WU-5 notes). Any error fails (OPEN-WAPI-10).
+    /// see the WU-5 notes), for this call only. Any error fails
+    /// (OPEN-WAPI-10).
     pub fn set_reparse(&mut self, components: &[&str], buffer: &[u8]) -> Result<()> {
         Self::not_root(components)?;
         let kind = crate::parse::check_reparse_buffer(buffer, &crate::layout::REPARSE)
@@ -318,12 +327,11 @@ impl TreeWriter {
                 reason: "mount point target is not a directory",
             });
         }
-        if !self.symlink_privilege {
-            privilege::enable(Privilege::CreateSymbolicLink)?;
-            self.symlink_privilege = true;
-        }
+        let link_privilege = privilege::scoped(Privilege::CreateSymbolicLink)?;
         let f = self.open_meta(components, GENERIC_WRITE)?;
         ffi::set_reparse_point(&f, buffer).map_err(os("set reparse point"))?;
+        drop(f);
+        drop(link_privilege);
         self.reparse
             .insert(components.iter().map(|s| (*s).to_owned()).collect());
         Ok(())
@@ -331,8 +339,9 @@ impl TreeWriter {
 
     /// Sets the stored self-relative descriptor `sd`: owner, group, DACL
     /// and SACL, each as present. A SACL needs `SeSecurityPrivilege`,
-    /// enabled the first time one is met; if the token does not hold it
-    /// the call fails with [`WinApiError::PrivilegeNotHeld`]. A SACL is
+    /// enabled for this call only (topic 23 §23: enable, open with
+    /// `ACCESS_SYSTEM_SECURITY`, set, disable); if the token does not hold
+    /// it the call fails with [`WinApiError::PrivilegeNotHeld`]. A SACL is
     /// never dropped.
     pub fn set_security(&mut self, components: &[&str], sd: &[u8]) -> Result<()> {
         let info = ffi::descriptor_info(sd).map_err(os("check security descriptor"))?;
@@ -345,15 +354,17 @@ impl TreeWriter {
         if info & DACL_SECURITY_INFORMATION != 0 {
             access |= WRITE_DAC;
         }
-        if info & SACL_SECURITY_INFORMATION != 0 {
-            if !self.security_privilege {
-                privilege::enable(Privilege::Security)?;
-                self.security_privilege = true;
-            }
+        let sacl_privilege = if info & SACL_SECURITY_INFORMATION != 0 {
             access |= ACCESS_SYSTEM_SECURITY;
-        }
+            Some(privilege::scoped(Privilege::Security)?)
+        } else {
+            None
+        };
         let f = self.open_meta(components, access)?;
-        ffi::set_file_security(&f, sd, info).map_err(os("set security descriptor"))
+        let set = ffi::set_file_security(&f, sd, info).map_err(os("set security descriptor"));
+        drop(f);
+        drop(sacl_privilege);
+        set
     }
 
     /// Sets the short name.

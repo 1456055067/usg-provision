@@ -129,6 +129,9 @@ fn main() -> ExitCode {
             subnets,
         }) => boot_service_enrol(&config, &cert, &name, &subnets),
         Ok(Command::BootServiceDisable { config, id }) => boot_service_disable(&config, &id),
+        Ok(Command::BootServiceRaiseGeneration { config, id, to }) => {
+            boot_service_raise_generation(&config, &id, to)
+        }
     }
 }
 
@@ -823,6 +826,32 @@ fn boot_service_enrol(
             }
             Err(e) => {
                 eprintln!("usgp-server: boot-service enrol: {e}");
+                ExitCode::from(EXIT_FAILURE)
+            }
+        },
+    )
+}
+
+/// `boot-service raise-generation` (finding NIST-013).
+fn boot_service_raise_generation(args: &ConfigArgs, id: &str, to: u64) -> ExitCode {
+    let Ok(id) = BootServiceId::parse(id) else {
+        eprintln!("usgp-server: --id is not a boot-service id (hyphenated UUID)");
+        return ExitCode::from(EXIT_USAGE);
+    };
+    run_admin(
+        args,
+        false,
+        |store, chain, who| async move {
+            let r = boot_service_cmd::raise_generation(&store, &chain, &who, id, to).await;
+            (store, r)
+        },
+        |r| match r {
+            Ok(before) => {
+                println!("boot service {id}: boot-policy generation {before} -> {to}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("usgp-server: boot-service raise-generation: {e}");
                 ExitCode::from(EXIT_FAILURE)
             }
         },

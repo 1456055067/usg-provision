@@ -224,6 +224,67 @@ mod metadata {
         assert_eq!(code(&spec), "wim_meta_duplicate_name");
     }
 
+    // BOOT-006: the naming rules of windows-storage-firmware-api.md §27
+    // are refused in the metadata parse, so the check before the wipe
+    // refuses an image the apply could not write.
+    #[test]
+    fn boot006_section_27_names() {
+        for bad in [
+            "a<b",
+            "a>b",
+            "a\"b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "a\u{1}b",
+            "x\u{1f}",
+            "CON",
+            "nul.txt",
+            "Com1.tar.gz",
+            "LPT\u{b3}",
+            "trail.",
+            "trail ",
+        ] {
+            assert_eq!(
+                code(&one(NodeSpec::file(bad, b"x"))),
+                "wim_meta_name",
+                "{bad:?}"
+            );
+            // In a directory too, not only at the root.
+            assert_eq!(
+                code(&one(NodeSpec::dir("d", vec![NodeSpec::file(bad, b"x")]))),
+                "wim_meta_name",
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            code(&one(NodeSpec::file("long-name.txt", b"x").short("AUX.TXT"))),
+            "wim_meta_short_name"
+        );
+        for bad in ["a*b", "PRN", "s."] {
+            assert_eq!(
+                code(&one(NodeSpec::file("f", b"x").stream(bad, b"1"))),
+                "wim_meta_stream_name",
+                "{bad:?}"
+            );
+        }
+        // §27 allows values 1 to 31 in stream names.
+        assert!(
+            parse(
+                &one(NodeSpec::file("f", b"x").stream("\u{5}Info", b"1"))
+                    .encode()
+                    .bytes
+            )
+            .is_ok()
+        );
+        for good in ["CONSOLE.txt", "com0", ".hidden", "a b.txt"] {
+            assert!(
+                parse(&one(NodeSpec::file(good, b"x")).encode().bytes).is_ok(),
+                "{good:?}"
+            );
+        }
+    }
+
     // M-05 short names.
     #[test]
     fn m05_short_names() {

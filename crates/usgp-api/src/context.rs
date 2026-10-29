@@ -25,6 +25,7 @@
 // - SPEC: specs/operator-access.md#REQ-AUD-001, #REQ-AUD-002, #REQ-AUD-006
 // - Decisions 0010, 0015
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -82,6 +83,8 @@ pub(crate) struct Inner<S> {
     pub(crate) check_slots: Arc<Semaphore>,
     pub(crate) unauth: UnauthLimiter,
     pub(crate) checkpoint_alarm: Mutex<AlarmGate>,
+    /// Alarm gates of failed maintenance sweeps (finding NIST-016).
+    pub(crate) sweep_alarms: Mutex<HashMap<&'static str, AlarmGate>>,
     pub(crate) provisioning: Option<ProvisioningKeys>,
     pub(crate) device: DeviceState,
 }
@@ -221,6 +224,7 @@ impl<S: Store + 'static> ApiBuilder<S> {
                 check_slots: Arc::new(Semaphore::new(slots)),
                 unauth,
                 checkpoint_alarm: Mutex::new(AlarmGate::new(CHECKPOINT_ALARM_EVERY)),
+                sweep_alarms: Mutex::new(HashMap::new()),
                 provisioning: self.provisioning,
                 device,
             }),

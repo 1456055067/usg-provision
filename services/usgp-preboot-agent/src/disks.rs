@@ -8,22 +8,58 @@
 //! package's minimum, and builds the wire descriptor for the eligible ones.
 //! Refused disks keep every reason, for the screen and for the
 //! `no_disk` report.
+//!
+//! Twins (SEC-003, BOOT-002): two or more otherwise eligible disks with
+//! the same model, bus, size and sector sizes and no serial number cannot
+//! be told apart by the person on the disk screen, so every one of them
+//! is refused ([`Refusal::Indistinguishable`]). The platform also records
+//! a [`Discriminator`] per disk (the interface path and the partition
+//! table's identity), which it checks on the write handle before the
+//! wipe.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: AC-3 (Access Enforcement), CM-7 - removable, USB,
 //   boot-media, read-only and odd-sector disks are never offered.
 // - NIST 800-53: SI-10 - descriptors built only through the validating
 //   `usgp-proto` constructors; text sanitised.
+// - NIST 800-53: AC-3 - disks the person cannot tell apart are refused,
+//   so the confirmation always names one disk (SEC-003).
 // - SPEC: specs/disk.md#REQ-DISK-001..005, #REQ-DISK-016
 // - DECISION: docs/decisions/0018 items 7 and 8
 
 use std::fmt;
 
-use usgp_disk::{Bus as DiskBus, DiskFacts, EligibilityPolicy, Ineligible, assess_all};
+use usgp_disk::{Bus as DiskBus, DiskFacts, EligibilityPolicy, Guid, Ineligible, assess_all};
 use usgp_proto::device::{DiskRefusal, RefusedDiskV1};
 use usgp_proto::disk::{Bus, DiskDescriptorParts, ExistingPartitionV1, PartitionKind};
 use usgp_proto::limits::MAX_REFUSED_DISKS;
 use usgp_proto::{DiskDescriptorV1, DiskText, DiskToken, PartitionLabel};
+
+/// The identity of a disk's current partition table (GPT disk GUID or
+/// MBR signature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableIdentity {
+    /// No table, or one with no identity.
+    #[default]
+    None,
+    /// A GPT disk's disk GUID.
+    Gpt(Guid),
+    /// An MBR disk's signature.
+    Mbr(u32),
+}
+
+/// What tells one disk apart from an otherwise identical one, beyond the
+/// facts shown to the person (BOOT-002). Checked by the platform on the
+/// write handle before the wipe; never sent to the server.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Discriminator {
+    /// The disk interface's device path (Windows: SetupAPI, reusable
+    /// across restarts, never parsed; topic 23 §2). `None` when the
+    /// platform has none (the simulation).
+    pub interface_path: Option<String>,
+    /// The partition table's identity when the disk was listed.
+    pub table: TableIdentity,
+}
 
 /// One disk as the platform sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +73,28 @@ pub struct FoundDisk {
     /// disk, so it cannot rule out that the boot environment does
     /// (fail closed; WU-5 lock rule).
     pub volumes_known: bool,
+    /// What tells it apart from a twin (BOOT-002).
+    pub discriminator: Discriminator,
+}
+
+impl FoundDisk {
+    /// The facts a person sees that could make two disks look the same,
+    /// when the disk has no serial number; `None` when it has one.
+    fn twin_key(&self) -> Option<(&str, DiskBus, u64, u32, u32)> {
+        let f = &self.facts;
+        let no_serial = f
+            .identity
+            .serial
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty());
+        no_serial.then_some((
+            f.identity.model.as_str(),
+            f.bus,
+            f.size_bytes,
+            f.logical_sector,
+            f.physical_sector,
+        ))
+    }
 }
 
 /// Why a disk is not offered.
@@ -49,6 +107,9 @@ pub enum Refusal {
     /// Its partition list could not be described within the protocol's
     /// limits.
     Undescribable,
+    /// Another otherwise eligible disk has the same model, bus, size and
+    /// sector sizes, and neither has a serial number (SEC-003).
+    Indistinguishable,
 }
 
 impl fmt::Display for Refusal {
@@ -66,6 +127,10 @@ impl fmt::Display for Refusal {
                  running boot environment",
             ),
             Self::Undescribable => f.write_str("its partition table could not be described"),
+            Self::Indistinguishable => f.write_str(
+                "another disk has the same model and size and neither reports a serial \
+                 number, so the disk to erase could not be confirmed",
+            ),
         }
     }
 }
@@ -88,6 +153,7 @@ impl Refusal {
             Self::Ineligible(Ineligible::TooSmall { .. }) => DiskRefusal::TooSmall,
             Self::VolumesUndetermined => DiskRefusal::VolumesUndetermined,
             Self::Undescribable => DiskRefusal::PartitionTableUndescribable,
+            Self::Indistinguishable => DiskRefusal::IndistinguishableDisks,
             Self::Ineligible(_) => DiskRefusal::BootMedia,
         }
     }
@@ -190,7 +256,8 @@ pub struct Inventory {
 impl Inventory {
     /// Tokens every disk (`token` gives 16 fresh random bytes per call),
     /// and assesses it against `min_bytes` (the chosen package's
-    /// `required_disk_bytes`; never below 64 GB).
+    /// `required_disk_bytes`; never below 64 GB). Otherwise eligible twins
+    /// with no serial are all refused (module docs).
     #[must_use]
     pub fn build(
         found: Vec<FoundDisk>,
@@ -198,16 +265,39 @@ impl Inventory {
         min_bytes: u64,
         token: &mut dyn FnMut() -> DiskToken,
     ) -> Self {
-        let entries = found
+        let assessed: Vec<(FoundDisk, Vec<Refusal>)> = found
             .into_iter()
             .map(|d| {
-                let t = token();
                 let mut refusals: Vec<Refusal> = assess_all(&d.facts, policy, min_bytes)
                     .into_iter()
                     .map(Refusal::Ineligible)
                     .collect();
                 if !d.volumes_known {
                     refusals.push(Refusal::VolumesUndetermined);
+                }
+                (d, refusals)
+            })
+            .collect();
+        let twins: Vec<bool> = assessed
+            .iter()
+            .map(|(d, r)| {
+                r.is_empty()
+                    && d.twin_key().is_some_and(|k| {
+                        assessed
+                            .iter()
+                            .filter(|(o, or)| or.is_empty() && o.twin_key() == Some(k))
+                            .nth(1)
+                            .is_some()
+                    })
+            })
+            .collect();
+        let entries = assessed
+            .into_iter()
+            .zip(twins)
+            .map(|((d, mut refusals), twin)| {
+                let t = token();
+                if twin {
+                    refusals.push(Refusal::Indistinguishable);
                 }
                 let descriptor = if refusals.is_empty() {
                     match descriptor(t, &d) {
@@ -299,6 +389,7 @@ mod tests {
             },
             kinds: vec![PartitionKind::Basic],
             volumes_known: true,
+            discriminator: Discriminator::default(),
         }
     }
 
@@ -418,5 +509,56 @@ mod tests {
             inv.refused_report().first().unwrap().reason,
             DiskRefusal::PartitionTableUndescribable
         );
+    }
+
+    #[test]
+    fn twins_without_a_serial_are_refused() {
+        let twin = found(100_000_000_000);
+        let mut serial_a = found(100_000_000_000);
+        serial_a.facts.identity.serial = Some("A".to_owned());
+        let mut serial_b = found(100_000_000_000);
+        serial_b.facts.identity.serial = Some("  ".to_owned());
+        let mut other_size = found(200_000_000_000);
+        other_size.facts.identity.serial = None;
+        let inv = Inventory::build(
+            vec![twin.clone(), twin.clone(), serial_a, other_size],
+            &EligibilityPolicy::default(),
+            0,
+            &mut tokens(),
+        );
+        let r: Vec<_> = inv.entries().iter().map(|e| e.refusals.clone()).collect();
+        assert_eq!(r.first().unwrap(), &vec![Refusal::Indistinguishable]);
+        assert_eq!(r.get(1).unwrap(), &vec![Refusal::Indistinguishable]);
+        assert!(r.get(2).unwrap().is_empty(), "has a serial");
+        assert!(r.get(3).unwrap().is_empty(), "differs in size");
+        assert!(inv.entries().first().unwrap().descriptor.is_none());
+        assert_eq!(
+            inv.refused_report().first().unwrap().reason,
+            DiskRefusal::IndistinguishableDisks
+        );
+        assert!(
+            Refusal::Indistinguishable
+                .to_string()
+                .contains("serial number")
+        );
+        // A blank serial counts as none: it twins with a serial-less disk.
+        let inv = Inventory::build(
+            vec![twin.clone(), serial_b],
+            &EligibilityPolicy::default(),
+            0,
+            &mut tokens(),
+        );
+        assert_eq!(inv.eligible().count(), 0);
+        // A twin refused for another reason does not make its pair
+        // ineligible: only one of them could be chosen.
+        let mut boot = twin.clone();
+        boot.facts.hosts_boot_environment = true;
+        let inv = Inventory::build(
+            vec![twin, boot],
+            &EligibilityPolicy::default(),
+            0,
+            &mut tokens(),
+        );
+        assert_eq!(inv.eligible().count(), 1);
     }
 }

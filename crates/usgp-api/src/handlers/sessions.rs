@@ -6,9 +6,10 @@
 //! the operator (plan section 6, "approval confusion").
 
 // COMPLIANCE MAPPING:
-// - NIST 800-53: AC-3, IA-3 (Device Identification and Authentication) -
-//   a session is authorised only by an operator approval bound to its
-//   display code, or by a code (device routes).
+// - NIST 800-53: AC-3, IA-11 - a session is authorised only by an
+//   operator approval bound to its display code, or by a code (device
+//   routes). IA-3 is partial: the device itself is identified only by
+//   claimed values (POAM IA-3 (TB-2) in `device::auth`).
 // - NIST 800-53: AU-2, AU-3, AU-12 - list, approval, refused approval and
 //   refusal audited (decision 0018 item 10).
 // - SPEC: specs/targeting.md#REQ-TGT-014, #REQ-TGT-016

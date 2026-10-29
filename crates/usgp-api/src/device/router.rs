@@ -4,8 +4,12 @@
 //!    audited under the per-source cap.
 //! 2. **Bearer session** on every route but open ([`super::auth`]): 401
 //!    `invalid_token` with `WWW-Authenticate: Bearer` and
-//!    `Connection: close`, audited under the per-source cap. A pending
-//!    session past its expiry is expired (audited) and refused.
+//!    `Connection: close`, audited under the per-source cap, for a
+//!    missing, malformed or unknown token and for a token sent from
+//!    another source network than its session's (decision 0023 item 1).
+//!    A pending session past its expiry (or idle while unauthorised) is
+//!    expired (audited) and refused; a confirmed session whose token has
+//!    lapsed with its job is refused 403 `session_ended` (audited).
 //! 3. **Media type** of JSON routes (415).
 //! 4. The **handler**. Its success records are written in its own
 //!    transaction; an error it returns is audited here unless it already
@@ -16,8 +20,9 @@
 //! retries 503), never 2xx.
 
 // COMPLIANCE MAPPING:
-// - NIST 800-53: AC-3, IA-2 - no handler but open runs without a live
-//   session; the session state is checked by each handler.
+// - NIST 800-53: AC-3, SC-23, AC-12 - no handler but open runs without a
+//   live session from its own source network; the session state is
+//   checked by each handler (decision 0023 item 1).
 // - NIST 800-53: AU-2, AU-3, AU-12 - refusals audited with the session
 //   (or the source) as actor; AU-4/SC-5 - high-volume refusals capped.
 // - NIST 800-53: AU-5 - audit failure refuses the request (503).
@@ -38,13 +43,19 @@ use usgp_db::Store;
 use usgp_proto::api::JSON_MEDIA_TYPE;
 use usgp_proto::codes;
 
-use super::auth::{DEVICE_WWW_AUTHENTICATE, DeviceCtx, bearer_session, invalid_token};
+use super::auth::{
+    DEVICE_WWW_AUTHENTICATE, DeviceCtx, bearer_session, invalid_token, lapsed_error,
+    same_source_network,
+};
 use super::routes::{DeviceMatch, DeviceRouteId, device_allowed_methods, match_device_route};
 use super::{confirm, handlers, job};
 use crate::body::ApiBody;
 use crate::context::{Api, COMPONENT};
 use crate::error::ApiError;
 use crate::router::error_response;
+
+/// Audit reason for a token sent from another source network.
+pub const TOKEN_SOURCE_MISMATCH: &str = "token_source_mismatch";
 
 /// What the TLS layer established for a device connection (no identity:
 /// devices hold no certificate).
@@ -151,6 +162,21 @@ pub async fn handle_device<S: Store + 'static>(
     // 2. Bearer session.
     let session = if route.bearer {
         match bearer_session(&api, req.headers()).await {
+            // Decision 0023 item 1: the token is good only from the
+            // session's source network.
+            Ok(Ok(s)) if !same_source_network(&s, ip) => {
+                let d = anonymous("auth.unauthenticated", TOKEN_SOURCE_MISMATCH)
+                    .target("device_session", &s.id.to_string())
+                    .detail(
+                        request_detail()
+                            .with("session_source_ip", &s.source_ip.to_string())
+                            .with("request_source_ip", &ip.to_string()),
+                    );
+                let e = api
+                    .capped_refusal(ip, TOKEN_SOURCE_MISMATCH, d, invalid_token())
+                    .await;
+                return Ok(device_error(&e));
+            }
             Ok(Ok(s)) => match api.expire_if_due(s).await {
                 Ok(s) => Some(s),
                 Err(e) => return Ok(device_error(&e)),
@@ -177,8 +203,20 @@ pub async fn handle_device<S: Store + 'static>(
         session,
     };
 
+    // A confirmed session whose token lapsed with its job (decision 0023
+    // item 1): refused on every route, audited below.
+    let lapsed = match &ctx.session {
+        Some(s) => match api.confirmed_lapsed(s).await {
+            Ok(l) => l,
+            Err(e) => return Ok(device_error(&e)),
+        },
+        None => None,
+    };
+
     // 3. Media type.
-    let result = if route.json_body && !is_json(&req) {
+    let result = if let Some(lapse) = lapsed {
+        Err(lapsed_error(lapse))
+    } else if route.json_body && !is_json(&req) {
         Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             codes::UNSUPPORTED_MEDIA_TYPE,

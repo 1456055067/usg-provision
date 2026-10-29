@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 usgp-common.workspace = true
+# M3 fix round 1 (NIST-007): a WipeAuthorisation is built only from a
+# VerifiedJobPlan. Pure Rust (serde, uuid, base64ct, zeroize).
+usgp-proto.workspace = true
 thiserror.workspace = true
 
 [lints]

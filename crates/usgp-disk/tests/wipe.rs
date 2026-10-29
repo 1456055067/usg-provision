@@ -11,7 +11,7 @@ pub mod common;
 
 use std::io;
 
-use common::{GB, GIB, MIB, auth_for, facts, layout, round_down};
+use common::{GB, GIB, MIB, auth_for, facts, layout, round_down, verified_plan};
 use usgp_disk::mbr::{self, Lba0};
 use usgp_disk::wipe::{MAX_EXISTING_PARTITIONS, WIPE_REGION_BYTES};
 use usgp_disk::{
@@ -36,7 +36,7 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 fn seed_old_disk(dev: &mut MemBlockDevice, lg: u32) -> TestResult<Vec<ExistingPartition>> {
     let old = layout(SIZE, lg, lg, 1000)?;
     let wipe = WipePlan::for_disk(&old, &[])?;
-    wipe_and_write(dev, &auth_for(SIZE, lg), &wipe, &old)?;
+    wipe_and_write(dev, &auth_for(SIZE, lg)?, &wipe, &old)?;
     let block = vec![0x5A; lg as usize];
     let mut parts = Vec::new();
     for p in old.parts() {
@@ -74,7 +74,7 @@ fn old_primary_and_backup_gpt_destroyed() {
             .disk_guid;
         let new = layout(SIZE, lg, lg, 2000).unwrap();
         let wipe = WipePlan::for_disk(&new, &old_parts).unwrap();
-        let view = wipe_and_write(&mut dev, &auth_for(SIZE, lg), &wipe, &new).unwrap();
+        let view = wipe_and_write(&mut dev, &auth_for(SIZE, lg).unwrap(), &wipe, &new).unwrap();
         assert_eq!(view.disk_guid, new.disk_guid);
         // No copy of the old disk GUID survives anywhere on the disk.
         assert!(!contains(&mut dev, &old_guid.0).unwrap(), "{lg}");
@@ -95,7 +95,7 @@ fn old_mbr_destroyed() {
     assert!(matches!(mbr::read_lba0(&legacy), Lba0::Legacy(_)));
     let new = layout(SIZE, 512, 512, 3).unwrap();
     let wipe = WipePlan::for_disk(&new, &[existing(2048 * 512, 1_000_000 * 512)]).unwrap();
-    wipe_and_write(&mut dev, &auth_for(SIZE, 512), &wipe, &new).unwrap();
+    wipe_and_write(&mut dev, &auth_for(SIZE, 512).unwrap(), &wipe, &new).unwrap();
     let mut lba0 = vec![0u8; 512];
     dev.read_at(0, &mut lba0).unwrap();
     assert_eq!(mbr::read_lba0(&lba0), Lba0::Protective);
@@ -110,7 +110,7 @@ fn old_volume_heads_zeroed() {
         let old_parts = seed_old_disk(&mut dev, lg).unwrap();
         let new = layout(SIZE, lg, lg, 4000).unwrap();
         let wipe = WipePlan::for_disk(&new, &old_parts).unwrap();
-        wipe_and_write(&mut dev, &auth_for(SIZE, lg), &wipe, &new).unwrap();
+        wipe_and_write(&mut dev, &auth_for(SIZE, lg).unwrap(), &wipe, &new).unwrap();
         assert!(!contains(&mut dev, &[0x5A; 64]).unwrap(), "{lg}");
         assert!(!contains(&mut dev, &[0x77; 64]).unwrap(), "{lg}");
         // Only GPT structures are left non-zero.
@@ -171,41 +171,42 @@ fn too_many_existing_partitions_refused() {
     ));
 }
 
-fn evidence(size: u64, lg: u32) -> WipeEvidence {
-    WipeEvidence {
-        job_id: "job-1".to_owned(),
-        audit_seq: 7,
-        audit_record_hash: [1; 32],
-        disk: facts(size, lg, lg).identity,
-        size_bytes: size,
-        logical_sector: lg,
-    }
+/// NIST-007: the authorisation is built only from a verified plan, and
+/// carries the plan's job, durable record and confirmed geometry.
+#[test]
+fn authorisation_comes_from_the_verified_plan() {
+    let plan = verified_plan(SIZE, 4096, 77, [0x5c; 32]).unwrap();
+    let opened = facts(SIZE, 4096, 4096).identity;
+    let auth = WipeAuthorisation::from_verified_plan(&plan, opened.clone());
+    assert_eq!(
+        auth.evidence(),
+        &WipeEvidence {
+            job_id: common::JOB.to_owned(),
+            audit_seq: 77,
+            audit_record_hash: [0x5c; 32],
+            disk: opened,
+            size_bytes: SIZE,
+            logical_sector: 4096,
+        }
+    );
 }
 
 #[test]
 fn refused_without_durable_record_nothing_written() {
+    // A plan naming no durable record (sequence 0) never verifies, so no
+    // authorisation can be built for it.
+    assert!(verified_plan(SIZE, 512, 0, [1; 32]).is_err());
+
+    // A zero record hash verifies as a plan but is refused before any
+    // write.
     let new = layout(SIZE, 512, 512, 7).unwrap();
     let wipe = WipePlan::for_disk(&new, &[]).unwrap();
-    let cases = [
-        WipeEvidence {
-            audit_seq: 0,
-            ..evidence(SIZE, 512)
-        },
-        WipeEvidence {
-            audit_record_hash: [0; 32],
-            ..evidence(SIZE, 512)
-        },
-        WipeEvidence {
-            job_id: String::new(),
-            ..evidence(SIZE, 512)
-        },
-    ];
-    for e in cases {
-        let mut dev = MemBlockDevice::new(SIZE, 512).unwrap();
-        let r = wipe_and_write(&mut dev, &WipeAuthorisation::new(e), &wipe, &new);
-        assert!(matches!(r, Err(DiskError::NotAuthorised(_))), "{r:?}");
-        assert_eq!(dev.write_count(), 0);
-    }
+    let plan = verified_plan(SIZE, 512, 7, [0; 32]).unwrap();
+    let auth = WipeAuthorisation::from_verified_plan(&plan, facts(SIZE, 512, 512).identity);
+    let mut dev = MemBlockDevice::new(SIZE, 512).unwrap();
+    let r = wipe_and_write(&mut dev, &auth, &wipe, &new);
+    assert!(matches!(r, Err(DiskError::NotAuthorised(_))), "{r:?}");
+    assert_eq!(dev.write_count(), 0);
 }
 
 #[test]
@@ -214,25 +215,30 @@ fn identity_or_plan_mismatch_nothing_written() {
     let wipe = WipePlan::for_disk(&new, &[]).unwrap();
     // Device of another size than the confirmed disk.
     let mut other = MemBlockDevice::new(SIZE + MIB, 512).unwrap();
-    let r = wipe_and_write(&mut other, &auth_for(SIZE, 512), &wipe, &new);
+    let r = wipe_and_write(&mut other, &auth_for(SIZE, 512).unwrap(), &wipe, &new);
     assert!(matches!(r, Err(DiskError::IdentityMismatch(_))), "{r:?}");
     assert_eq!(other.write_count(), 0);
     // Authorisation for another size than the device.
     let mut dev = MemBlockDevice::new(SIZE, 512).unwrap();
-    let r = wipe_and_write(&mut dev, &auth_for(SIZE - MIB, 512), &wipe, &new);
+    let r = wipe_and_write(&mut dev, &auth_for(SIZE - MIB, 512).unwrap(), &wipe, &new);
     assert!(matches!(r, Err(DiskError::IdentityMismatch(_))), "{r:?}");
     // Sector size differs.
     let mut dev4k = MemBlockDevice::new(SIZE, 4096).unwrap();
-    let r = wipe_and_write(&mut dev4k, &auth_for(SIZE, 512), &wipe, &new);
+    let r = wipe_and_write(&mut dev4k, &auth_for(SIZE, 512).unwrap(), &wipe, &new);
     assert!(matches!(r, Err(DiskError::IdentityMismatch(_))), "{r:?}");
     assert_eq!(dev4k.write_count(), 0);
     // Layout planned for another disk size.
     let other_layout = layout(SIZE - MIB, 512, 512, 9).unwrap();
-    let r = wipe_and_write(&mut dev, &auth_for(SIZE, 512), &wipe, &other_layout);
+    let r = wipe_and_write(
+        &mut dev,
+        &auth_for(SIZE, 512).unwrap(),
+        &wipe,
+        &other_layout,
+    );
     assert!(matches!(r, Err(DiskError::IdentityMismatch(_))), "{r:?}");
     // Wipe plan built for another disk.
     let other_wipe = WipePlan::for_disk(&other_layout, &[]).unwrap();
-    let r = wipe_and_write(&mut dev, &auth_for(SIZE, 512), &other_wipe, &new);
+    let r = wipe_and_write(&mut dev, &auth_for(SIZE, 512).unwrap(), &other_wipe, &new);
     assert!(matches!(r, Err(DiskError::BadPlan(_))), "{r:?}");
     assert_eq!(dev.write_count(), 0);
 }
@@ -245,7 +251,7 @@ fn only_target_written() {
     let mut other = MemBlockDevice::new(SIZE, 512).unwrap();
     other.write_at(0, &[0x42; 512]).unwrap();
     let before = other.clone();
-    wipe_and_write(&mut target, &auth_for(SIZE, 512), &wipe, &new).unwrap();
+    wipe_and_write(&mut target, &auth_for(SIZE, 512).unwrap(), &wipe, &new).unwrap();
     assert_eq!(other.write_count(), before.write_count());
     assert_eq!(other.nonzero_lbas(), before.nonzero_lbas());
     assert!(target.write_count() > 0);
@@ -289,7 +295,7 @@ fn readback_failure_reported() {
             inner: MemBlockDevice::new(SIZE, 512).unwrap(),
             lba,
         };
-        let r = wipe_and_write(&mut dev, &auth_for(SIZE, 512), &wipe, &new);
+        let r = wipe_and_write(&mut dev, &auth_for(SIZE, 512).unwrap(), &wipe, &new);
         assert!(
             matches!(
                 r,
@@ -309,4 +315,14 @@ fn unaligned_4k_layout_sizes_use_round_down_helper() {
     let size = round_down(70 * GB, 4096);
     let l = layout(size, 4096, 4096, 12).unwrap();
     assert_eq!(l.disk_bytes(), size);
+}
+
+/// NIST-015 and BOOT-003: the open design values carry their `// POAM:`
+/// markers in the source, where the compliance scribe looks for them.
+#[test]
+fn poam_markers_present() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |f: &str| std::fs::read_to_string(src.join(f)).unwrap();
+    assert!(read("wipe.rs").contains("// POAM: OPEN-DISK-2"));
+    assert!(read("layout.rs").contains("// POAM: the file-system overhead estimate"));
 }

@@ -8,7 +8,10 @@
 //! section and refuses unknown keys, bad names, a file named for two roles
 //! and too many fonts; such a manifest refuses start-up (exit 78), as for
 //! any malformed M1 manifest. A manifest without `[pe_kit]` is exactly the
-//! M1 format and is handled as in M1. The relay never generates or edits a
+//! M1 format and is handled as in M1. A manifest with `[pe_kit]` requires
+//! `[server_feed]` with `enabled = true` in the relay configuration, or
+//! start-up is refused (exit 78; [`crate::check_kit_has_feed`],
+//! REQ-BOOT-067). The relay never generates or edits a
 //! boot configuration; the BCD is an opaque operator file, checked like
 //! every other published file (`winpe-network-boot.md` §6, REQ-PE-012).
 //!

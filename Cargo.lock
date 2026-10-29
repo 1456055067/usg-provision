@@ -1503,6 +1503,7 @@ version = "0.0.0"
 dependencies = [
  "thiserror",
  "usgp-common",
+ "usgp-proto",
 ]
 
 [[package]]
@@ -1615,6 +1616,7 @@ name = "usgp-winapi"
 version = "0.0.0"
 dependencies = [
  "usgp-crypto",
+ "usgp-disk",
  "usgp-image",
  "windows-sys 0.61.2",
 ]

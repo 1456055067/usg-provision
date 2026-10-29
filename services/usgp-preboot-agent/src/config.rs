@@ -21,6 +21,21 @@
 //   pinned public keys, one per purpose.
 // - SPEC: specs/preinstall-env.md#REQ-PE-015
 // - DECISION: docs/decisions/0020 (public configuration, no secret)
+//
+// POAM: SI-7/SC-8 (TB-1) - substituted PE. This file, the trust anchors
+// and the two pinned keys reach the device inside the operator's Windows
+// PE, which a network boot delivers over cleartext TFTP (trust boundary
+// TB-1). Nothing in M3 authenticates the PE itself, so an attacker on the
+// boot segment who substitutes the PE can substitute these anchors and
+// keys, and with them the server the agent trusts. Compensating controls
+// in M3: `usgp-cli pe agent-config` records the SHA-256 of `agent.toml`
+// and of the trust anchors in its audit event, so a substituted kit can
+// be detected by comparison; nothing is written to a disk until a person
+// at the device confirms the disk and the wipe (REQ-DISK-006); and the
+// device holds no secret to disclose (decision 0020). Target: M7 (a
+// signed or HTTPS-delivered PE kit, or anchors provisioned outside the
+// PE).
+// Register: POAM.md (NIST-003; compliance scribe).
 
 use std::path::Path;
 use std::time::Duration;

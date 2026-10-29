@@ -879,6 +879,20 @@ impl Harness {
         b.id
     }
 
+    /// An active boot service on 127.0.0.0/8 with nothing assigned, so
+    /// the test device (127.0.0.1) may open a session: no session is
+    /// opened without one (finding SEC-001).
+    pub async fn loopback_service(&self, tag: &str) -> BootServiceId {
+        let relay = self.relay_cert(&format!("relay {tag}"));
+        self.enrol_boot_service(
+            &relay,
+            &format!("Loopback {tag}"),
+            &["127.0.0.0/8"],
+            BootServiceStatus::Active,
+        )
+        .await
+    }
+
     /// Sets the packages of a boot service (reads the ETag first).
     pub async fn assign(&self, bs: BootServiceId, packages: &[&str]) -> Resp {
         let r = self

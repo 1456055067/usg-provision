@@ -16,8 +16,10 @@
 // - NIST 800-53: IA-5(2), SC-13 - certificate-only database login:
 //   `assert_certificate_only` (decision 0012).
 // - NIST 800-53: CM-5 / SI-7 - trusted files only.
-// - NIST 800-53: SC-8, IA-3 - the device listener's TLS authenticates the
-//   server only (decision 0020), FIPS provider.
+// - NIST 800-53: SC-8, SC-13 - the device listener's TLS authenticates
+//   the server only (decision 0020), FIPS provider. Devices hold no
+//   certificate: IA-3 for devices is partial (POAM in
+//   `usgp_api::device::auth`).
 // - SPEC: specs/operator-access.md#REQ-RBAC-005; plan sections 5.4, 5.5
 
 use std::collections::BTreeMap;

@@ -13,6 +13,7 @@
 //! | `usgp-server audit verify --config PATH --trusted-key P [--trusted-key P ...] [--admin-uid UID]` | 0 intact, 1 tampered, 69 unreadable, 78, 77 |
 //! | `usgp-server boot-service enrol --config PATH --cert PEM --name N --subnet CIDR [--subnet CIDR ...] [--admin-uid UID]` | 0, 78, 77, 1 |
 //! | `usgp-server boot-service disable --config PATH --id UUID [--admin-uid UID]` | 0, 78, 77, 1 |
+//! | `usgp-server boot-service raise-generation --config PATH --id UUID --to N [--admin-uid UID]` | 0, 78, 77, 1 |
 //! | `usgp-server -h` / `--help` | usage on stdout, 0 |
 //! | `usgp-server` (no args) or anything else | usage on stderr, 2 |
 //!
@@ -46,6 +47,8 @@ usage: usgp-server serve --config PATH [--admin-uid UID] [--allow-shared-admin-u
        usgp-server boot-service enrol --config PATH --cert PEM --name NAME
                                       --subnet CIDR [--subnet CIDR ...] [--admin-uid UID]
        usgp-server boot-service disable --config PATH --id UUID [--admin-uid UID]
+       usgp-server boot-service raise-generation --config PATH --id UUID --to N
+                                                 [--admin-uid UID]
        usgp-server --help
 
   --admin-uid UID           uid trusted, besides root, to own the configuration, keys,
@@ -54,6 +57,9 @@ usage: usgp-server serve --config PATH [--admin-uid UID] [--allow-shared-admin-u
                             only as root or as the owner of the configuration file
   --subnet CIDR             (boot-service enrol) a subnet the boot service serves,
                             for example 10.20.0.0/16; 1 to 64
+  --to N                    (boot-service raise-generation) the new boot-policy
+                            generation, above the current one and above every
+                            relay's (after a database restore)
   --max-unsigned-records N  (audit verify) longest run of records allowed without a
                             signed checkpoint; default from the configured cadence
                             and the number of concurrent writers
@@ -206,6 +212,15 @@ pub enum Command {
         config: ConfigArgs,
         /// Boot-service id (UUID text).
         id: String,
+    },
+    /// `boot-service raise-generation ...` (finding NIST-013).
+    BootServiceRaiseGeneration {
+        /// Configuration.
+        config: ConfigArgs,
+        /// Boot-service id (UUID text).
+        id: String,
+        /// The new generation (1 to `i64::MAX`, checked by the command).
+        to: u64,
     },
 }
 
@@ -600,6 +615,30 @@ fn boot_service(rest: &[OsString]) -> Result<Command, UsageError> {
         Some("disable") => {
             let (config, id) = config_and_id(rest)?;
             Ok(Command::BootServiceDisable { config, id })
+        }
+        Some("raise-generation") => {
+            let opts = options(
+                rest,
+                &Spec {
+                    values: &["--config", "--admin-uid", "--id", "--to"],
+                    flags: &[],
+                    repeatable: None,
+                },
+            )?;
+            let t = opts
+                .get("--to")
+                .ok_or(UsageError::Required("--to"))?
+                .to_str()
+                .ok_or(UsageError::BadValue("--to"))?;
+            if t.is_empty() || t.len() > 19 || !t.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(UsageError::BadValue("--to"));
+            }
+            let to = t.parse::<u64>().map_err(|_| UsageError::BadValue("--to"))?;
+            Ok(Command::BootServiceRaiseGeneration {
+                config: opts.config()?,
+                id: opts.text("--id")?,
+                to,
+            })
         }
         _ => Err(UsageError::Unexpected),
     }
@@ -1060,6 +1099,55 @@ mod tests {
                 config: cfg("s", None, false),
                 id: "x".into(),
             })
+        );
+        // Finding NIST-013.
+        assert_eq!(
+            p(&[
+                "boot-service",
+                "raise-generation",
+                "--config",
+                "s",
+                "--id",
+                "x",
+                "--to",
+                "1000"
+            ]),
+            Ok(Command::BootServiceRaiseGeneration {
+                config: cfg("s", None, false),
+                id: "x".into(),
+                to: 1000,
+            })
+        );
+        for (to, e) in [
+            ("-1", UsageError::BadValue("--to")),
+            ("1e3", UsageError::BadValue("--to")),
+            ("99999999999999999999", UsageError::BadValue("--to")),
+        ] {
+            assert_eq!(
+                p(&[
+                    "boot-service",
+                    "raise-generation",
+                    "--config",
+                    "s",
+                    "--id",
+                    "x",
+                    "--to",
+                    to
+                ]),
+                Err(e),
+                "{to}"
+            );
+        }
+        assert_eq!(
+            p(&[
+                "boot-service",
+                "raise-generation",
+                "--config",
+                "s",
+                "--id",
+                "x"
+            ]),
+            Err(UsageError::Required("--to"))
         );
         assert_eq!(
             p(&["boot-service", "list", "--config", "s"]),

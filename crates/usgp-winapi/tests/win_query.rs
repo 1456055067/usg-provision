@@ -205,3 +205,32 @@ fn hide_input_needs_a_console() {
         Err(e) => println!("no console: {e}"),
     }
 }
+
+/// NIST-001: the runner's administrator token holds every privilege the
+/// agent uses; checking leaves none in use, and a guard keeps one enabled
+/// only while it (or a nested guard) lives. Only `Backup` is counted here:
+/// the other tests in this binary may use the firmware privilege at the
+/// same time. Whether the token shows the privilege disabled afterwards
+/// cannot be read with the calls in the standards summaries (topic 23
+/// §10 has no query); the disable call itself must succeed.
+#[test]
+fn privileges_are_enabled_only_while_used() {
+    use usgp_winapi::privilege::{self, Privilege};
+    for p in [
+        Privilege::SystemEnvironment,
+        Privilege::Restore,
+        Privilege::Backup,
+        Privilege::Security,
+        Privilege::CreateSymbolicLink,
+    ] {
+        privilege::check_held(p).unwrap_or_else(|e| panic!("{}: {e}", p.name()));
+    }
+    assert_eq!(privilege::users(Privilege::Backup), 0);
+    let a = privilege::scoped(Privilege::Backup).expect("enable");
+    let b = privilege::scoped(Privilege::Backup).expect("nested enable");
+    assert_eq!(privilege::users(Privilege::Backup), 2);
+    drop(a);
+    assert_eq!(privilege::users(Privilege::Backup), 1);
+    drop(b);
+    assert_eq!(privilege::users(Privilege::Backup), 0);
+}

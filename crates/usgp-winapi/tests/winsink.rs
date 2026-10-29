@@ -14,9 +14,21 @@
 //! re-based junction are read back and compared byte for byte; a volume
 //! with 8.3 names disabled fails by name.
 //!
+//! The VHD is made with a DiskPart script run by `diskpart /s`: `create
+//! vdisk file= maximum= type=expandable`, `attach vdisk`, `convert gpt`,
+//! `create partition primary`, `format fs=ntfs quick label=`, `assign
+//! letter=` and `detach vdisk`, as `specs/standards/winpe.md` §11 (SR-7)
+//! describes them. `/s` is OPEN-WINPE-2 and the exit codes OPEN-WINPE-3,
+//! so the exit status is only a first filter; the test relies on what it
+//! reads back (the volume at the letter, its file system, the applied
+//! tree). `select vdisk file=` is not itself summarised in §11 (a reading
+//! there: a VHD must be selected before it is attached); test harness
+//! only. The letter is any free one from P to W (a test choice).
+//!
 //! COMPLIANCE MAPPING:
 //! - NIST 800-53: SA-11 (Developer Testing and Evaluation), SI-7
 //! - SPEC: specs/preinstall-env.md REQ-PE-016, REQ-PE-017
+//! - SPEC: specs/standards/winpe.md §11 (DiskPart; OPEN-WINPE-2, -3)
 
 #![cfg(windows)]
 

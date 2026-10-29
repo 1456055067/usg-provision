@@ -4,16 +4,21 @@
 //! Order, and what each step guarantees before the next starts:
 //!
 //! 1. `verify_content`: the layout is planned from the signed disk facts
-//!    (no I/O) to fix the apply budget; then every chunk the edition needs
-//!    is fetched, verified and discarded, and the image is checked as an
-//!    apply would ([`verify_pass`]). A tampered chunk, an unsupported
-//!    image or a too-large image fails here, **before any disk write**
-//!    (decision 0021 item 4; REQ-JOB-008).
+//!    (no I/O) to fix the apply budget: the largest image the Windows
+//!    partition takes with the space reserve (file-system overhead
+//!    estimate and 16 GiB free; [`WindowsUefiLayout::image_budget_bytes`],
+//!    decision 0023 item 3). Then every chunk the edition needs is fetched, verified and
+//!    discarded, and the image is checked as an apply would
+//!    ([`verify_pass`]). A tampered chunk, an unsupported image or a
+//!    too-large image fails here, **before any disk write** (decision 0021
+//!    item 4; REQ-JOB-008).
 //! 2. `partition_format`: the planned disk is opened; its facts must equal
 //!    the signed plan's and still be eligible. Only then is the
 //!    [`WipeAuthorisation`] built, from the verified plan's durable audit
 //!    record (DEC-0018 item 7), and the GPT written and read back
-//!    ([`wipe_and_write`]). The volumes are formatted and checked.
+//!    ([`wipe_and_write`]). The disk-size check before the wipe uses
+//!    [`minimum_disk_bytes`], which applies the same space reserve. The
+//!    volumes are formatted and checked.
 //! 3. `apply_image`: the edition is applied to the Windows volume, every
 //!    chunk fetched and verified again.
 //! 4. `make_bootable`: boot files (BCDBoot through the platform), then the
@@ -32,9 +37,12 @@
 // - NIST 800-53: SI-7, SI-7(1), SI-7(6) - verify plan, then all content,
 //   before any write; verify again during apply.
 // - NIST 800-53: AC-3 (Access Enforcement) - WipeAuthorisation built only
-//   here, only from a VerifiedJobPlan, after the opened disk matches it.
+//   here, after the opened disk matches the plan; its only constructor
+//   takes a VerifiedJobPlan (sealed in usgp-disk, NIST-007).
 // - NIST 800-53: AU-10 (Non-repudiation, basis) - the authorisation names
-//   the audit sequence and record hash of `disk.wipe.authorised`.
+//   the audit sequence and record hash of `disk.wipe.authorised`; the
+//   person who confirms at the device is not individually identified
+//   (NIST-005).
 // - NIST 800-53: SC-5 (Denial of Service Protection) - step timeouts,
 //   stall detection, bounded retries.
 // - NIST 800-53: SI-11 (Error Handling) - named, persistent failures.
@@ -53,8 +61,8 @@ use usgp_crypto::CryptoProvider;
 use usgp_disk::layout::{PartRole, WindowsUefiLayout, minimum_disk_bytes};
 use usgp_disk::uefi::UefiLimits;
 use usgp_disk::{
-    DiskError, DiskFacts, DiskIdentity, EligibilityPolicy, WipeAuthorisation, WipeEvidence,
-    WipePlan, assess, wipe_and_write,
+    DiskError, DiskFacts, DiskIdentity, EligibilityPolicy, WipeAuthorisation, WipePlan, assess,
+    wipe_and_write,
 };
 use usgp_image::apply::{ApplyError, ApplyLimits, ApplyPreview, ApplyRoot, apply, verify_pass};
 use usgp_proto::disk::{
@@ -410,7 +418,7 @@ impl<'a> Run<'_, 'a> {
         let s = Step::VERIFY_CONTENT;
         let watch = self.start(s);
         let layout = self.plan_layout(s, &p.disk)?;
-        let limits = ApplyLimits::new(layout.windows_bytes());
+        let limits = apply_limits(s, &layout)?;
         // The apply root is fixed now, before the wipe, so the verify pass
         // re-bases links exactly as the apply will (decision 0022).
         let root = windows_root(s, platform)?;
@@ -647,15 +655,9 @@ impl<'a> Run<'_, 'a> {
 
         // The only place a WipeAuthorisation is built: from the verified
         // plan's durable `disk.wipe.authorised` record and the disk the
-        // opened device was just checked to be (DEC-0018 item 7).
-        let auth = WipeAuthorisation::new(WipeEvidence {
-            job_id: p.job_id.to_string(),
-            audit_seq: p.wipe.audit_seq,
-            audit_record_hash: p.wipe.record_hash.0,
-            disk: target.facts.identity.clone(),
-            size_bytes: p.disk.size_bytes,
-            logical_sector: p.disk.logical_sector,
-        });
+        // opened device was just checked to be (DEC-0018 item 7). The
+        // constructor takes only a VerifiedJobPlan (NIST-007).
+        let auth = WipeAuthorisation::from_verified_plan(self.plan, target.facts.identity.clone());
         let mut device = target.device;
         wipe_and_write(&mut *device, &auth, &wipe, layout)
             .map_err(|e| disk_failure(s, &disk_text, &e))?;
@@ -676,6 +678,23 @@ impl<'a> Run<'_, 'a> {
             .ok_or_else(|| local(s, code::LAYOUT_FAILED, "layout cannot be reported", true))?;
         Ok((vols, report))
     }
+}
+
+/// The apply limits for `layout`: the budget keeps the space reserve free
+/// (file-system overhead estimate and 16 GiB; decision 0023 item 3,
+/// BOOT-003), by the same formula as `minimum_disk_bytes` in step 2.
+fn apply_limits(s: Step, layout: &WindowsUefiLayout) -> Result<ApplyLimits, JobFailure> {
+    layout
+        .image_budget_bytes()
+        .map(ApplyLimits::new)
+        .ok_or_else(|| {
+            local(
+                s,
+                code::LAYOUT_FAILED,
+                "the Windows partition cannot hold the space reserve",
+                false,
+            )
+        })
 }
 
 /// A failure of category `local`.
@@ -1003,6 +1022,33 @@ mod tests {
             hosts_boot_environment: false,
             partitions: Vec::new(),
         }
+    }
+
+    /// BOOT-003 / decision 0023 item 3: the budget checked before the wipe
+    /// is the raw Windows partition less the space reserve, and agrees
+    /// with the disk minimum used in step 2.
+    #[test]
+    fn apply_budget_keeps_the_space_reserve() {
+        let f = facts();
+        let mut n = 0u8;
+        let layout = WindowsUefiLayout::compute(&f, 600 << 20, &mut |b: &mut [u8]| {
+            for x in b.iter_mut() {
+                n = n.wrapping_add(1);
+                *x = n;
+            }
+        })
+        .unwrap();
+        let limits = apply_limits(Step::VERIFY_CONTENT, &layout).unwrap();
+        let budget = limits.max_total_bytes;
+        let reserve = usgp_disk::layout::WINDOWS_FREE_BYTES + usgp_disk::fs_overhead_bytes(budget);
+        assert!(budget + reserve <= layout.windows_bytes());
+        assert!(budget < layout.windows_bytes() - (16 << 30));
+        // An image at the budget passes the step-2 minimum on this disk;
+        // one byte more does not.
+        let min = minimum_disk_bytes(512, 600 << 20, budget).unwrap();
+        assert!(assess(&f, &EligibilityPolicy::default(), min).is_ok());
+        let over = minimum_disk_bytes(512, 600 << 20, budget + 1).unwrap();
+        assert!(over > f.size_bytes);
     }
 
     #[test]

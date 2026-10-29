@@ -15,7 +15,7 @@
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SA-11 (Developer Testing and Evaluation)
-// - DECISION: docs/decisions/0002 (fuzz harness), 0006 item 4 (synthetic
+// - DECISION: docs/decisions/0002 (fuzz harness), 0006 items 1-3 (synthetic
 //   WIM files only)
 
 use std::path::{Path, PathBuf};
@@ -949,6 +949,275 @@ fn boot_policy_seeds() -> Seeds {
     ]
 }
 
+/// Response heads for `agent_http_head` (selector 0) and Content-Length
+/// values (selector 1), written here (NIST-011).
+fn http_head_seeds() -> Seeds {
+    vec![
+        (
+            "nist011-head-ok",
+            with_sel(
+                0,
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n",
+            ),
+        ),
+        (
+            "nist011-head-close-media",
+            with_sel(
+                0,
+                b"HTTP/1.1 206 Partial Content\r\nConnection: keep-alive, Close\r\nContent-Type:  Application/Octet-Stream \r\nContent-Length: 8388608\r\n\r\nbody",
+            ),
+        ),
+        (
+            "nist011-head-error-status",
+            with_sel(
+                0,
+                b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nContent-Type: application/json\r\n\r\n",
+            ),
+        ),
+        (
+            "nist011-head-partial",
+            with_sel(0, b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"),
+        ),
+        (
+            "nist011-head-two-lengths",
+            with_sel(
+                0,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\n",
+            ),
+        ),
+        (
+            "nist011-head-chunked",
+            with_sel(
+                0,
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n",
+            ),
+        ),
+        (
+            "nist011-head-http10",
+            with_sel(0, b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n"),
+        ),
+        (
+            "nist011-head-no-length",
+            with_sel(0, b"HTTP/1.1 204 No Content\r\n\r\n"),
+        ),
+        ("nist011-length-max", with_sel(1, b"9999999999999999999")),
+        ("nist011-length-20-digits", with_sel(1, b"18446744073709551615")),
+        ("nist011-length-sign", with_sel(1, b"+5")),
+        ("nist011-length-hex", with_sel(1, b"0x10")),
+        ("nist011-length-zero", with_sel(1, b"0")),
+    ]
+}
+
+/// A SID (topic 24 §7): revision 1, count, 6-octet authority (big
+/// endian), then `count` little-endian sub-authorities.
+fn sid(authority: u8, subs: &[u32]) -> Vec<u8> {
+    let mut v = vec![
+        1,
+        u8::try_from(subs.len()).unwrap_or(u8::MAX),
+        0,
+        0,
+        0,
+        0,
+        0,
+        authority,
+    ];
+    for s in subs {
+        v.extend_from_slice(&s.to_le_bytes());
+    }
+    v
+}
+
+/// An ACL (topic 24 §8): revision 2, `AclSize`, `AceCount`, then the ACEs.
+/// Each ACE is an access-allowed header (type 0, flags 0, size), a mask
+/// and a SID.
+fn acl(aces: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (mask, s) in aces {
+        let size = u16::try_from(8 + s.len()).unwrap_or(u16::MAX);
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(&mask.to_le_bytes());
+        body.extend_from_slice(s);
+    }
+    let size = u16::try_from(8 + body.len()).unwrap_or(u16::MAX);
+    let count = u16::try_from(aces.len()).unwrap_or(u16::MAX);
+    let mut v = vec![2, 0];
+    v.extend_from_slice(&size.to_le_bytes());
+    v.extend_from_slice(&count.to_le_bytes());
+    v.extend_from_slice(&[0, 0]);
+    v.extend_from_slice(&body);
+    v
+}
+
+/// A self-relative descriptor (topic 24 §9): 20-octet header, then the
+/// parts in the order given, each at the offset it lands on.
+fn descriptor(
+    control: u16,
+    owner: Option<&[u8]>,
+    group: Option<&[u8]>,
+    sacl: Option<&[u8]>,
+    dacl: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut v = vec![0u8; 20];
+    v[0] = 1;
+    v[2..4].copy_from_slice(&control.to_le_bytes());
+    for (field, part) in [(4usize, owner), (8, group), (12, sacl), (16, dacl)] {
+        if let Some(p) = part {
+            let off = u32::try_from(v.len()).unwrap_or(u32::MAX);
+            v[field..field + 4].copy_from_slice(&off.to_le_bytes());
+            v.extend_from_slice(p);
+        }
+    }
+    v
+}
+
+/// Self-relative descriptors for `winapi_sd` (SEC-004), written here.
+fn sd_seeds() -> Seeds {
+    const SELF_RELATIVE: u16 = 0x8000;
+    const DACL_PRESENT: u16 = 0x0004;
+    const SACL_PRESENT: u16 = 0x0010;
+    let admins = sid(5, &[32, 544]);
+    let system = sid(5, &[18]);
+    let users = sid(5, &[32, 545]);
+    let dacl = acl(&[(0x001F_01FF, system.clone()), (0x0012_00A9, users.clone())]);
+    let sacl = acl(&[(0x0001_0000, admins.clone())]);
+    let full = descriptor(
+        SELF_RELATIVE | DACL_PRESENT | SACL_PRESENT,
+        Some(&admins),
+        Some(&system),
+        Some(&sacl),
+        Some(&dacl),
+    );
+    let mut ace_past = descriptor(
+        SELF_RELATIVE | DACL_PRESENT,
+        Some(&admins),
+        None,
+        None,
+        Some(&dacl),
+    );
+    // AceCount one more than the ACEs present: the third header is past AclSize.
+    let dacl_at = ace_past.len() - dacl.len();
+    ace_past[dacl_at + 4] = 3;
+    let mut sid16 = sid(5, &[0; 16]);
+    sid16[1] = 16;
+    let mut truncated = full.clone();
+    truncated.truncate(full.len() - 4);
+    vec![
+        (
+            "sec004-sd-header-only",
+            descriptor(SELF_RELATIVE, None, None, None, None),
+        ),
+        (
+            "sec004-sd-owner-group-dacl",
+            descriptor(
+                SELF_RELATIVE | DACL_PRESENT,
+                Some(&admins),
+                Some(&system),
+                None,
+                Some(&dacl),
+            ),
+        ),
+        ("sec004-sd-full", full),
+        (
+            "sec004-sd-null-dacl",
+            descriptor(
+                SELF_RELATIVE | DACL_PRESENT,
+                Some(&admins),
+                None,
+                None,
+                None,
+            ),
+        ),
+        ("sec004-sd-truncated", truncated),
+        ("sec004-sd-ace-past-acl", ace_past),
+        (
+            "sec004-sd-sid-16-subs",
+            descriptor(SELF_RELATIVE, Some(&sid16), None, None, None),
+        ),
+        (
+            "sec004-sd-dacl-without-flag",
+            descriptor(SELF_RELATIVE, None, None, None, Some(&dacl)),
+        ),
+        (
+            "sec004-sd-absolute",
+            descriptor(0, Some(&admins), None, None, None),
+        ),
+    ]
+}
+
+/// A `REPARSE_DATA_BUFFER` (topic 24 §2 to §5): tag, data length,
+/// reserved, then the member's name fields, a symbolic link's flags, and
+/// the path buffer holding the substitute name then the print name.
+fn reparse(tag: u32, flags: Option<u32>, sub: &str, print: &str) -> Vec<u8> {
+    let utf16 = |s: &str| {
+        s.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>()
+    };
+    let (s, p) = (utf16(sub), utf16(print));
+    let len16 = |n: usize| u16::try_from(n).unwrap_or(u16::MAX).to_le_bytes();
+    let mut data = Vec::new();
+    data.extend_from_slice(&[0, 0]);
+    data.extend_from_slice(&len16(s.len()));
+    data.extend_from_slice(&len16(s.len()));
+    data.extend_from_slice(&len16(p.len()));
+    if let Some(f) = flags {
+        data.extend_from_slice(&f.to_le_bytes());
+    }
+    data.extend_from_slice(&s);
+    data.extend_from_slice(&p);
+    let mut v = tag.to_le_bytes().to_vec();
+    v.extend_from_slice(&len16(data.len()));
+    v.extend_from_slice(&[0, 0]);
+    v.extend_from_slice(&data);
+    v
+}
+
+/// Reparse buffers for `winapi_reparse` (SEC-004), written here.
+fn reparse_seeds() -> Seeds {
+    const SYMLINK: u32 = 0xA000_000C;
+    const MOUNT_POINT: u32 = 0xA000_0003;
+    let mut reserved = reparse(SYMLINK, Some(1), "a\\b", "a\\b");
+    reserved[6] = 1;
+    let mut long_len = reparse(MOUNT_POINT, None, "\\??\\T:\\dir", "T:\\dir");
+    long_len[4] = long_len[4].wrapping_add(2);
+    let mut odd = reparse(SYMLINK, Some(0), "x", "x");
+    odd[8] = 1;
+    vec![
+        (
+            "sec004-reparse-symlink-relative",
+            reparse(SYMLINK, Some(1), "..\\x\\y.txt", "..\\x\\y.txt"),
+        ),
+        (
+            "sec004-reparse-symlink-absolute",
+            reparse(SYMLINK, Some(0), "\\??\\T:\\a\\b.txt", "T:\\a\\b.txt"),
+        ),
+        (
+            "sec004-reparse-mount-point",
+            reparse(MOUNT_POINT, None, "\\??\\T:\\dir", "T:\\dir"),
+        ),
+        (
+            "sec004-reparse-empty-names",
+            reparse(MOUNT_POINT, None, "", ""),
+        ),
+        ("sec004-reparse-reserved-set", reserved),
+        ("sec004-reparse-length-mismatch", long_len),
+        ("sec004-reparse-odd-offset", odd),
+        (
+            "sec004-reparse-bad-flags",
+            reparse(SYMLINK, Some(2), "x", "x"),
+        ),
+        (
+            "sec004-reparse-other-tag",
+            reparse(0x8000_0017, None, "x", "x"),
+        ),
+        (
+            "sec004-reparse-header-only",
+            vec![0x0C, 0, 0, 0xA0, 0, 0, 0, 0],
+        ),
+    ]
+}
+
 fn main() -> ExitCode {
     let Some(root) = std::env::args_os().nth(1).map(PathBuf::from) else {
         eprintln!("usage: gen_seeds_m3 <corpus-root>");
@@ -969,6 +1238,9 @@ fn main() -> ExitCode {
             ("agent_config", agent_config_seeds()?),
             ("relay_feed_url", feed_url_seeds()),
             ("relay_boot_policy", boot_policy_seeds()),
+            ("agent_http_head", http_head_seeds()),
+            ("winapi_sd", sd_seeds()),
+            ("winapi_reparse", reparse_seeds()),
         ])
     };
     let result = all().and_then(|targets| {

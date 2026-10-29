@@ -22,6 +22,10 @@
 //! anchors (CM-5, AC-6). `--allow-shared-admin-uid` overrides
 //! this; `relay.start` then records `allow_shared_admin_uid=true`. The
 //! options after PATH may come in either order, each at most once.
+//!
+//! Both `--config` and `--check-config` exit 78 when the boot manifest has
+//! a `[pe_kit]` and the configuration has no `[server_feed]` with
+//! `enabled = true` (REQ-BOOT-067; [`crate::check_kit_has_feed`]).
 
 use std::ffi::OsString;
 use std::path::PathBuf;

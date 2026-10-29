@@ -55,7 +55,7 @@ use usgp_disk::{Bus, DiskFacts, DiskIdentity, EligibilityPolicy, ExistingPartiti
 use usgp_proto::device::{DeviceArch, FirmwareKind, MacAddress, SecureBootState};
 use usgp_proto::disk::PartitionKind;
 
-use crate::disks::{DiskEntry, FoundDisk};
+use crate::disks::{Discriminator, DiskEntry, FoundDisk};
 use crate::host::{Host, HostError, HostFacts, PowerAction, WaitBudget};
 
 /// Largest simulation file read.
@@ -272,6 +272,8 @@ impl Host for SimHost {
                     facts,
                     kinds: d.kinds.clone(),
                     volumes_known: d.volumes_known,
+                    // The simulation has no device path or table identity.
+                    discriminator: Discriminator::default(),
                 })
             })
             .collect()

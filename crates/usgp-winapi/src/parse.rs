@@ -852,7 +852,7 @@ pub fn split_multi_sz(units: &[u16]) -> Result<Vec<String>> {
 /// Field offsets and constants for checking a self-relative security
 /// descriptor, all from windows-sys (`SECURITY_DESCRIPTOR_RELATIVE`, `SID`,
 /// `ACL`, `ACE_HEADER` and the control and revision constants).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecurityDescriptorLayout {
     /// Offset of `Revision`.
     pub revision: usize,
@@ -1057,7 +1057,7 @@ fn within(buf: &[u8], off: usize, len: usize) -> Result<()> {
 
 /// Offsets of `REPARSE_DATA_BUFFER` and its symbolic-link and mount-point
 /// members, and the two tag values, from windows-sys.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReparseLayout {
     /// Offset of `ReparseTag`.
     pub tag: usize,
@@ -1082,7 +1082,7 @@ pub struct ReparseLayout {
 }
 
 /// Offsets of the four name fields and the path buffer of one member.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NameFields {
     /// `SubstituteNameOffset`.
     pub sub_offset: usize,
@@ -1210,6 +1210,72 @@ pub fn check_reparse_buffer(
         u16_at(data, fields.print_length)?,
     )?;
     Ok(kind)
+}
+
+/// Synthetic layouts for exercising [`check_security_descriptor`] and
+/// [`check_reparse_buffer`] off Windows: the unit tests here and the
+/// `winapi_sd` and `winapi_reparse` fuzz targets (SEC-004). Test and fuzz
+/// use only (feature `parse-testkit`); production code always passes the
+/// windows-sys layouts of `crate::layout` (OPEN-WAPI-1).
+///
+/// On Windows, `layout.rs`'s tests assert that these equal the
+/// windows-sys values, so what is fuzzed is the shape the agent checks.
+#[cfg(any(test, feature = "parse-testkit"))]
+pub mod testkit {
+    use super::{NameFields, ReparseLayout, SecurityDescriptorLayout};
+
+    /// `SECURITY_DESCRIPTOR_RELATIVE`, `SID`, `ACL` and `ACE_HEADER`
+    /// offsets and constants, as in `crate::layout::SECURITY_DESCRIPTOR`.
+    pub const SECURITY_DESCRIPTOR: SecurityDescriptorLayout = SecurityDescriptorLayout {
+        revision: 0,
+        control: 2,
+        owner: 4,
+        group: 8,
+        sacl: 12,
+        dacl: 16,
+        fixed_len: 20,
+        sd_revision: 1,
+        self_relative: 0x8000,
+        sacl_present: 0x0010,
+        dacl_present: 0x0004,
+        sid_revision_field: 0,
+        sid_revision: 1,
+        sid_count: 1,
+        sid_max_sub_authorities: 15,
+        sid_sub_authority: 8,
+        acl_size: 2,
+        acl_ace_count: 4,
+        acl_fixed_len: 8,
+        ace_size: 2,
+        ace_header_len: 4,
+    };
+
+    /// `REPARSE_DATA_BUFFER` offsets and tags, as in
+    /// `crate::layout::REPARSE`.
+    pub const REPARSE: ReparseLayout = ReparseLayout {
+        tag: 0,
+        data_length: 4,
+        reserved: 6,
+        data: 8,
+        symlink: NameFields {
+            sub_offset: 0,
+            sub_length: 2,
+            print_offset: 4,
+            print_length: 6,
+            path_buffer: 12,
+        },
+        symlink_flags: 8,
+        mount_point: NameFields {
+            sub_offset: 0,
+            sub_length: 2,
+            print_offset: 4,
+            print_length: 6,
+            path_buffer: 8,
+        },
+        symlink_tag: 0xA000_000C,
+        mount_point_tag: 0xA000_0003,
+        relative_flag: 1,
+    };
 }
 
 #[cfg(test)]
@@ -1619,29 +1685,7 @@ mod tests {
         assert_eq!(split_multi_sz(&[]), Err(ParseError::Unterminated));
     }
 
-    const SDL: SecurityDescriptorLayout = SecurityDescriptorLayout {
-        revision: 0,
-        control: 2,
-        owner: 4,
-        group: 8,
-        sacl: 12,
-        dacl: 16,
-        fixed_len: 20,
-        sd_revision: 1,
-        self_relative: 0x8000,
-        sacl_present: 0x0010,
-        dacl_present: 0x0004,
-        sid_revision_field: 0,
-        sid_revision: 1,
-        sid_count: 1,
-        sid_max_sub_authorities: 15,
-        sid_sub_authority: 8,
-        acl_size: 2,
-        acl_ace_count: 4,
-        acl_fixed_len: 8,
-        ace_size: 2,
-        ace_header_len: 4,
-    };
+    const SDL: SecurityDescriptorLayout = testkit::SECURITY_DESCRIPTOR;
 
     /// Header; owner SID (1 sub-authority, 12 bytes) at 20; DACL at 32
     /// with one 16-byte ACE (size 24).
@@ -1711,30 +1755,7 @@ mod tests {
         }
     }
 
-    const RL: ReparseLayout = ReparseLayout {
-        tag: 0,
-        data_length: 4,
-        reserved: 6,
-        data: 8,
-        symlink: NameFields {
-            sub_offset: 0,
-            sub_length: 2,
-            print_offset: 4,
-            print_length: 6,
-            path_buffer: 12,
-        },
-        symlink_flags: 8,
-        mount_point: NameFields {
-            sub_offset: 0,
-            sub_length: 2,
-            print_offset: 4,
-            print_length: 6,
-            path_buffer: 8,
-        },
-        symlink_tag: 0xA000_000C,
-        mount_point_tag: 0xA000_0003,
-        relative_flag: 1,
-    };
+    const RL: ReparseLayout = testkit::REPARSE;
 
     /// A complete buffer: header, name fields, optional flags, names.
     fn reparse(tag: u32, sub: &str, print: &str, flags: Option<u32>) -> Vec<u8> {

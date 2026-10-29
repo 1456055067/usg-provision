@@ -26,7 +26,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use usgp_deploy::{JobFailure, JobView, ViewEvent};
-use usgp_proto::device::DevicePackageV1;
+use usgp_proto::device::{DevicePackageV1, MacAddress};
 use usgp_proto::progress::{FailureCategory, Step};
 use usgp_proto::{DisplayCode, JobId};
 use zeroize::Zeroizing;
@@ -272,9 +272,12 @@ pub fn disks_screen(package: &str, inv: &Inventory, note: Option<&str>) -> Strin
     s
 }
 
-/// The separate wipe confirmation (REQ-DISK-006, REQ-TGT-006).
+/// The separate wipe confirmation (REQ-DISK-006, REQ-TGT-006). `macs` are
+/// the network adapter addresses this device claimed in its hello: after
+/// a successful install the server stops network boot for them, so they
+/// are shown here (decision 0023 item 2).
 #[must_use]
-pub fn wipe_screen(p: &DevicePackageV1, e: &DiskEntry) -> String {
+pub fn wipe_screen(p: &DevicePackageV1, e: &DiskEntry, macs: &[MacAddress]) -> String {
     let mut s = header("Confirm: erase the disk and install");
     let f = &e.found.facts;
     let _ = writeln!(s, "Package:  {}", p.name.as_str());
@@ -316,6 +319,16 @@ pub fn wipe_screen(p: &DevicePackageV1, e: &DiskEntry) -> String {
                 i.saturating_add(1),
                 gb(part.size_bytes)
             );
+        }
+    }
+    if !macs.is_empty() {
+        let _ = writeln!(
+            s,
+            "\nNetwork adapters of this device (after a successful install, network boot \
+             is stopped for these addresses):"
+        );
+        for m in macs {
+            let _ = writeln!(s, "  {m}");
         }
     }
     let _ = write!(

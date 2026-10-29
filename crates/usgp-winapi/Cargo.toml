@@ -19,11 +19,22 @@ usgp-crypto = { workspace = true, optional = true }
 # so the rest of the crate stays checkable for the Windows target there.
 usgp-image = { workspace = true, optional = true }
 
+# tests/vhd_disk.rs only: GPT-OBS-001, reading back a DiskPart-written GPT
+# with usgp-disk's reader (REL-M3-WU15-001). usgp-disk is pure Rust
+# (usgp-common and thiserror), so the Windows-target check from macOS
+# still works. Never a normal dependency.
+[target.'cfg(windows)'.dev-dependencies]
+usgp-disk.workspace = true
+
 [features]
 # Builds examples/tree_manifest.rs (plan WU-5; S16 and the fidelity check).
 manifest-tool = ["dep:usgp-crypto"]
 # WinSink (src/winsink.rs). The pre-boot agent enables it.
 sink = ["dep:usgp-image"]
+# `parse::testkit`: synthetic descriptor and reparse layouts for the
+# `winapi_sd` and `winapi_reparse` fuzz targets (SEC-004). Test and fuzz
+# only; adds no dependency; never enabled by a release build.
+parse-testkit = []
 # tests/winsink.rs: the synthetic-WIM builder and SHA-256 for the manifest.
 # Tests only; never enabled by a release build.
 sink-testkit = ["sink", "manifest-tool", "usgp-image/testkit"]

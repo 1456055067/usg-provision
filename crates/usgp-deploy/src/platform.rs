@@ -129,11 +129,17 @@ pub struct VolumeSpec {
     pub label: &'static str,
 }
 
-/// Volume label of the ESP (plan section 1.2(c)).
+// [project rule] (plan section 1.2(c); CR-002): the three volume labels
+// are this project's choice. Microsoft's UEFI/GPT deployment sample uses
+// the same labels, "System", "Windows" and "Recovery"
+// (`specs/standards/winpe.md` §11, SRC-087); that is not a Microsoft
+// requirement.
+
+/// Volume label of the ESP (plan section 1.2(c); [project rule]).
 pub const LABEL_SYSTEM: &str = "System";
-/// Volume label of the Windows volume.
+/// Volume label of the Windows volume ([project rule]).
 pub const LABEL_WINDOWS: &str = "Windows";
-/// Volume label of the recovery volume.
+/// Volume label of the recovery volume ([project rule]).
 pub const LABEL_RECOVERY: &str = "Recovery";
 
 impl VolumeSpec {

@@ -26,7 +26,7 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 fn try_written(l: &WindowsUefiLayout) -> TestResult<MemBlockDevice> {
     let mut dev = MemBlockDevice::new(l.disk_bytes(), l.block)?;
     let wipe = WipePlan::for_disk(l, &[])?;
-    wipe_and_write(&mut dev, &auth_for(l.disk_bytes(), l.block), &wipe, l)?;
+    wipe_and_write(&mut dev, &auth_for(l.disk_bytes(), l.block)?, &wipe, l)?;
     Ok(dev)
 }
 
@@ -489,7 +489,7 @@ fn loopback_file_roundtrip() {
         {
             let mut dev = FileBlockDevice::create(&path, size, lg).unwrap();
             let wipe = WipePlan::for_disk(&l, &[]).unwrap();
-            wipe_and_write(&mut dev, &auth_for(size, lg), &wipe, &l).unwrap();
+            wipe_and_write(&mut dev, &auth_for(size, lg).unwrap(), &wipe, &l).unwrap();
         }
         let mut dev = FileBlockDevice::open(&path, lg, false).unwrap();
         let v = parse(&mut dev).unwrap();

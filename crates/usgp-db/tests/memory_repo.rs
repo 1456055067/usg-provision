@@ -184,6 +184,18 @@ mod t {
     }
 
     #[tokio::test]
+    async fn m3_session_scopes_and_idle() {
+        let (s, a) = setup().await;
+        m3::flow_session_scopes_and_idle(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m3_raise_generation() {
+        let (s, a) = setup().await;
+        m3::flow_raise_generation(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
     async fn m3_expiry_is_audited() {
         let (s, a) = setup().await;
         m3::flow_expiry_is_audited(&s, &a).await;

@@ -5,7 +5,7 @@ builder (`WimBuilder::tree_image`, feature `testkit`) and its link-data
 helpers (`abs_link_data`, `rel_link_data`). None comes from a
 third-party WIM file or tool, from Windows media, or from any deployment
 of another product (fuzz/README.md, seed origin rule; decision 0006
-item 4). The DISM-made samples are **not** used as seeds.
+items 1-3). The DISM-made samples are **not** used as seeds.
 
 A seed that starts with the WIM signature is a whole file (image 1, root
 `W:\`); any other starts with a selector octet (see

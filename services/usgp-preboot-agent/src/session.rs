@@ -45,7 +45,8 @@ use usgp_crypto::CryptoProvider;
 use usgp_deploy::{Clock, Engine, PlanKeys, SignedJob, verify_plan};
 use usgp_proto::device::{
     ChoosePackageV1, ConfirmV1, DeviceArch, DeviceHelloV1, DevicePackageV1, EndReason,
-    EndSessionV1, FirmwareKind, SCHEMA_V1, SessionOpenedV1, SessionState, WipeConfirmation,
+    EndSessionV1, FirmwareKind, MacAddress, SCHEMA_V1, SessionOpenedV1, SessionState,
+    WipeConfirmation,
 };
 use usgp_proto::job_plan::{JobPlanV1, PlanExpectation};
 use usgp_proto::{AgentNonce, AgentVersion, AuthCode, DiskToken, JobId, MacList, codes};
@@ -76,6 +77,9 @@ pub enum StopReason {
     SessionRefused,
     /// The session expired or ended on the server.
     SessionEnded,
+    /// The server opened no session: no active boot service serves this
+    /// device's network (403 `forbidden` on open; decision 0023, SEC-001).
+    NoBootService,
     /// The agent could not go on (the text says why).
     AgentError(String),
 }
@@ -192,6 +196,21 @@ impl Agent<'_> {
         };
         let opened = match self.api.open(&hello) {
             Ok(o) => o,
+            Err(e) if e.is(403, codes::FORBIDDEN) => {
+                return self.stop(
+                    "This boot service is not set up for this device",
+                    &[
+                        "The provisioning server did not open a session: no boot service is \
+                         set up for the network this device started on."
+                            .to_owned(),
+                        "Ask an operator to set up a boot service for this network, then \
+                         restart the device."
+                            .to_owned(),
+                        "Nothing was written to any disk.".to_owned(),
+                    ],
+                    Outcome::Stopped(StopReason::NoBootService),
+                );
+            }
             Err(e) => {
                 let why = e.describe();
                 return self.stop(
@@ -234,7 +253,7 @@ impl Agent<'_> {
                 let Some(entry) = inv.by_token(token).cloned() else {
                     continue;
                 };
-                match self.confirm_wipe(&pkg, &entry) {
+                match self.confirm_wipe(&pkg, &entry, hello.macs.as_slice()) {
                     Ok(Flow::Next(())) => {}
                     Ok(Flow::Back) => continue,
                     Err(end) => return end,
@@ -596,9 +615,14 @@ impl Agent<'_> {
     }
 
     /// The separate wipe confirmation (REQ-DISK-006).
-    fn confirm_wipe(&mut self, pkg: &DevicePackageV1, e: &DiskEntry) -> Result<Flow<()>, Ending> {
+    fn confirm_wipe(
+        &mut self,
+        pkg: &DevicePackageV1,
+        e: &DiskEntry,
+        macs: &[MacAddress],
+    ) -> Result<Flow<()>, Ending> {
         loop {
-            self.console.show(&ui::wipe_screen(pkg, e));
+            self.console.show(&ui::wipe_screen(pkg, e, macs));
             // Idle past the limit, or EOF: cancel (nothing written).
             let line = match self.console.line(MAX_IDLE_WAIT) {
                 Ok(Some(l)) => l,
@@ -649,6 +673,23 @@ impl Agent<'_> {
                 return Ok(self.stop(
                     "The install did not start",
                     &[why.clone(), "Nothing was written to any disk.".to_owned()],
+                    Outcome::NotConfirmed(why),
+                ));
+            }
+            // Decision 0023 item 2: a MAC this device claims already has a
+            // live boot stop or a running job. Choosing again cannot help.
+            Err(f) if f.is(409, codes::IN_USE) => {
+                let why = "One of this device's network adapters is already in a provisioning \
+                           job or stopped from network boot, so the server did not start the \
+                           install."
+                    .to_owned();
+                return Ok(self.stop(
+                    "The install did not start",
+                    &[
+                        why.clone(),
+                        "An operator can check the device's jobs and boot stops.".to_owned(),
+                        "Nothing was written to any disk.".to_owned(),
+                    ],
                     Outcome::NotConfirmed(why),
                 ));
             }

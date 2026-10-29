@@ -24,6 +24,8 @@ mod device_routes_table;
 #[cfg(test)]
 mod device_session;
 #[cfg(test)]
+mod fix_round1;
+#[cfg(test)]
 mod hardening;
 #[cfg(test)]
 mod jobs;

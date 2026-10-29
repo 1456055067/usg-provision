@@ -5,9 +5,10 @@
 //! module is pure so the rules are tested on every host.
 
 // COMPLIANCE MAPPING:
-// - NIST 800-53: SI-10 (Information Input Validation), IA-3 (Device
-//   Identification and Authentication) - device identifiers reported
-//   as-is, filtered to valid unicast addresses
+// - NIST 800-53: SI-10 (Information Input Validation); supports IA-3
+//   (Device Identification and Authentication) - device identifiers
+//   reported as-is, filtered to valid unicast addresses (identification
+//   only; IA-3 partial, POAM: IA-3 (TB-2) in usgp-api)
 // - SPEC: plan §3.1 (DeviceHelloV1 `macs`)
 
 use core::fmt;

@@ -321,6 +321,59 @@ M3 toolchain, Windows target and gates (M3 plan WU-0, decision 0019):
   target when that target is installed, and reports the `windows-agent`
   job as NOT RUN.
 
+M3 CI and FIPS evidence (M3 plan WU-15; QA-001, QA-002, REL-M3-W0-002):
+
+- **ci**: the `windows-agent` job runs the VHD tests as administrator
+  (`USGP_WIN_VHD=1 cargo test -p usgp-winapi --features sink-testkit
+  --test vhd_disk --test winsink -- --ignored`). Each of the four ignored
+  tests must report `ok`. A 64 MiB sentinel VHD filled with a pattern
+  stays attached through the run, and the SHA-256 of its sectors must not
+  change ("other disks untouched", REQ-DISK-015). The job summary lists
+  the OPEN-WAPI-7 control-bit lines and the GPT-OBS-001 line, our read-back
+  of DiskPart's GPT. The step fails without `GPT-OBS-001 accepted`.
+- **ci**: the `windows-agent` job builds the release agent alone and
+  uploads the agent `.exe` and the AWS-LC FIPS DLL as one CI artifact,
+  `usgp-preboot-agent-<sha>-x86_64-pc-windows-msvc`. The artifact holds
+  `SHA256SUMS` and `PAIR.sha256` (the SHA-256 of `SHA256SUMS`). Before
+  upload the job checks:
+  - the DLL name matches the `aws-lc-fips-sys` version in `Cargo.lock`;
+  - the exe imports that DLL and no other AWS-LC DLL;
+  - neither file imports a dynamic C runtime;
+  - the staged pair passes `--self-test`;
+  - neither file contains a clean-room name.
+
+  The artifact is not signed.
+- **scripts**: `scripts/boot-smoke.sh` adds S9 and S10 (M3 plan section
+  10.3). S9 is the BOOT-5 stop. The real `usgp-server` runs on the
+  pg-test-setup PostgreSQL, and the relay pulls its signed boot policy
+  over mTLS. The pre-boot agent with `--sim` drives a job to Succeeded
+  for the QEMU guest's MAC. The next boot gets no answer and falls
+  through to the disk the agent wrote; after `usgp-cli boot-stop clear`
+  it boots from the network again (REQ-BOOT-067, REQ-BOOT-061). S10 boots
+  OVMF from GPTs written by `usgp-disk` (512-byte and 4096-byte sectors)
+  and runs two controls: with a broken primary header the firmware must
+  use our backup copy, and with both entry arrays altered it must refuse
+  (GPT-OBS-002, OPEN-GPT-1). `sgdisk -v` checks the tables as an
+  independent tool. S1 to S8 are unchanged. Both scenarios are described
+  in `testing/boot-smoke/topology.md`.
+- **fuzz**: `agent_http_head` target for the pre-boot agent's HTTP/1.1
+  response-head parser (`parse_head`, and `Content-Length` through it),
+  with a model check of the length rule, self-generated seeds
+  (`fuzz/corpus/agent_http_head/SOURCE.md`), seed replay in `fuzz-build`
+  and a 60 s `fuzz-smoke` entry (NIST-011, SI-10).
+- **fuzz**: `winapi_sd` and `winapi_reparse` targets for `usgp-winapi`'s
+  security-descriptor and reparse-buffer checks, which run before either
+  is handed to Windows (SEC-004, SI-10, SI-16). They use the synthetic
+  layouts of the `parse-testkit` feature. After `Ok`, every offset and
+  length must lie inside the input, re-checked by a walk written in the
+  target. Self-generated seeds (`fuzz/corpus/winapi_sd/SOURCE.md`,
+  `fuzz/corpus/winapi_reparse/SOURCE.md`), seed replay, and 60 s
+  `fuzz-smoke` entries.
+- **ci**: the `boot-smoke` job installs dosfstools, mtools and gdisk. It
+  starts the digest-pinned PostgreSQL container for S9, copies the
+  GPT-OBS-002 record into the job summary, and re-checks and removes the
+  database afterwards.
+
 ### Changed
 
 - **ci**: the `gates` job runs `usgp-server --self-check` and requires
@@ -371,11 +424,49 @@ M3 toolchain, Windows target and gates (M3 plan WU-0, decision 0019):
   `windows-sys`, `libloading` and `parking_lot_core`, and `httparse` to
   hyper and `usgp-preboot-agent`.
 
+M3 CI (M3 plan WU-15):
+
+- **ci**: `fuzz-smoke` (scheduled and manual) runs six M3 targets for
+  600 s, as M3 plan section 10.1 requires: `wim_metadata`,
+  `wim_apply_plan`, `gpt_readback`, `device_session_msgs`, `job_plan` and
+  `tftp_window`. The other M3 targets keep their 60 s smoke. Push and
+  pull-request runs still replay the seeds only, in `fuzz-build`.
+- **ci, scripts** (CR-SR7-006): `cargo deny` and `cargo audit` on
+  `fuzz/Cargo.toml` from the repository root set `CARGO_TARGET_DIR` to
+  `target/fuzz`, because `fuzz/.cargo/config.toml` is not read from
+  there. Nothing creates `fuzz/target/` any more (decision 0005; no
+  names-gate exclusion added).
+- **scripts**: `scripts/boot-smoke.sh build` also builds `usgp-server` and
+  `usgp-preboot-agent`, each in its own cargo invocation. The relay and
+  cli used by S1 to S8 are built exactly as before. `vm_start` accepts
+  raw disk images, including 4096-byte logical sectors.
+
 ### Removed
 
 - **fuzz**: the placeholder `noop` target.
 
 ### Security
+
+- **ci** (REL-M3-W0-001; CM-2, SR-4): the `windows-agent` FIPS module
+  toolchain is pinned, no longer just recorded:
+  - NASM is installed from Chocolatey at exactly 3.2.0, and the package
+    file must match the SHA-512 the feed publishes;
+  - Ninja must be exactly 1.13.2;
+  - Go 1.24, CMake 4.4, Perl 5.42, LLVM 20.1 and Visual Studio 18 are
+    asserted by version series, as on Linux.
+
+  Any drift fails the job. Exact versions and the SHA-256 of each tool
+  are written to the job summary.
+- **ci, scripts** (NIST-010; CM-7): the `gates` job and
+  `scripts/gates.sh` fail if the `sim` feature (the simulated platform)
+  reaches the agent's `x86_64-pc-windows-msvc` build graph, for the agent
+  alone or the workspace. The query must first detect `--features sim`,
+  so a broken query cannot pass. The Windows pair build repeats the check.
+  Only that Windows pair is ever uploaded; the sim-only non-Windows agent
+  is built for tests and scans only.
+- **ci, scripts** (SEC-004; CM-7): the shipped-build feature gate also
+  refuses `parse-testkit` and `sink-testkit` (`usgp-winapi`'s test-only
+  features).
 
 Hardening from the M1 security, NIST and boot reviews, before first
 release:

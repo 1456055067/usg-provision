@@ -28,7 +28,9 @@ pub const OS_TYPE_GPT_PROTECTIVE: u8 = 0xEE;
 /// FORMAT: gpt.md §3 - StartingCHS `0x000200`, stored little-endian.
 const STARTING_CHS: [u8; 3] = [0x00, 0x02, 0x00];
 /// FORMAT: gpt.md §3 - EndingCHS `0xFFFFFF` when the last block is not
-/// representable in CHS. We always write it (see [`protective`]).
+/// representable in CHS. We always write it (see [`protective`]): this
+/// relies on the 64 GB disk floor ([`crate::layout::MIN_DISK_BYTES`],
+/// REQ-DISK-004; BOOT-007).
 const ENDING_CHS_NOT_REPRESENTABLE: [u8; 3] = [0xFF, 0xFF, 0xFF];
 /// FORMAT: gpt.md §3 - SizeInLBA when the size does not fit in 32 bits.
 const SIZE_SATURATED: u32 = 0xFFFF_FFFF;
@@ -62,6 +64,10 @@ const R_SIZE: usize = 12;
 /// last block when representable, but gives no CHS geometry; our layouts
 /// are only for disks of at least 64 GB (REQ-DISK-004), and we never
 /// compute a CHS value (unspecified behaviour noted in impl-notes-wu3.md).
+/// The constant relies on that floor: we take the last block of every disk
+/// of 64 GB or more to be beyond what the 3-byte CHS field can name. A
+/// layout for a smaller disk would first need a source for the CHS
+/// geometry, which `gpt.md` does not give (BOOT-007).
 ///
 /// Returns `None` if `block_len` is under 512 bytes.
 #[must_use]
@@ -100,23 +106,37 @@ pub struct MbrRecord {
 pub enum Lba0 {
     /// No `0xAA55` signature: no MBR.
     Empty,
-    /// A protective MBR (record 1 OSType `0xEE`): look for a GPT.
+    /// A protective MBR as `gpt.md` §3 defines it (record 1 OSType `0xEE`,
+    /// records 2 to 4 all zero): look for a GPT.
     Protective,
-    /// A legacy MBR with these non-empty primary records.
+    /// An MBR with OSType `0xEE` in some record that is not a protective
+    /// MBR (`0xEE` in a slot other than 1, or records 2 to 4 not all
+    /// zero): a hybrid MBR. Listed for display; never read as a GPT disk
+    /// (BOOT-008). Holds every non-empty record, `0xEE` ones included.
+    Hybrid(Vec<MbrRecord>),
+    /// A legacy MBR with these non-empty primary records (none `0xEE`).
     Legacy(Vec<MbrRecord>),
 }
 
 /// Classifies LBA 0 (at least 512 bytes) for display. Records with OSType
-/// zero or size zero are skipped.
+/// zero or size zero are not listed.
+///
+/// Only record 1 with OSType `0xEE` and records 2 to 4 all zero (every
+/// byte) is [`Lba0::Protective`] (`gpt.md` §3); any other MBR holding a
+/// `0xEE` record is [`Lba0::Hybrid`] (BOOT-008).
 #[must_use]
 pub fn read_lba0(block: &[u8]) -> Lba0 {
     if bytes::le_u16(block, SIGNATURE_OFFSET) != Some(SIGNATURE) {
         return Lba0::Empty;
     }
     let mut out = Vec::new();
+    let mut any_ee = false;
+    let mut slot1_ee = false;
+    let mut rest_zero = true;
     for slot in 0..RECORD_COUNT {
         let base = RECORDS_OFFSET + slot * RECORD_LEN;
-        let (Some(os_type), Some(start_lba), Some(size_lbas)) = (
+        let (Some(record), Some(os_type), Some(start_lba), Some(size_lbas)) = (
+            bytes::field(block, base, RECORD_LEN),
             bytes::field(block, base + R_OS_TYPE, 1).and_then(|f| f.first().copied()),
             bytes::le_u32(block, base + R_START_LBA),
             bytes::le_u32(block, base + R_SIZE),
@@ -124,7 +144,11 @@ pub fn read_lba0(block: &[u8]) -> Lba0 {
             return Lba0::Empty;
         };
         if os_type == OS_TYPE_GPT_PROTECTIVE {
-            return Lba0::Protective;
+            any_ee = true;
+            slot1_ee |= slot == 0;
+        }
+        if slot > 0 && record.iter().any(|&b| b != 0) {
+            rest_zero = false;
         }
         if os_type != 0 && size_lbas != 0 {
             out.push(MbrRecord {
@@ -135,7 +159,11 @@ pub fn read_lba0(block: &[u8]) -> Lba0 {
             });
         }
     }
-    Lba0::Legacy(out)
+    match (any_ee, slot1_ee && rest_zero) {
+        (_, true) => Lba0::Protective,
+        (true, false) => Lba0::Hybrid(out),
+        (false, false) => Lba0::Legacy(out),
+    }
 }
 
 /// `true` if `block` is exactly the protective MBR [`protective`] would
@@ -143,4 +171,117 @@ pub fn read_lba0(block: &[u8]) -> Lba0 {
 #[must_use]
 pub fn is_our_protective(block: &[u8], total_lbas: u64) -> bool {
     protective(total_lbas, block.len()).is_some_and(|want| want == block)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::GptError;
+
+    fn record(b: &mut [u8], slot: usize, os_type: u8, start: u32, size: u32) {
+        let base = RECORDS_OFFSET + slot * RECORD_LEN;
+        assert!(bytes::put(b, base + R_OS_TYPE, &[os_type]));
+        assert!(bytes::put(b, base + R_START_LBA, &start.to_le_bytes()));
+        assert!(bytes::put(b, base + R_SIZE, &size.to_le_bytes()));
+    }
+
+    fn total_lbas_64gb(block: u64) -> u64 {
+        crate::layout::MIN_DISK_BYTES / block
+    }
+
+    /// BOOT-007: EndingCHS is `0xFFFFFF` for every disk the layout accepts
+    /// (64 GB and up), which is what the constant relies on.
+    #[test]
+    fn ending_chs_is_not_representable_from_the_floor_up() {
+        for block in [512u64, 4096] {
+            for total in [
+                total_lbas_64gb(block),
+                u64::from(u32::MAX),
+                u64::MAX / block,
+            ] {
+                let b = protective(total, usize::try_from(block).unwrap_or(512));
+                let end = b
+                    .as_deref()
+                    .and_then(|b| bytes::field(b, RECORDS_OFFSET + R_END_CHS, 3));
+                assert_eq!(
+                    end,
+                    Some(&ENDING_CHS_NOT_REPRESENTABLE[..]),
+                    "{block} {total}"
+                );
+            }
+        }
+    }
+
+    /// BOOT-008: only slot 1 `0xEE` with slots 2 to 4 all zero is
+    /// protective; `0xEE` anywhere else is a hybrid MBR, listed apart.
+    #[test]
+    fn protective_needs_slot_one_and_empty_rest() {
+        let ours = protective(total_lbas_64gb(512), 512).unwrap_or_default();
+        assert_eq!(read_lba0(&ours), Lba0::Protective);
+
+        // Slot 1 0xEE plus a legacy record in slot 2: hybrid.
+        let mut hybrid = ours.clone();
+        record(&mut hybrid, 1, 0x07, 2048, 4096);
+        match read_lba0(&hybrid) {
+            Lba0::Hybrid(r) => {
+                let slots: Vec<(u8, u8)> = r.iter().map(|r| (r.slot, r.os_type)).collect();
+                assert_eq!(slots, vec![(1, OS_TYPE_GPT_PROTECTIVE), (2, 0x07)]);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // 0xEE only in slot 3: hybrid, not protective.
+        let mut b = vec![0u8; 512];
+        assert!(bytes::put(
+            &mut b,
+            SIGNATURE_OFFSET,
+            &SIGNATURE.to_le_bytes()
+        ));
+        record(&mut b, 0, 0x0C, 2048, 4096);
+        record(&mut b, 2, OS_TYPE_GPT_PROTECTIVE, 1, 100);
+        assert!(matches!(read_lba0(&b), Lba0::Hybrid(r) if r.len() == 2));
+
+        // A stray non-zero byte in an otherwise empty slot 4: hybrid.
+        let mut stray = ours.clone();
+        assert!(bytes::put(
+            &mut stray,
+            RECORDS_OFFSET + 3 * RECORD_LEN + R_BOOT,
+            &[0x80]
+        ));
+        assert!(matches!(read_lba0(&stray), Lba0::Hybrid(_)));
+
+        // No 0xEE anywhere: legacy.
+        let mut legacy = vec![0u8; 512];
+        assert!(bytes::put(
+            &mut legacy,
+            SIGNATURE_OFFSET,
+            &SIGNATURE.to_le_bytes()
+        ));
+        record(&mut legacy, 0, 0x07, 2048, 4096);
+        assert!(matches!(read_lba0(&legacy), Lba0::Legacy(r) if r.len() == 1));
+    }
+
+    /// A hybrid MBR is never read as a GPT disk.
+    #[test]
+    fn hybrid_is_not_parsed_as_gpt() {
+        use crate::device::{BlockDevice, MemBlockDevice};
+        use crate::guid::Guid;
+        let total = 1 << 16;
+        let mut dev = MemBlockDevice::new(total * 512, 512).unwrap_or_else(|_| unreachable!());
+        let plan = crate::gpt::GptPlan::new(512, total, Guid([7; 16]), Vec::new())
+            .unwrap_or_else(|_| unreachable!());
+        for (off, block) in plan.writes().unwrap_or_default() {
+            assert!(dev.write_at(off, &block).is_ok());
+        }
+        assert!(crate::parse_gpt(&mut dev, &crate::GptLimits::default()).is_ok());
+        let mut lba0 = vec![0u8; 512];
+        assert!(dev.read_at(0, &mut lba0).is_ok());
+        record(&mut lba0, 1, 0x07, 2048, 4096);
+        assert!(dev.write_at(0, &lba0).is_ok());
+        let r = crate::parse_gpt(&mut dev, &crate::GptLimits::default());
+        assert!(
+            matches!(r, Err(GptError::NoProtectiveMbr("hybrid MBR"))),
+            "{r:?}"
+        );
+    }
 }

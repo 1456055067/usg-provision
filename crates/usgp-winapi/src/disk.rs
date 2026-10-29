@@ -12,6 +12,15 @@
 //!   device number and the size the job expects, and refuses unaligned or
 //!   out-of-range I/O. Raw I/O itself goes through `std` (decision 0019
 //!   item 3); only the control codes use FFI.
+//!
+//! Which disk is which (BOOT-002, SEC-003): disk numbers can change
+//! (spec §7), but the SetupAPI device path of a disk's interface can be
+//! reused across restarts (spec §2). [`interfaces`] keeps each disk's
+//! path, and [`RawDisk::open_interface_for_write`] opens the write handle
+//! **by that path**, so the handle is the device that was enumerated even
+//! if numbers moved. The descriptor and the partition-table identity
+//! ([`DriveLayout::table_id`]) can then be read on the write handle itself
+//! and compared with what the person confirmed.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-10 (Information Input Validation), AC-3 (Access
@@ -266,6 +275,19 @@ impl PartitionStyle {
     }
 }
 
+/// The identity a disk's current partition table carries (spec §5): the
+/// GPT disk GUID or the MBR disk signature. Used with the device path and
+/// descriptor to tell twin disks apart (BOOT-002).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableId {
+    /// A GPT disk and its disk GUID.
+    Gpt(parse::Guid),
+    /// An MBR disk and its signature.
+    Mbr(u32),
+    /// No partition table, or a style without an identity.
+    None,
+}
+
 /// The partition layout Windows reports for a disk (spec §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriveLayout {
@@ -280,6 +302,17 @@ pub struct DriveLayout {
 }
 
 impl DriveLayout {
+    /// The table's identity: the GPT disk GUID or the MBR signature, as
+    /// the style says; [`TableId::None`] otherwise.
+    #[must_use]
+    pub fn table_id(&self) -> TableId {
+        match (self.style, &self.gpt, self.mbr_signature) {
+            (PartitionStyle::Gpt, Some(g), _) => TableId::Gpt(g.disk_id),
+            (PartitionStyle::Mbr, _, Some(sig)) => TableId::Mbr(sig),
+            _ => TableId::None,
+        }
+    }
+
     fn from_raw(raw: parse::RawDriveLayout) -> Self {
         let unused = u8::try_from(PARTITION_ENTRY_UNUSED).unwrap_or(0);
         let partitions = raw
@@ -303,6 +336,9 @@ impl DriveLayout {
 pub struct DiskInfo {
     /// Disk number (valid until removal or restart, spec §7).
     pub number: u32,
+    /// The device path of the disk's interface (spec §2), when it was
+    /// opened through the enumeration; `None` when opened by number.
+    pub interface_path: Option<String>,
     /// Device descriptor.
     pub descriptor: DeviceDescriptor,
     /// Sector sizes, when the device supports the alignment query.
@@ -428,6 +464,22 @@ fn geometry_of(file: &File) -> Result<Geometry> {
 pub struct DiskQuery {
     file: File,
     number: u32,
+    path: Option<String>,
+}
+
+fn descriptor_of(file: &File) -> Result<DeviceDescriptor> {
+    let b = storage_property(file, StorageDeviceProperty)?;
+    let d = parse::device_descriptor(&b, &layout::DEVICE_DESCRIPTOR)
+        .map_err(|e| WinApiError::malformed("device descriptor", e))?;
+    Ok(DeviceDescriptor {
+        bus: Bus::from_raw(d.bus_type),
+        removable_media: d.removable_media,
+        scsi_device_type: d.device_type,
+        vendor_id: d.vendor_id,
+        product_id: d.product_id,
+        product_revision: d.product_revision,
+        serial_number: d.serial_number,
+    })
 }
 
 impl DiskQuery {
@@ -437,7 +489,26 @@ impl DiskQuery {
             .open(physical_drive_path(number))
             .map_err(|e| WinApiError::os("open disk for query", e))?;
         check_is_disk(&file, number)?;
-        Ok(Self { file, number })
+        Ok(Self {
+            file,
+            number,
+            path: None,
+        })
+    }
+
+    /// Opens the disk at `iface`'s device path (as-is, never parsed;
+    /// spec §2) for queries, and checks that it is a disk with
+    /// `iface.number`.
+    pub fn open_interface(iface: &DiskInterface) -> Result<Self> {
+        let file = query_open_options()
+            .open(&iface.path)
+            .map_err(|e| WinApiError::os("open disk interface for query", e))?;
+        check_is_disk(&file, iface.number)?;
+        Ok(Self {
+            file,
+            number: iface.number,
+            path: Some(iface.path.clone()),
+        })
     }
 
     /// The disk number.
@@ -448,18 +519,7 @@ impl DiskQuery {
 
     /// The device descriptor (spec §3.1).
     pub fn descriptor(&self) -> Result<DeviceDescriptor> {
-        let b = storage_property(&self.file, StorageDeviceProperty)?;
-        let d = parse::device_descriptor(&b, &layout::DEVICE_DESCRIPTOR)
-            .map_err(|e| WinApiError::malformed("device descriptor", e))?;
-        Ok(DeviceDescriptor {
-            bus: Bus::from_raw(d.bus_type),
-            removable_media: d.removable_media,
-            scsi_device_type: d.device_type,
-            vendor_id: d.vendor_id,
-            product_id: d.product_id,
-            product_revision: d.product_revision,
-            serial_number: d.serial_number,
-        })
+        descriptor_of(&self.file)
     }
 
     /// Logical and physical sector sizes (spec §3.3), or `None` when the
@@ -517,6 +577,7 @@ impl DiskQuery {
     pub fn inspect(&self) -> Result<DiskInfo> {
         Ok(DiskInfo {
             number: self.number,
+            interface_path: self.path.clone(),
             descriptor: self.descriptor()?,
             sector_sizes: self.sector_sizes()?,
             geometry: self.geometry()?,
@@ -526,7 +587,23 @@ impl DiskQuery {
     }
 }
 
-/// Lists the disk numbers present, in ascending order.
+/// One disk interface: its device path (spec §2) and the disk number read
+/// through it (spec §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskInterface {
+    /// Disk number now (not stable, spec §7).
+    pub number: u32,
+    /// The interface's device path, as SetupAPI returned it. Never parsed;
+    /// can be reused across restarts (spec §2).
+    pub path: String,
+}
+
+/// Lists the disk numbers present, in ascending order ([`interfaces`]).
+pub fn enumerate() -> Result<Vec<u32>> {
+    Ok(interfaces()?.into_iter().map(|i| i.number).collect())
+}
+
+/// Lists the disk interfaces present, by ascending disk number.
 ///
 /// Uses the documented enumeration (spec §2): the present device
 /// interfaces of class `GUID_DEVINTERFACE_DISK` through SetupAPI. Each
@@ -536,7 +613,7 @@ impl DiskQuery {
 /// that cannot be opened or queried, one that is not a disk, or two
 /// interfaces with the same number, fail the whole enumeration rather than
 /// being left out.
-pub fn enumerate() -> Result<Vec<u32>> {
+pub fn interfaces() -> Result<Vec<DiskInterface>> {
     let paths = ffi::disk_interface_paths(MAX_DISKS)
         .map_err(|e| WinApiError::os("enumerate disk interfaces", e))?;
     let mut found = Vec::with_capacity(paths.len());
@@ -554,22 +631,29 @@ pub fn enumerate() -> Result<Vec<u32>> {
                 what: "disk interface is not a disk device",
             });
         }
-        if found.contains(&dn.device_number) {
+        if found
+            .iter()
+            .any(|i: &DiskInterface| i.number == dn.device_number)
+        {
             return Err(WinApiError::DeviceMismatch {
                 what: "two disk interfaces report the same disk number",
             });
         }
-        found.push(dn.device_number);
+        found.push(DiskInterface {
+            number: dn.device_number,
+            path,
+        });
     }
-    found.sort_unstable();
+    found.sort_unstable_by_key(|i| i.number);
     Ok(found)
 }
 
-/// Enumerates and inspects every disk.
+/// Enumerates and inspects every disk, each through its interface path
+/// (so [`DiskInfo::interface_path`] is set).
 pub fn inspect_all() -> Result<Vec<DiskInfo>> {
-    enumerate()?
-        .into_iter()
-        .map(|n| DiskQuery::open(n)?.inspect())
+    interfaces()?
+        .iter()
+        .map(|i| DiskQuery::open_interface(i)?.inspect())
         .collect()
 }
 
@@ -592,13 +676,32 @@ impl RawDisk {
     /// Opens disk `number` for reading and writing (write-through), and
     /// checks its number, its size against `expected_size_bytes`, and that
     /// its logical sector size is 512 or 4096 (spec §3.3).
+    ///
+    /// Prefer [`Self::open_interface_for_write`]: a number names whichever
+    /// disk has it now (spec §7).
     pub fn open_for_write(number: u32, expected_size_bytes: u64) -> Result<Self> {
+        Self::open_path_for_write(&physical_drive_path(number), number, expected_size_bytes)
+    }
+
+    /// As [`Self::open_for_write`], but opens the disk by its interface's
+    /// device path (spec §2), so the write handle is the enumerated device
+    /// whatever its number is now; its number must still be
+    /// `iface.number` (BOOT-002). Check [`Self::descriptor`] and
+    /// [`Self::layout`] on the returned handle against what was confirmed.
+    pub fn open_interface_for_write(
+        iface: &DiskInterface,
+        expected_size_bytes: u64,
+    ) -> Result<Self> {
+        Self::open_path_for_write(&iface.path, iface.number, expected_size_bytes)
+    }
+
+    fn open_path_for_write(path: &str, number: u32, expected_size_bytes: u64) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_WRITE_THROUGH)
-            .open(physical_drive_path(number))
+            .open(path)
             .map_err(|e| WinApiError::os("open disk for write", e))?;
         check_is_disk(&file, number)?;
         let b = ffi::device_io_control(
@@ -750,7 +853,8 @@ impl RawDisk {
         .map_err(os("update disk properties"))
     }
 
-    /// The layout Windows now reports for this disk (spec §5).
+    /// The layout Windows now reports for this disk (spec §5), queried on
+    /// this handle.
     pub fn layout(&self) -> Result<DriveLayout> {
         DiskQuery {
             file: self
@@ -758,7 +862,14 @@ impl RawDisk {
                 .try_clone()
                 .map_err(|e| WinApiError::os("duplicate disk handle", e))?,
             number: self.number,
+            path: None,
         }
         .layout()
+    }
+
+    /// The device descriptor (spec §3.1), queried on this handle, so the
+    /// identity checked is that of the device being written (BOOT-002).
+    pub fn descriptor(&self) -> Result<DeviceDescriptor> {
+        descriptor_of(&self.file)
     }
 }

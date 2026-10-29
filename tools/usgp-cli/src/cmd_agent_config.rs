@@ -9,7 +9,7 @@
 //! | File | Content |
 //! |------|---------|
 //! | `agent.toml` | [`usgp_proto::agent_config::AgentConfigFile`], naming the three files below by relative name |
-//! | `trust-anchors.pem` | the server trust anchors, as given |
+//! | `trust-anchors.pem` | the server trust anchors, re-encoded: one `CERTIFICATE` block per certificate given, nothing else |
 //! | `plan.pub` | the plan public key, re-encoded as one `PUBLIC KEY` block |
 //! | `content.pub` | the content public key, re-encoded the same way |
 //!
@@ -18,7 +18,15 @@
 //! anchors by building the agent's TLS client configuration from them; the
 //! keys by parsing them as P-384 public keys, which must differ (one key
 //! per purpose). An input file holding a `PRIVATE KEY` block is refused,
-//! so no secret can be copied into the PE. The directory must not exist
+//! so no secret can be copied into the PE.
+//!
+//! The trust-anchor file is never copied (SEC-009): each `CERTIFICATE`
+//! block is decoded by `usgp-crypto` to its DER certificate and written
+//! back as a fresh PEM block (RFC 7468 §2, §5: 64-character lines, the
+//! standard base64 alphabet with padding). Text between blocks is
+//! dropped; a block with any other label, or one that is not closed, is
+//! refused. The agent's TLS settings are then built from the re-encoded
+//! text, which is what is written. The directory must not exist
 //! (nothing is overwritten); on a write error what was written is removed.
 //!
 //! One `pe.agent_config.created` audit event is emitted per run.
@@ -45,6 +53,8 @@ use usgp_common::event::Outcome;
 use usgp_crypto::VerifyingKey;
 use usgp_crypto::tls::{BlockingClientTls, ClientAlpn, ClientTlsSettings, TlsMinVersion};
 use usgp_proto::agent_config::{AgentConfigError, AgentConfigFile};
+
+use usgp_crypto::PeerCertificate;
 
 use crate::args::AgentConfigArgs;
 use crate::boot_manifest::{audit, who};
@@ -132,6 +142,102 @@ fn refuse_private(what: &'static str, text: &str) -> Result<(), AgentConfigCliEr
     Ok(())
 }
 
+/// Most certificates accepted in the trust-anchor file (design bound).
+const MAX_ANCHORS: usize = 64;
+
+const PEM_BEGIN: &str = "-----BEGIN ";
+const PEM_CERT_BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+const PEM_CERT_END: &str = "-----END CERTIFICATE-----";
+
+/// RFC 4648 §4 base64 of `der`, padded, as RFC 7468 §2 lines of 64
+/// characters each ending in LF. Output only: its input is DER that
+/// `usgp-crypto` has already decoded.
+fn base64_lines(der: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let sym = |v: u32| {
+        let i = usize::try_from(v & 63).unwrap_or(0);
+        char::from(ALPHABET.get(i).copied().unwrap_or(b'A'))
+    };
+    let mut flat = String::with_capacity(der.len().div_ceil(3).saturating_mul(4));
+    for chunk in der.chunks(3) {
+        let b = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let v = (b(0) << 16) | (b(1) << 8) | b(2);
+        flat.push(sym(v >> 18));
+        flat.push(sym(v >> 12));
+        flat.push(if chunk.len() > 1 { sym(v >> 6) } else { '=' });
+        flat.push(if chunk.len() > 2 { sym(v) } else { '=' });
+    }
+    let mut out = String::with_capacity(flat.len().saturating_add(flat.len() / 64 + 1));
+    let mut line = String::with_capacity(64);
+    for c in flat.chars() {
+        line.push(c);
+        if line.len() == 64 {
+            out.push_str(&line);
+            out.push('\n');
+            line.clear();
+        }
+    }
+    if !line.is_empty() {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The trust anchors as written to the PE (SEC-009): every `CERTIFICATE`
+/// block of `text`, decoded by `usgp-crypto` and re-encoded; nothing else.
+fn reencode_anchors(text: &str) -> Result<String, AgentConfigCliError> {
+    let bad = |why: &str| AgentConfigCliError::Anchors(why.to_owned());
+    let mut out = String::new();
+    let mut block: Option<String> = None;
+    let mut count = 0usize;
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        match block.as_mut() {
+            None if line == PEM_CERT_BEGIN => {
+                let mut b = String::from(PEM_CERT_BEGIN);
+                b.push('\n');
+                block = Some(b);
+            }
+            None if line.starts_with(PEM_BEGIN) => {
+                return Err(bad("holds a PEM block other than CERTIFICATE"));
+            }
+            // Explanatory text between blocks (RFC 7468 §2) is dropped.
+            None => {}
+            Some(_) if line.starts_with(PEM_BEGIN) => {
+                return Err(bad("a CERTIFICATE block is not closed"));
+            }
+            Some(b) if line == PEM_CERT_END => {
+                b.push_str(PEM_CERT_END);
+                b.push('\n');
+                let cert = PeerCertificate::from_pem(b.as_bytes())
+                    .map_err(|e| AgentConfigCliError::Anchors(e.to_string()))?;
+                count = count.saturating_add(1);
+                if count > MAX_ANCHORS {
+                    return Err(bad("more than 64 certificates"));
+                }
+                out.push_str(PEM_CERT_BEGIN);
+                out.push('\n');
+                out.push_str(&base64_lines(&cert.der));
+                out.push_str(PEM_CERT_END);
+                out.push('\n');
+                block = None;
+            }
+            Some(b) => {
+                b.push_str(line);
+                b.push('\n');
+            }
+        }
+    }
+    if block.is_some() {
+        return Err(bad("a CERTIFICATE block is not closed"));
+    }
+    if count == 0 {
+        return Err(bad("no CERTIFICATE block"));
+    }
+    Ok(out)
+}
+
 fn read_key(path: &Path, what: &'static str) -> Result<VerifyingKey, AgentConfigCliError> {
     let text = read_bounded(path, MAX_KEY_BYTES)?;
     refuse_private(what, &text)?;
@@ -158,10 +264,11 @@ pub fn create(a: &AgentConfigArgs) -> Result<Written, AgentConfigCliError> {
         return Err(AgentConfigCliError::OutputExists(a.out.clone()));
     }
 
-    let anchors = read_bounded(&a.trust_anchors, MAX_ANCHORS_BYTES)?;
-    refuse_private("--trust-anchors", &anchors)?;
-    // The agent's own client configuration (app.rs): the same parse, the
-    // same anchor rules, FIPS asserted.
+    let given = read_bounded(&a.trust_anchors, MAX_ANCHORS_BYTES)?;
+    refuse_private("--trust-anchors", &given)?;
+    let anchors = reencode_anchors(&given)?;
+    // The agent's own client configuration (app.rs), on the text that is
+    // written: the same parse, the same anchor rules, FIPS asserted.
     BlockingClientTls::new(&ClientTlsSettings {
         trust_anchors_pem: anchors.as_bytes().to_vec(),
         client_cert_chain_pem: None,
@@ -458,6 +565,100 @@ mod tests {
             assert!(!a.out.exists(), "{e}");
             assert!(!e.to_string().contains("BEGIN"), "{e}");
         }
+    }
+
+    #[test]
+    fn base64_is_rfc4648_with_64_character_lines() {
+        // RFC 4648 §10 test vectors.
+        for (raw, enc) in [
+            ("", ""),
+            ("f", "Zg==\n"),
+            ("fo", "Zm8=\n"),
+            ("foo", "Zm9v\n"),
+            ("foob", "Zm9vYg==\n"),
+            ("fooba", "Zm9vYmE=\n"),
+            ("foobar", "Zm9vYmFy\n"),
+        ] {
+            assert_eq!(base64_lines(raw.as_bytes()), enc, "{raw}");
+        }
+        let long = base64_lines(&[0xFFu8; 100]);
+        let lines: Vec<&str> = long.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.first().unwrap().len(), 64);
+        assert_eq!(lines.get(1).unwrap().len(), 64);
+        assert!(long.ends_with("==\n"));
+    }
+
+    /// SEC-009: only re-encoded CERTIFICATE blocks are written; text
+    /// around them is dropped and the DER is unchanged.
+    #[test]
+    fn anchors_are_written_as_reencoded_certificates_only() {
+        let d = Dir::new("reencode");
+        let a = args(&d);
+        let given = fs::read_to_string(&a.trust_anchors).unwrap();
+        let second = TestCa::root("usgp test second anchor").unwrap();
+        let noisy = format!(
+            "Explanatory text before\r\n{}\r\ntext between\n{}trailing words\n",
+            given.replace('\n', "\r\n"),
+            second.cert_pem().unwrap()
+        );
+        let a = AgentConfigArgs {
+            trust_anchors: d.put("noisy.pem", &noisy),
+            ..clone_args(&a)
+        };
+        let w = create(&a).unwrap();
+        let written = fs::read_to_string(a.out.join(ANCHORS_FILE)).unwrap();
+        assert!(!written.contains("text") && !written.contains("words"));
+        assert!(!written.contains('\r'));
+        assert_eq!(written.matches(PEM_CERT_BEGIN).count(), 2);
+        assert_eq!(usgp_crypto::sha256(written.as_bytes()), w.anchors_sha256);
+        // Each block decodes to the same DER as was given.
+        let blocks: Vec<String> = written
+            .split_inclusive(&format!("{PEM_CERT_END}\n"))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        let first = PeerCertificate::from_pem(blocks.first().unwrap().as_bytes()).unwrap();
+        assert_eq!(
+            first.der,
+            PeerCertificate::from_pem(given.as_bytes()).unwrap().der
+        );
+        let other = PeerCertificate::from_pem(blocks.get(1).unwrap().as_bytes()).unwrap();
+        assert_eq!(other.der, second.cert_der());
+        // Re-encoding is stable.
+        assert_eq!(reencode_anchors(&written).unwrap(), written);
+    }
+
+    #[test]
+    fn anchor_files_with_other_or_broken_blocks_are_refused() {
+        let ca = TestCa::root("usgp test anchor").unwrap();
+        let pem = ca.cert_pem().unwrap();
+        let key = SigningKey::generate().unwrap();
+        let public = key.verifying_key().to_spki_pem().unwrap();
+        for (text, why) in [
+            (format!("{pem}{public}"), "PUBLIC KEY block"),
+            (pem.replace(PEM_CERT_END, ""), "not closed"),
+            (
+                format!("{}{pem}", pem.replace(PEM_CERT_END, "")),
+                "BEGIN inside a block",
+            ),
+            ("no blocks at all\n".to_owned(), "no certificate"),
+            (
+                pem.replace(PEM_CERT_BEGIN, &format!("{PEM_CERT_BEGIN}\n!!!!")),
+                "bad base64",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    reencode_anchors(&text),
+                    Err(AgentConfigCliError::Anchors(_))
+                ),
+                "{why}"
+            );
+        }
+        let many = pem.repeat(MAX_ANCHORS + 1);
+        assert!(reencode_anchors(&many).is_err());
+        assert!(reencode_anchors(&pem.repeat(2)).is_ok());
     }
 
     /// Which refusal a case expects.

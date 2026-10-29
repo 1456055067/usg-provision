@@ -4,9 +4,9 @@
 #![cfg(test)]
 
 use usgp_disk::{Bus, DiskFacts, DiskIdentity, EligibilityPolicy, ExistingPartition};
-use usgp_preboot_agent::disks::{FoundDisk, Inventory};
+use usgp_preboot_agent::disks::{Discriminator, FoundDisk, Inventory};
 use usgp_preboot_agent::ui::{self, JobScreen};
-use usgp_proto::device::DevicePackageV1;
+use usgp_proto::device::{DevicePackageV1, MacAddress};
 use usgp_proto::disk::PartitionKind;
 use usgp_proto::{DiskToken, DisplayCode};
 
@@ -50,6 +50,7 @@ fn disk(n: u32, size: u64, bus: Bus) -> FoundDisk {
         },
         kinds: vec![PartitionKind::Esp, PartitionKind::Basic],
         volumes_known: true,
+        discriminator: Discriminator::default(),
     }
 }
 
@@ -104,7 +105,15 @@ fn disk_list_numbers_eligible_and_explains_refusals() {
 fn wipe_screen_is_separate_and_lists_partitions() {
     let inv = inventory();
     let e = inv.eligible().next().unwrap();
-    let s = ui::wipe_screen(&package(), e);
+    let macs = vec![
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x01]).unwrap(),
+        MacAddress::new([0x02, 0, 0, 0, 0, 0x02]).unwrap(),
+    ];
+    let s = ui::wipe_screen(&package(), e, &macs);
+    // Decision 0023 item 2: the claimed MACs are shown at confirmation.
+    assert!(s.contains("network boot is stopped for these addresses"));
+    assert!(s.contains("02:00:00:00:00:01") && s.contains("02:00:00:00:00:02"));
+    assert!(!ui::wipe_screen(&package(), e, &[]).contains("Network adapters"));
     assert!(s.contains("EVERY PARTITION AND ALL DATA ON THIS DISK WILL BE DESTROYED"));
     assert!(s.contains("esp") && s.contains("\"EFI\""));
     assert!(s.contains("basic") && s.contains("\"Data\"") && s.contains("50.0 GB"));

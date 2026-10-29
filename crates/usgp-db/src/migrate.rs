@@ -525,7 +525,8 @@ mod tests {
 
     /// Plan section 3.8 and decision 0016: exactly these grants, no DELETE
     /// except on assignments, nothing on the new tables for the
-    /// administrative role except boot services, and no role DDL.
+    /// administrative role except boot services and boot-policy
+    /// generations (finding NIST-013), and no role DDL.
     #[test]
     fn migration_0004_grants_are_least_privilege() {
         let st = statements(mig(3));
@@ -540,6 +541,9 @@ mod tests {
              USGP_JOB_STEP_GUARD(), USGP_BOOT_STOP_GUARD(), USGP_BOOT_POLICY_GENERATION_GUARD() \
              TO USGP_APP",
             "GRANT SELECT, INSERT, UPDATE ON BOOT_SERVICE TO USGP_ADMIN",
+            // Finding NIST-013: raising a generation after a restore.
+            "GRANT SELECT, INSERT, UPDATE ON BOOT_POLICY_GENERATION TO USGP_ADMIN",
+            "GRANT EXECUTE ON FUNCTION USGP_BOOT_POLICY_GENERATION_GUARD() TO USGP_ADMIN",
         ];
         assert_eq!(grants.len(), expect.len(), "{grants:#?}");
         for e in expect {

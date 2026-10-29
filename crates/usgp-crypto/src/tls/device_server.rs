@@ -21,10 +21,13 @@
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SC-8, SC-8(1) (Transmission Confidentiality and
 //   Integrity) - device traffic only inside TLS 1.2/1.3 with AEAD suites.
-// - NIST 800-53: IA-3 (Device Identification and Authentication) - the
-//   server authenticates to the device by certificate; the device is
-//   authenticated by the session authorisation (code or approval), not
-//   by TLS (decision 0020 items 2-3).
+// - NIST 800-53: SC-8, SC-23 (Session Authenticity), IA-11
+//   (Re-authentication) - the server authenticates to the device by
+//   certificate, and the device's session token (and the authorisation
+//   it carries) travels only inside this TLS. The device is not
+//   authenticated by TLS: no client certificate is asked for (decision
+//   0020 items 2-3). No IA-2 or IA-3 claim here; IA-3 is partial
+//   server-side (POAM: IA-3 (TB-2), usgp-api `device/auth.rs`).
 // - NIST 800-53: SC-13 (Cryptographic Protection) - FIPS provider;
 //   `ServerConfig::fips()` asserted; fail closed.
 // - NIST 800-53: SC-23 (Session Authenticity) - no resumption; every

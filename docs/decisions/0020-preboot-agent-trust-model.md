@@ -36,5 +36,7 @@ a secret.
 ## Consequences
 
 - Every package listing, plan and content download needs an authorised
-  session token, which is bound to the TLS session and expires.
+  session token, bound to the session's source network and with an expiry
+  (amended by decision 0023 item 1; previously "bound to the TLS
+  session").
 - A device that is never authorised sees nothing.

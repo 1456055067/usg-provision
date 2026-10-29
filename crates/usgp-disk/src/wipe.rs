@@ -28,6 +28,10 @@ use crate::layout::{ALIGN_BYTES, WindowsUefiLayout};
 
 /// Design value (OPEN-DISK-2): bytes zeroed at the head and tail of the
 /// disk and at the head of each volume.
+// POAM: OPEN-DISK-2 - how much of the old disk the install wipe must
+// overwrite is not settled by the specs; 1 MiB per region is a design
+// choice, not a sanitisation of the old data (a secure wipe is RET-1).
+// Revisit when OPEN-DISK-2 is answered (NIST-015).
 pub const WIPE_REGION_BYTES: u64 = ALIGN_BYTES;
 /// Design limit: most existing partitions accepted in a wipe plan. Windows
 /// allows 128 on GPT (`gpt.md` §10); 256 leaves room for MBR layouts.

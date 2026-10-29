@@ -465,5 +465,9 @@ GRANT EXECUTE ON FUNCTION usgp_macs_valid(bytea[]), usgp_auth_code_guard(),
     TO usgp_app;
 
 -- Administrative role (decisions 0016, 0021): boot-service enrolment and
--- disabling only; no DELETE.
+-- disabling, and raising a boot-policy generation after a database
+-- restore (finding NIST-013; the guard still refuses any decrease); no
+-- DELETE.
 GRANT SELECT, INSERT, UPDATE ON boot_service TO usgp_admin;
+GRANT SELECT, INSERT, UPDATE ON boot_policy_generation TO usgp_admin;
+GRANT EXECUTE ON FUNCTION usgp_boot_policy_generation_guard() TO usgp_admin;

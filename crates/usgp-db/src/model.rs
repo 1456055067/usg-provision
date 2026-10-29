@@ -491,6 +491,49 @@ pub struct ChosenPackage {
     pub revision: u64,
 }
 
+/// The source network of an address: the IPv4 address itself, or the
+/// IPv6 /64 that contains it (the per-source key of the device rate
+/// limits and the token binding, decision 0023 item 1; an IPv4-mapped
+/// IPv6 address counts as its IPv4 address). Returns the network address
+/// and its prefix length.
+#[must_use]
+pub fn source_network(ip: IpAddr) -> (IpAddr, u8) {
+    match ip {
+        IpAddr::V4(_) => (ip, 32),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => (IpAddr::V4(v4), 32),
+            None => {
+                let bits = u128::from(v6) & !(u128::from(u64::MAX));
+                (IpAddr::V6(std::net::Ipv6Addr::from(bits)), 64)
+            }
+        },
+    }
+}
+
+/// Which sessions [`crate::RepoTx::count_device_sessions`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScope {
+    /// Every session.
+    All,
+    /// Sessions from the source network of this address
+    /// ([`source_network`]).
+    SourceNetwork(IpAddr),
+    /// Sessions resolved to this boot service.
+    BootService(BootServiceId),
+}
+
+impl SessionScope {
+    /// True if `s` is in this scope.
+    #[must_use]
+    pub fn contains(&self, s: &DeviceSession) -> bool {
+        match *self {
+            Self::All => true,
+            Self::SourceNetwork(ip) => source_network(s.source_ip) == source_network(ip),
+            Self::BootService(b) => s.boot_service_id == Some(b),
+        }
+    }
+}
+
 /// A new device session (state `awaiting_authorisation`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewDeviceSession {

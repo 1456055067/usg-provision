@@ -396,14 +396,15 @@ pub(crate) fn volume_label(root: &[u16]) -> io::Result<Vec<u16>> {
 /// Result of asking to enable a privilege.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrivilegeOutcome {
-    /// Enabled (`ERROR_SUCCESS` after a nonzero return).
-    Enabled,
+    /// Enabled or disabled as asked (`ERROR_SUCCESS` after a nonzero
+    /// return).
+    Adjusted,
     /// The token does not hold it (`ERROR_NOT_ALL_ASSIGNED`, spec §10:
     /// success of the call does not mean the privilege was enabled).
     NotHeld,
 }
 
-/// A privilege [`enable_privilege`] may enable. The name constants come
+/// A privilege [`adjust_privilege`] may enable or disable. The name constants come
 /// from windows-sys, so no pointer crosses into this module from callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrivilegeName {
@@ -421,8 +422,18 @@ pub(crate) enum PrivilegeName {
     CreateSymbolicLink,
 }
 
-/// Enables `p` in the process token (spec §10).
-pub(crate) fn enable_privilege(p: PrivilegeName) -> io::Result<PrivilegeOutcome> {
+/// Enables (`enable`) or disables `p` in the process token (spec §10:
+/// `AdjustTokenPrivileges` enables or disables a privilege the token
+/// already holds; attribute `SE_PRIVILEGE_ENABLED` to enable, no
+/// attribute to disable).
+///
+/// The token is opened as topic 23 §26 ("Getting the token for
+/// `AdjustTokenPrivileges`", SR-7) describes: `GetCurrentProcess` gives a
+/// pseudo handle that need not be closed, and `OpenProcessToken` asks for
+/// `TOKEN_ADJUST_PRIVILEGES` (to adjust) and `TOKEN_QUERY`; the returned
+/// token handle must be closed (`OwnedHandle` below). The access-right
+/// values come from windows-sys (OPEN-WAPI-1).
+pub(crate) fn adjust_privilege(p: PrivilegeName, enable: bool) -> io::Result<PrivilegeOutcome> {
     let name = match p {
         PrivilegeName::SystemEnvironment => SE_SYSTEM_ENVIRONMENT_NAME,
         PrivilegeName::Restore => windows_sys::Win32::Security::SE_RESTORE_NAME,
@@ -433,9 +444,10 @@ pub(crate) fn enable_privilege(p: PrivilegeName) -> io::Result<PrivilegeOutcome>
         }
     };
     let mut raw_token: HANDLE = ptr::null_mut();
-    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no
-    // close. `raw_token` is a valid out parameter; on success it receives a
-    // new token handle owned by this function.
+    // SAFETY: `GetCurrentProcess` takes no argument and returns a pseudo
+    // handle for this process that needs no close (topic 23 §26).
+    // `raw_token` is a valid, writable out parameter; on success it
+    // receives a new token handle, which is taken over just below.
     let ok = unsafe {
         OpenProcessToken(
             GetCurrentProcess(),
@@ -448,7 +460,7 @@ pub(crate) fn enable_privilege(p: PrivilegeName) -> io::Result<PrivilegeOutcome>
     }
     // SAFETY: `raw_token` is a valid handle just returned by a successful
     // `OpenProcessToken`, owned by nothing else; `OwnedHandle` closes it
-    // exactly once when dropped.
+    // exactly once when dropped (topic 23 §26: it must be closed).
     let token = unsafe { OwnedHandle::from_raw_handle(raw_token) };
 
     let mut luid = LUID::default();
@@ -464,7 +476,7 @@ pub(crate) fn enable_privilege(p: PrivilegeName) -> io::Result<PrivilegeOutcome>
         PrivilegeCount: 1,
         Privileges: [LUID_AND_ATTRIBUTES {
             Luid: luid,
-            Attributes: SE_PRIVILEGE_ENABLED,
+            Attributes: if enable { SE_PRIVILEGE_ENABLED } else { 0 },
         }],
     };
     // SAFETY: `token` is an open token handle with TOKEN_ADJUST_PRIVILEGES
@@ -491,7 +503,7 @@ pub(crate) fn enable_privilege(p: PrivilegeName) -> io::Result<PrivilegeOutcome>
     if is_os_error(&last, ERROR_NOT_ALL_ASSIGNED) {
         return Ok(PrivilegeOutcome::NotHeld);
     }
-    Ok(PrivilegeOutcome::Enabled)
+    Ok(PrivilegeOutcome::Adjusted)
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,8 +1333,13 @@ use windows_sys::Win32::Storage::FileSystem::{
 ///
 /// Before any pointer to `sd` is passed, the bytes are checked by
 /// `crate::parse::check_security_descriptor` (topic 24 §7 to §9, layouts
-/// from windows-sys): every SID, ACL and ACE lies inside the buffer. A
-/// null DACL is refused (topic 23 §20: fail securely). Then
+/// from windows-sys). What that check establishes, and no more: the fixed
+/// header is present, revision 1 and self-relative; the owner and group
+/// SIDs (revision, sub-authority count and length) lie inside the buffer;
+/// each ACL's header and its `AclSize` lie inside the buffer; and each
+/// ACE's header and its `AceSize` extent lie inside its ACL. It does not
+/// look inside an ACE body (its access mask, or the SID an ACE carries).
+/// A null DACL is refused (topic 23 §20: fail securely). Then
 /// `IsValidSecurityDescriptor` must accept it, and only after that is its
 /// length read and required to fit (§20: the length is undefined for an
 /// invalid descriptor).
@@ -1360,17 +1377,23 @@ fn checked_descriptor(sd: &[u8]) -> io::Result<(AlignedBuf, crate::parse::Descri
     let len = len_u32(sd.len())?;
     let mut buf = AlignedBuf::from_bytes(sd);
     let p = buf.as_mut_ptr();
-    // SAFETY: `p` points to `buf`, a live, 8-byte-aligned copy of `sd`
-    // that the check above showed is self-relative with every SID, ACL
-    // and ACE inside the buffer, so the function reads only inside it.
+    // SAFETY: `p` points to `buf`, a live, 8-byte-aligned copy of `sd`,
+    // valid for reads of `len` bytes. The check above bounds the header,
+    // the owner and group SIDs, each ACL's extent (`AclSize`) and each ACE
+    // header and extent (`AceSize`, inside its ACL). Topic 23 §20: this
+    // function checks the parts that are present and does not check the
+    // contents of individual ACLs or ACEs, so the parts it reads are ones
+    // the check bounded.
     if unsafe { IsValidSecurityDescriptor(p) } == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "security descriptor is not valid",
         ));
     }
-    // SAFETY: as above; the descriptor was just found valid, so the
-    // length is defined (topic 23 §20).
+    // SAFETY: `p` as above (live, aligned, `len` bytes, every offset and
+    // size field bounded by the check); the descriptor was just found
+    // valid, so the length is defined (topic 23 §20) and is compared with
+    // `len` below.
     let reported = unsafe { GetSecurityDescriptorLength(p) };
     if reported == 0 || reported > len {
         return Err(io::Error::new(
@@ -1449,9 +1472,16 @@ pub(crate) fn set_file_security(file: &File, sd: &[u8], info: u32) -> io::Result
     }
     let pick = |want: u32, v: PSID| if info & want != 0 { v } else { ptr::null_mut() };
     // SAFETY: `file` is an open handle that outlives the call; the SID and
-    // ACL pointers are null or point into `buf`, live and validated as
-    // above, and are only read; parts not named in `flags` are passed as
-    // null.
+    // ACL pointers are null or point into `buf`, which stays live and is
+    // only read; parts not named in `flags` are passed as null. Each SID
+    // and each ACL's `AclSize` extent lies inside `buf` (checked above),
+    // as does each ACE's `AceSize` extent. ACE bodies (an ACE's mask and
+    // SID) are not parsed by this crate (their layouts are not in topic
+    // 24, §12); their validity is left to Windows' own check of the ACL
+    // it is given.
+    // POAM: SEC-004 residual - ACE bodies are not bounded by this crate
+    // before SetSecurityInfo; needs the ACE body layouts summarised (spec
+    // request) and a per-type check in parse.rs.
     let rc = unsafe {
         SetSecurityInfo(
             file.as_raw_handle(),

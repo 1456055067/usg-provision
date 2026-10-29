@@ -320,16 +320,19 @@ async fn assignment_etag_and_ambiguity() {
         BootServiceStatus::Active,
     )
     .await;
-    let s = h.open_session(&["02:00:00:00:02:02"]).await;
-    let (_, code) = h.issue_code().await;
-    assert_eq!(h.submit_code(&s.token, &code).await.status, 200);
+    // Finding SEC-001: no session is opened then (403, recorded).
     let r = h
-        .dev("GET", "/v1/device/session/packages", Some(&s.token), None)
+        .dev(
+            "POST",
+            "/v1/device/sessions",
+            None,
+            Some(crate::common::hello(&["02:00:00:00:02:02"])),
+        )
         .await;
-    assert_eq!(r.json()["packages"], serde_json::json!([]));
-    let opened = &h.events("device.session.opened");
+    assert_eq!(r.status, 403);
+    let refused = h.events("device.session.open_refused");
     assert!(
-        opened
+        refused
             .last()
             .unwrap()
             .detail

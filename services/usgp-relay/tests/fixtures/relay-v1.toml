@@ -54,6 +54,7 @@ recheck_interval_secs = 61
 file = "/etc/usgp-relay/suppress.toml"
 reload_interval_secs = 3
 
+# Required (enabled = true) whenever the boot manifest has a [pe_kit].
 [server_feed]
 enabled = true
 url = "https://server.lab:8443"

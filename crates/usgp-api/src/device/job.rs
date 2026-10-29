@@ -17,9 +17,12 @@
 //! `failed` is final; `progress` reports update byte counts at most every
 //! `device_api.progress_min_interval` and are not audited. Every state
 //! change is an audit record in the same transaction (REQ-JOB-012).
-//! `succeeded` also adds a boot stop for each of the job's MACs and bumps
-//! the boot service's policy generation (REQ-BOOT-067), in the same
-//! transaction.
+//! `succeeded` also completes step 5 (with its `job.step.*` records),
+//! adds a boot stop for each of the job's MACs on every active boot
+//! service whose subnets contain the device's source address, and bumps
+//! each such service's policy generation (REQ-BOOT-067, decision 0023 item
+//! 2), in the same transaction. The final record (`job.succeeded` or
+//! `job.failed`) carries the job's step history (finding NIST-009).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-7, SI-7(1) - chunks verified against the signed
@@ -27,13 +30,36 @@
 // - NIST 800-53: AC-3, SC-23 - bearer bound to the session and its job;
 //   report order enforced (a forged success cannot skip steps).
 // - NIST 800-53: AU-2, AU-3, AU-12 - content reads per pass, every job
-//   state change, boot stops (REQ-JOB-012, decision 0018 item 10).
+//   and step state change (step 5 included), boot stops marked as based
+//   on claimed MACs (REQ-JOB-012, decision 0018 item 10, decision 0023
+//   item 2); the final record carries the step history.
+// - NIST 800-53: AU-5 (partial) - see the POAM below.
 // - NIST 800-53: SC-5 - chunk concurrency per job; progress records
 //   rate-limited.
 // - SPEC: specs/progress.md#REQ-JOB-002, #REQ-JOB-005, #REQ-JOB-012,
 //   #REQ-JOB-013; specs/preinstall-env.md#REQ-PE-016;
 //   specs/boot-network.md#REQ-BOOT-067
 // - Decisions 0011, 0018 items 9 and 10, 0021 items 2 and 4
+
+// POAM: AU-5 (post-wipe scope) - after the wipe the device carries on
+// with its steps even while the server answers 503 `audit_unavailable`
+// (it cannot undo the wipe); a step whose report was refused has no
+// `job.step.*` record until a later report succeeds. The final record
+// carries the server's step history, but steps the device ran while the
+// audit trail was down are not recorded as they happened (finding
+// NIST-009).
+
+// POAM: SC-23/IA-3 (boot stops, M5) - stops are recorded for the MACs the
+// agent claims (guarded at confirmation, decision 0023 item 2), not for
+// the client hardware address the relay observed in the device's DHCP
+// requests, and not by the SMBIOS system UUID / DHCP option 97 client
+// GUID. A holder of a code can still claim MACs of devices that have no
+// stop and no running job. Target: M5.
+
+// POAM: CA-5 (SMBIOS identifier, finding NIST-015) - the session and the
+// job identify the device only by claimed MACs; the SMBIOS machine
+// identifier is not collected or recorded. Target: M5, with the stop
+// keying above.
 
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderValue};
@@ -43,6 +69,7 @@ use usgp_common::Sha256Digest;
 use usgp_db::{DbError, Job, NewBootStop, RepoTx, Store};
 use usgp_proto::content_manifest::chunk_count;
 use usgp_proto::device::SessionState;
+use usgp_proto::ops::BootServiceStatus;
 use usgp_proto::{
     BootStopId, ContentState, JobId, JobState, ProgressAckV1, ProgressEvent, ProgressV1, Step,
     StepState, codes,
@@ -54,7 +81,7 @@ use crate::context::Api;
 use crate::error::ApiError;
 use crate::handlers::auth_codes::random;
 use crate::handlers::content::verified_manifest;
-use crate::handlers::{json_response, parse_json, read_body};
+use crate::handlers::{json_response, parse_device_json, read_body};
 
 /// Longest chunk index text (u64).
 const MAX_INDEX_DIGITS: usize = 20;
@@ -244,6 +271,47 @@ fn state_of(steps: &[usgp_db::JobStep], step: Step) -> Option<StepState> {
     steps.iter().find(|s| s.step == step).map(|s| s.state)
 }
 
+/// The step history for a job's final record (finding NIST-009):
+/// `step:state:started_us:finished_us` per step, `-` for no time.
+fn step_history(steps: &[usgp_db::JobStep]) -> String {
+    let t = |u: Option<usgp_proto::UnixMicros>| {
+        u.map_or_else(|| "-".to_owned(), |u| u.as_micros().to_string())
+    };
+    steps
+        .iter()
+        .map(|s| {
+            format!(
+                "{}:{}:{}:{}",
+                s.step.get(),
+                s.state.as_str(),
+                t(s.started_at),
+                t(s.finished_at)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The boot services a succeeded job's stops go on: its own, then every
+/// other active boot service whose served subnets contain the device's
+/// source address (decision 0023 item 2), each once.
+async fn stop_services<T: RepoTx>(
+    tx: &mut T,
+    job: &Job,
+    source_ip: std::net::IpAddr,
+) -> Result<Vec<usgp_proto::BootServiceId>, ApiError> {
+    let mut v = vec![job.boot_service_id];
+    for b in tx.list_boot_services().await? {
+        if b.status == BootServiceStatus::Active
+            && b.served_subnets.contains(source_ip)
+            && !v.contains(&b.id)
+        {
+            v.push(b.id);
+        }
+    }
+    Ok(v)
+}
+
 /// `POST /v1/device/jobs/{job}/progress`.
 pub(crate) async fn progress<S: Store + 'static>(
     api: &Api<S>,
@@ -255,7 +323,7 @@ pub(crate) async fn progress<S: Store + 'static>(
     let job_id = job_param(ctx)?;
     let max = api.config().device.max_json_bytes;
     let body = read_body(req, max).await?;
-    let p = parse_json!(ProgressV1, &body, max)?;
+    let p = parse_device_json!(ProgressV1, &body, max)?;
     let at = api.now()?;
     let mut tx = api.store().begin().await?;
     let job = own_job(&mut tx, ctx, job_id, true).await?;
@@ -388,6 +456,7 @@ pub(crate) async fn progress<S: Store + 'static>(
                 Err(DbError::Conflict { .. }) => return Err(not_running(job.state)),
                 Err(e) => return Err(e.into()),
             }
+            let history = step_history(&tx.job_steps(job_id).await?);
             let files = f
                 .files
                 .iter()
@@ -403,7 +472,8 @@ pub(crate) async fn progress<S: Store + 'static>(
                         .with("category", f.category.as_str())
                         .with("count", &f.count)
                         .with("attempts", &f.attempts)
-                        .with("files", &files),
+                        .with("files", &files)
+                        .with("steps", &history),
                 );
             recs.push(api.append(&mut tx, &d).await?);
             state = JobState::Failed;
@@ -414,13 +484,24 @@ pub(crate) async fn progress<S: Store + 'static>(
                     "success is reported only after step 4 completed",
                 )));
             }
+            // Step 5 changes state with its own records (finding NIST-009).
             let last = Step::REPORT_RESTART;
             if state_of(&steps, last) == Some(StepState::Pending) {
                 tx.set_job_step(job_id, last, StepState::Running, at)
                     .await?;
+                let d = ctx
+                    .ok("job.step.started")
+                    .target("job", &job_target)
+                    .detail(step_detail(last).with("implied_by", "succeeded"));
+                recs.push(api.append(&mut tx, &d).await?);
             }
             if state_of(&steps, last) != Some(StepState::Done) {
                 tx.set_job_step(job_id, last, StepState::Done, at).await?;
+                let d = ctx
+                    .ok("job.step.completed")
+                    .target("job", &job_target)
+                    .detail(step_detail(last).with("implied_by", "succeeded"));
+                recs.push(api.append(&mut tx, &d).await?);
             }
             match tx
                 .set_job_state(job_id, &[JobState::Running], JobState::Succeeded, at)
@@ -432,40 +513,65 @@ pub(crate) async fn progress<S: Store + 'static>(
                 }
                 Err(e) => return Err(e.into()),
             }
-            // REQ-BOOT-067: stop offering a boot program to this device.
+            // REQ-BOOT-067: stop offering a boot program to this device,
+            // on every active boot service that serves its source address
+            // and on the job's own (decision 0023 item 2). The MACs are
+            // the agent's claim, checked at confirmation.
+            let services = stop_services(&mut tx, &job, s.source_ip).await?;
             let mut added = 0usize;
-            for mac in job.macs.as_slice() {
-                let stop = NewBootStop {
-                    id: BootStopId::from_random_bytes(random::<16>()?),
-                    boot_service_id: job.boot_service_id,
-                    mac: *mac,
-                    job_id,
-                    created_at: at,
-                };
-                if tx.add_boot_stop(&stop).await? {
-                    added = added.saturating_add(1);
-                    let d = ctx
-                        .ok("boot_stop.added")
-                        .target("boot_stop", &stop.id.to_string())
-                        .detail(
-                            Detail::new()
-                                .with("mac", &mac.to_string())
-                                .with("job_id", &job_target)
-                                .with("boot_service_id", &job.boot_service_id.to_string()),
-                        );
-                    recs.push(api.append(&mut tx, &d).await?);
+            let mut generations = Vec::with_capacity(services.len());
+            for bs in &services {
+                let mut added_here = 0usize;
+                for mac in job.macs.as_slice() {
+                    let stop = NewBootStop {
+                        id: BootStopId::from_random_bytes(random::<16>()?),
+                        boot_service_id: *bs,
+                        mac: *mac,
+                        job_id,
+                        created_at: at,
+                    };
+                    if tx.add_boot_stop(&stop).await? {
+                        added_here = added_here.saturating_add(1);
+                        let d = ctx
+                            .ok("boot_stop.added")
+                            .target("boot_stop", &stop.id.to_string())
+                            .detail(
+                                Detail::new()
+                                    .with("mac", &mac.to_string())
+                                    .with("claimed", "mac")
+                                    .with("mac_basis", "agent_claim")
+                                    .with("job_id", &job_target)
+                                    .with("boot_service_id", &bs.to_string())
+                                    .with("job_boot_service", &(*bs == job.boot_service_id)),
+                            );
+                        recs.push(api.append(&mut tx, &d).await?);
+                    }
                 }
+                let generation = if added_here > 0 {
+                    tx.bump_boot_policy_generation(*bs).await?
+                } else {
+                    tx.boot_policy_generation(*bs).await?
+                };
+                generations.push(format!("{bs}:{generation}"));
+                added = added.saturating_add(added_here);
             }
-            let generation = if added > 0 {
-                tx.bump_boot_policy_generation(job.boot_service_id).await?
-            } else {
-                tx.boot_policy_generation(job.boot_service_id).await?
-            };
+            let history = step_history(&tx.job_steps(job_id).await?);
             let d = ctx.ok("job.succeeded").target("job", &job_target).detail(
                 Detail::new()
                     .with("seq", &p.seq)
+                    .with(
+                        "macs",
+                        &job.macs
+                            .as_slice()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                    .with("claimed", "macs")
                     .with("boot_stops_added", &added)
-                    .with("boot_policy_generation", &generation),
+                    .with("boot_policy_generations", &generations.join(","))
+                    .with("steps", &history),
             );
             recs.push(api.append(&mut tx, &d).await?);
             state = JobState::Succeeded;

@@ -17,8 +17,9 @@
 // - NIST 800-53: AU-2, AU-3, AU-12 - every device choice and session state
 //   change audited (decision 0018 item 10, REQ-TGT-016); never the code or
 //   the token.
-// - NIST 800-53: SC-5 - session caps per source and in total, opens per
-//   source per minute.
+// - NIST 800-53: SC-5 - no session without a boot service; pending caps
+//   per source network (IPv4 address or IPv6 /64), per boot service and in
+//   total; opens per source and in total per minute (finding SEC-001).
 // - SPEC: specs/targeting.md#REQ-TGT-004, #REQ-TGT-005, #REQ-TGT-008,
 //   #REQ-TGT-009, #REQ-TGT-010, #REQ-TGT-011, #REQ-TGT-013, #REQ-TGT-014,
 //   #REQ-TGT-016; specs/disk.md#REQ-DISK-003, #REQ-DISK-004,
@@ -34,7 +35,7 @@ use hyper::{Request, Response, StatusCode};
 use usgp_audit::{Detail, Outcome};
 use usgp_db::{
     BootService, ChosenPackage, DbError, DeviceSession, NewDeviceSession, RepoTx, SessionAuth,
-    Store,
+    SessionScope, Store,
 };
 use usgp_proto::device::{
     CancelV1, ChooseDiskV1, ChoosePackageV1, CodeSubmitV1, DeviceHelloV1, DevicePackageListV1,
@@ -45,7 +46,7 @@ use usgp_proto::ops::BootServiceStatus;
 use usgp_proto::{DisplayCode, SessionId, SessionToken, codes};
 use zeroize::Zeroizing;
 
-use super::auth::{DeviceCtx, opened_actor, require, state_error};
+use super::auth::{DeviceCtx, opened_actor, pending_due, require, state_error};
 use super::offer::{NoOffer, offered};
 use crate::authn::AuthClass;
 use crate::body::ApiBody;
@@ -53,13 +54,17 @@ use crate::context::Api;
 use crate::error::ApiError;
 use crate::handlers::auth_codes::{keys_unavailable, plus_secs, random};
 use crate::handlers::sessions::{PENDING, macs_text};
-use crate::handlers::{code_of, json_response, parse_json, read_body};
+use crate::handlers::{code_of, json_response, parse_device_json, read_body};
 
 /// Draws at most this many ids, tokens and display codes on a collision.
 const DRAWS: usize = 4;
 
 /// Reason when the boot service has no usable package (REQ-TGT-008).
 const NO_USABLE_PACKAGE: &str = "no_usable_package";
+
+/// Reason when no single active boot service serves the source address
+/// (finding SEC-001: no session is opened then).
+pub(crate) const NO_BOOT_SERVICE: &str = "no_boot_service";
 
 /// End reason when the code attempts are used up.
 pub(crate) const CODE_ATTEMPTS_EXHAUSTED: &str = "code_attempts_exhausted";
@@ -153,7 +158,7 @@ pub(crate) async fn status_view<S: Store + 'static, T: RepoTx>(
 }
 
 /// Locks the session in `tx` and checks it is in one of `allowed` and
-/// not past its expiry.
+/// not past its expiry (nor idle while never authorised).
 pub(crate) async fn lock_live<S: Store + 'static>(
     api: &Api<S>,
     tx: &mut S::Tx,
@@ -165,7 +170,11 @@ pub(crate) async fn lock_live<S: Store + 'static>(
         .await?
         .ok_or_else(|| ApiError::internal_error("session vanished"))?;
     require(&s, allowed)?;
-    if PENDING.contains(&s.state) && api.now()? >= s.expires_at {
+    if pending_due(
+        &s,
+        api.now()?,
+        api.config().device.unauthorised_idle_timeout,
+    ) {
         // The next request moves it to `expired` (audited); this one is
         // refused now.
         return Err(state_error(SessionState::Expired));
@@ -197,7 +206,7 @@ pub(crate) async fn open<S: Store + 'static>(
 ) -> Result<Response<ApiBody>, ApiError> {
     let c = &api.config().device;
     let body = read_body(req, c.max_json_bytes).await?;
-    let hello = parse_json!(DeviceHelloV1, &body, c.max_json_bytes)?;
+    let hello = parse_device_json!(DeviceHelloV1, &body, c.max_json_bytes)?;
     let claims = || {
         Detail::new()
             .with(
@@ -228,6 +237,15 @@ pub(crate) async fn open<S: Store + 'static>(
         let e = rate_limited("too many sessions were opened from this address; try again later");
         return Err(api.capped_refusal(ctx.ip, "rate_limited", d, e).await);
     }
+    // Finding SEC-001: a ceiling on opens from every source together.
+    if !api.inner.device.opens_total.admit(Instant::now()) {
+        let d = ctx
+            .draft("device.session.open_refused", Outcome::Refused)
+            .reason(codes::RATE_LIMITED.as_str())
+            .detail(claims().with("limit", "session_opens_per_min"));
+        let e = rate_limited("too many sessions are being opened; try again later");
+        return Err(api.capped_refusal(ctx.ip, "rate_limited", d, e).await);
+    }
     let at = api.now()?;
     let expires_at = plus_secs(at, c.pending_session_ttl.as_secs())?;
     for _ in 0..DRAWS {
@@ -237,10 +255,40 @@ pub(crate) async fn open<S: Store + 'static>(
         drop(raw);
         let display_code = DisplayCode::from_random_bytes(random::<4>()?);
         let mut tx = api.store().begin().await?;
+        // Finding SEC-001: no session unless exactly one active boot
+        // service serves the source address (403, capped record).
+        let (bs, resolution) = resolve_boot_service(&mut tx, ctx.ip).await?;
+        let Some(bs) = bs else {
+            tx.rollback().await;
+            let d = ctx
+                .draft("device.session.open_refused", Outcome::Refused)
+                .reason(NO_BOOT_SERVICE)
+                .detail(
+                    claims()
+                        .with("boot_service_resolution", resolution)
+                        .with("source_ip", &ctx.ip.to_string()),
+                );
+            let e = ApiError::new(
+                StatusCode::FORBIDDEN,
+                codes::FORBIDDEN,
+                "no boot service serves this network; ask an operator",
+            );
+            return Err(api.capped_refusal(ctx.ip, NO_BOOT_SERVICE, d, e).await);
+        };
         tx.lock_device_session_quota().await?;
-        let total = tx.count_device_sessions(&PENDING, None).await?;
-        let mine = tx.count_device_sessions(&PENDING, Some(ctx.ip)).await?;
-        if total >= c.max_pending_sessions || mine >= c.max_pending_sessions_per_ip {
+        let total = tx
+            .count_device_sessions(&PENDING, SessionScope::All)
+            .await?;
+        let mine = tx
+            .count_device_sessions(&PENDING, SessionScope::SourceNetwork(ctx.ip))
+            .await?;
+        let on_service = tx
+            .count_device_sessions(&PENDING, SessionScope::BootService(bs.id))
+            .await?;
+        if total >= c.max_pending_sessions
+            || mine >= c.max_pending_sessions_per_ip
+            || on_service >= c.max_pending_sessions_per_boot_service
+        {
             tx.rollback().await;
             let d = ctx
                 .draft("device.session.open_refused", Outcome::Refused)
@@ -248,16 +296,17 @@ pub(crate) async fn open<S: Store + 'static>(
                 .detail(
                     claims()
                         .with("pending_total", &total)
-                        .with("pending_from_source", &mine),
+                        .with("pending_from_source", &mine)
+                        .with("pending_on_boot_service", &on_service)
+                        .with("boot_service_id", &bs.id.to_string()),
                 );
             let e = rate_limited("too many devices are waiting; try again later");
             return Err(api.capped_refusal(ctx.ip, "capacity", d, e).await);
         }
-        let (bs, resolution) = resolve_boot_service(&mut tx, ctx.ip).await?;
         let new = NewDeviceSession {
             id,
             token_sha256: usgp_crypto::sha256(token.expose().as_bytes()),
-            boot_service_id: bs.as_ref().map(|b| b.id),
+            boot_service_id: Some(bs.id),
             source_ip: ctx.ip,
             macs: hello.macs.clone(),
             firmware: hello.firmware,
@@ -292,11 +341,7 @@ pub(crate) async fn open<S: Store + 'static>(
             .detail(
                 claims()
                     .with("display_code", display_code.as_str())
-                    .with(
-                        "boot_service_id",
-                        &bs.as_ref()
-                            .map_or_else(|| "none".to_owned(), |b| b.id.to_string()),
-                    )
+                    .with("boot_service_id", &bs.id.to_string())
                     .with("boot_service_resolution", resolution)
                     .with("expires_at_us", &expires_at.as_micros()),
             );
@@ -349,7 +394,7 @@ pub(crate) async fn code<S: Store + 'static>(
         let e = rate_limited("too many codes were tried from this address; wait a minute");
         return Err(api.capped_refusal(ctx.ip, "rate_limited", d, e).await);
     }
-    let submit = parse_json!(CodeSubmitV1, &body, c.max_json_bytes)?;
+    let submit = parse_device_json!(CodeSubmitV1, &body, c.max_json_bytes)?;
     let tag = keys.code_tag(&submit.code);
     drop(submit);
     let at = api.now()?;
@@ -519,7 +564,7 @@ pub(crate) async fn choose_package<S: Store + 'static>(
     require(s, &[SessionState::Authorised])?;
     let max = api.config().device.max_json_bytes;
     let body = read_body(req, max).await?;
-    let choice = parse_json!(ChoosePackageV1, &body, max)?;
+    let choice = parse_device_json!(ChoosePackageV1, &body, max)?;
     let mut tx = api.store().begin().await?;
     let cur = lock_live(api, &mut tx, s.id, &[SessionState::Authorised]).await?;
     let offers = offered(api, &mut tx, &cur).await?.unwrap_or_default();
@@ -561,7 +606,7 @@ pub(crate) async fn choose_disk<S: Store + 'static>(
     require(s, &[SessionState::Authorised])?;
     let max = api.config().device.max_json_bytes;
     let body = read_body(req, max).await?;
-    let ChooseDiskV1 { disk } = parse_json!(ChooseDiskV1, &body, max)?;
+    let ChooseDiskV1 { disk } = parse_device_json!(ChooseDiskV1, &body, max)?;
     let mut tx = api.store().begin().await?;
     let cur = lock_live(api, &mut tx, s.id, &[SessionState::Authorised]).await?;
     let Some(chosen) = cur.chosen_package else {
@@ -637,7 +682,7 @@ pub(crate) async fn cancel<S: Store + 'static>(
     require(s, &PENDING)?;
     let max = api.config().device.max_json_bytes;
     let body = read_body(req, max).await?;
-    let CancelV1 {} = parse_json!(CancelV1, &body, max)?;
+    let CancelV1 {} = parse_device_json!(CancelV1, &body, max)?;
     let at = api.now()?;
     let mut tx = api.store().begin().await?;
     let cur = lock_live(api, &mut tx, s.id, &PENDING).await?;
@@ -674,7 +719,7 @@ pub(crate) async fn end<S: Store + 'static>(
     require(s, &PENDING)?;
     let max = api.config().device.max_json_bytes;
     let body = read_body(req, max).await?;
-    let end = parse_json!(EndSessionV1, &body, max)?;
+    let end = parse_device_json!(EndSessionV1, &body, max)?;
     let at = api.now()?;
     let mut tx = api.store().begin().await?;
     let cur = lock_live(api, &mut tx, s.id, &PENDING).await?;

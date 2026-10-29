@@ -14,6 +14,7 @@
 //! | `--check-config` with valid config and content | exit 0, state `running` |
 //! | `--check-config` with tampered or missing content | exit 3 |
 //! | `--check-config` / `--config` with an unusable file | exit 78 |
+//! | `--check-config` / `--config` with a `[pe_kit]` and no `[server_feed]` | exit 78 |
 //!
 //! The tests run as an ordinary user, so every invocation with a
 //! configuration names the test's uid with `--admin-uid` (the relay trusts
@@ -372,6 +373,84 @@ mod startup {
         let out = relay_path(&["--check-config"], &p);
         assert_eq!(out.status.code(), Some(78), "{}", text(&out.stderr));
         assert!(text(&out.stderr).contains("readable by others"));
+    }
+
+    /// Publishes a complete PE kit and writes a configuration whose
+    /// program is the kit's boot program, with `extra` appended.
+    fn kit_lab(s: &Scratch, extra: &str) -> std::path::PathBuf {
+        let files: Vec<(&str, Vec<u8>)> =
+            ["bootmgfw.efi", "Boot/BCD", "Boot/boot.sdi", "Boot/boot.wim"]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (*n, bytes(100 + i, 9)))
+                .collect();
+        let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+        s.publish(&refs);
+        let mut manifest = std::fs::read_to_string(s.manifest_path()).unwrap();
+        manifest.push_str(&format!(
+            "\n[pe_kit]\nboot_program = \"bootmgfw.efi\"\nbcd = \"Boot/BCD\"\n\
+             sdi = \"Boot/boot.sdi\"\nwim = \"Boot/boot.wim\"\npe_content_sha256 = \"{}\"\n",
+            usgp_crypto::sha256(&files[3].1).to_hex()
+        ));
+        std::fs::write(s.manifest_path(), manifest).unwrap();
+        let p = write_config_toml(s, extra);
+        let text_p = std::fs::read_to_string(&p)
+            .unwrap()
+            .replace(PROGRAM, "bootmgfw.efi");
+        std::fs::write(&p, text_p).unwrap();
+        set_mode(&p, 0o644);
+        p
+    }
+
+    /// SEC-005 / NIST-014 (REQ-BOOT-067): a manifest with a `[pe_kit]`
+    /// and no enabled `[server_feed]` refuses `--check-config` and
+    /// `--config` with exit 78; `--config` audits `relay.start` (failure)
+    /// and `relay.config.rejected` naming `server_feed.enabled`. A
+    /// disabled section counts as absent.
+    #[test]
+    fn pe_kit_without_feed_refused() {
+        for (tag, extra) in [
+            ("kit-nofeed", ""),
+            ("kit-feedoff", "[server_feed]\nenabled = false\n"),
+        ] {
+            let s = Scratch::new(tag);
+            let p = kit_lab(&s, extra);
+
+            let out = relay_path(&["--check-config"], &p);
+            assert_eq!(out.status.code(), Some(78), "{tag}: {}", text(&out.stderr));
+            assert!(text(&out.stderr).contains("[pe_kit]"), "{tag}");
+            assert!(text(&out.stdout).contains("relay.config.rejected"), "{tag}");
+
+            let out = relay_path(&["--config"], &p);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(78), "{tag}: {stderr}");
+            assert!(stderr.contains("requires [server_feed]"), "{stderr}");
+            let stdout = text(&out.stdout);
+            let start = stdout
+                .lines()
+                .find(|l| l.contains("relay.start"))
+                .unwrap_or_else(|| panic!("no relay.start in {stdout}"));
+            assert!(start.contains("\"outcome\":\"failure\""), "{start}");
+            assert!(start.contains("[pe_kit]"), "{start}");
+            let rejected = stdout
+                .lines()
+                .find(|l| l.contains("relay.config.rejected"))
+                .unwrap_or_else(|| panic!("no relay.config.rejected in {stdout}"));
+            assert!(rejected.contains("server_feed.enabled"), "{rejected}");
+            // Refused before any file is hashed or socket bound.
+            assert!(!stdout.contains("boot.file.verified"), "{stdout}");
+        }
+    }
+
+    /// An M1 manifest (no `[pe_kit]`) still needs no `[server_feed]`.
+    #[test]
+    fn m1_manifest_without_feed_still_valid() {
+        let s = Scratch::new("m1-nofeed");
+        s.publish(&[(PROGRAM, &bytes(10, 1))]);
+        let p = write_config_toml(&s, "");
+        let out = relay_path(&["--check-config"], &p);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        assert!(!text(&out.stdout).contains("relay.config.rejected"));
     }
 
     #[test]

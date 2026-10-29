@@ -111,7 +111,7 @@ fn hard_drive_node_matches_written_gpt_partition() {
         let l = layout(128 * GB, lg, lg, 78).unwrap();
         let mut dev = MemBlockDevice::new(l.disk_bytes(), lg).unwrap();
         let wipe = WipePlan::for_disk(&l, &[]).unwrap();
-        wipe_and_write(&mut dev, &auth_for(l.disk_bytes(), lg), &wipe, &l).unwrap();
+        wipe_and_write(&mut dev, &auth_for(l.disk_bytes(), lg).unwrap(), &wipe, &l).unwrap();
         let view = parse_gpt(&mut dev, &GptLimits::default()).unwrap();
         let (slot, esp_entry) = view.entries[0];
         let bytes = LoadOption::windows_boot_manager(&l.esp).encode().unwrap();

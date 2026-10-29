@@ -822,7 +822,9 @@ fn wipe_authorisation_is_built_only_by_the_engine() {
     for entry in std::fs::read_dir(&src).unwrap() {
         let p = entry.unwrap().path();
         let text = std::fs::read_to_string(&p).unwrap();
-        let n = text.matches("WipeAuthorisation::new(").count();
+        let n = text
+            .matches("WipeAuthorisation::from_verified_plan(")
+            .count();
         if n > 0 {
             found.push((p.file_name().unwrap().to_string_lossy().into_owned(), n));
         }

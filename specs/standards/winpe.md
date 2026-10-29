@@ -10,7 +10,9 @@ WinPE over the network is summarised in topic 22,
 (RAM disk); these were AUDITED on 2026-10-28 (M3 re-audit round 1).
 The M3 build requests (SR-2, 2026-10-28) added §10, the PE/COFF
 `Machine` field used to check a boot program's architecture (AUDITED
-2026-10-28, spec pass).
+2026-10-28, spec pass). SR-7 (AUDITED 2026-10-29) added `wpeutil`
+Reboot and Shutdown to §5.2, and §11 (DiskPart scripted commands),
+with OPEN-WINPE-2 to 4, which stay open; the old §11 is now §12.
 
 Sources (all Microsoft Learn unless noted): "Windows PE (WinPE)",
 "Download and install the Windows ADK", "WinPE: Create bootable media",
@@ -163,7 +165,17 @@ drivers".
   Microsoft suggests it in scripts that need the network.
 - `wpeutil` can also enable or disable the WinPE firewall, restart or
   shut down WinPE, wait for removable storage, and report how WinPE
-  booted (§10).
+  booted (§5.3).
+- Restart and shut down (SR-7; AUDITED 2026-10-29): the command form
+  is `wpeutil <command> [argument]`, one command per invocation.
+  `wpeutil Reboot` restarts the current WinPE session. `wpeutil
+  Shutdown` shuts it down; Microsoft notes that closing the command
+  window or typing `exit` at it also does so. Neither command takes
+  an argument.
+- Case (CR-SR7-001; AUDITED 2026-10-29): the page does **not** say
+  whether command names are case-insensitive. Its examples spell the
+  tool name both `Wpeutil` and `wpeutil`, but always write the command
+  names in the documented capitalisation (`Reboot`, `Shutdown`).
 - WinPE includes generic drivers for many common network adapters. If a
   device's adapter is not covered, the driver is added to the image with
   DISM (recommended), or loaded at run time with `drvload` (lost at
@@ -317,6 +329,81 @@ UEFI's; the wording is ours.
   `Magic` `0x20B` and `Subsystem` `10`. Which of these the product
   checks is a clean-side choice (REQ-PE-012).
 
-## 11. Not summarised
+## 11. DiskPart scripted commands (SR-7; AUDITED 2026-10-29)
+
+Sources: Microsoft Learn Windows Commands pages "diskpart", "select
+volume", "create partition primary", "convert gpt", "assign", "attach
+vdisk", "detach vdisk"; the archived DiskPart pages "Format" and
+"Create vdisk" (Windows Server 2012 R2 docs, [archive]); "Deployment
+lab sample scripts" (facts only, no script text copied). Semantics and
+argument forms only.
+
+- **Running it.** DiskPart is run from an elevated prompt (local
+  Administrators or equivalent). Its commands act on the object that
+  has **focus**: list, then select a disk, partition, volume or
+  virtual disk. Focus stays until another object is selected; some
+  commands move it (creating a partition moves focus to the new
+  partition). Selecting a volume that maps to one partition also gives
+  focus to that partition and its disk. Microsoft's deployment samples
+  run a command file with `diskpart /s <file>`; the "diskpart" page
+  itself shows only `diskpart <parameter>` and does not describe `/s`
+  (**OPEN-WINPE-2**).
+- **Errors in scripts.** Most commands take `noerr`, "for scripting
+  only": with it, DiskPart carries on after an error; without it, an
+  error makes DiskPart exit with an error code. The pages do not list
+  the exit-code values (**OPEN-WINPE-3**).
+- **`select volume={<n>|<d>}`.** `<n>` is a volume number from
+  `list volume`; `<d>` is a drive letter or a mount-point path. With no
+  argument it shows which volume has focus. The page shows the `=`
+  form (`select volume=2`, `select volume=c`); whether the space form
+  is accepted is not stated there.
+- **`format`** (DiskPart; archived page): formats the partition or
+  volume with focus, which must be selected first. Arguments:
+  `fs=<ntfs|fat|fat32>` (UDF also listed; default file system if
+  omitted), `label=<label>` (quoted when it holds spaces), `quick`,
+  and others (`unit=`, `compress`, `override` to force a dismount,
+  `nowait`, `noerr`). The standalone `format.exe` is a different tool
+  with `/FS:`, `/V:`, `/Q` options.
+- **`create vdisk`** (archived page): `create vdisk file=<path>
+  [type=<fixed|expandable>] [maximum=<n>]` among others (`parent=`,
+  `source=`, `sd=`, `noerr`). `maximum` is in megabytes. Without
+  `type`, `parent` or `source` a **fixed** VHD is made. A new VHD is
+  like an uninitialised disk. The page does not say whether the new
+  VHD gets focus; [reading] it must be selected before it is attached.
+- **`attach vdisk [readonly] [sd=<SDDL>|usefilesd] [noerr]`**: makes
+  the selected, detached VHD appear as a local disk; if it already
+  holds a formatted volume, that volume gets a drive letter.
+- **`detach vdisk [noerr]`**: stops the selected VHD appearing as a
+  local disk.
+- **`convert gpt [noerr]`**: converts the selected **empty** basic MBR
+  disk to GPT; all partitions and volumes must be deleted first; the
+  disk must be at least 128 MB.
+- **`create partition primary [size=<n>] [offset=<n>] [id=…]
+  [align=<n>] [noerr]`**: on the selected basic disk. `size` is in MB;
+  without it the partition fills the rest of the free region.
+  `offset` and `align` are in KB. On a GPT disk without `id` it makes
+  a basic data partition (type `ebd0a0a2-b9e5-4433-87c0-68b6b72699c7`);
+  Microsoft says to use `create partition efi` and `create partition
+  msr` for those types rather than `id`. Focus moves to the new
+  partition.
+- **`assign [letter=<d>|mount=<path>] [noerr]`**: gives the selected
+  volume a drive letter or mount point; with neither, the next free
+  letter. A letter already in use is an error. The page says letters
+  cannot be given to system, boot or page-file volumes, or to a GPT
+  partition other than a basic data partition. **[reading]** This
+  conflicts with Microsoft's own deployment sample, which assigns a
+  letter to the EFI system partition it has just created
+  (**OPEN-WINPE-4**).
+- **Microsoft's sample letters and labels** (SRC-087; facts only). In
+  the UEFI/GPT sample, the system (EFI) partition is formatted FAT32
+  with label "System" and letter S; the Windows partition NTFS, label
+  "Windows", letter W; the recovery partition NTFS, label "Recovery",
+  letter R. The MSR gets no letter. The sample says the letters are
+  temporary and that W is used to avoid clashes; after restart Windows
+  becomes C and the others get no letter. (The BIOS sample labels its
+  recovery partition "Recovery image".) Any use of these values in the
+  product is a project choice, not a Microsoft requirement.
+
+## 12. Not summarised
 
 - The full optional-component list and language packs.

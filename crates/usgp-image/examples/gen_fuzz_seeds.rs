@@ -1,5 +1,5 @@
 //! Writes fuzz seed files made only by our own `WimBuilder` and XPRESS
-//! test encoder (decision 0006 item 4; plan WU-9).
+//! test encoder (decision 0006 items 1-3; plan WU-9).
 //!
 //! Usage: `cargo run -p usgp-image --features testkit --example
 //! gen_fuzz_seeds -- <corpus-dir>`. Writes `<corpus-dir>/<target>/*.bin`

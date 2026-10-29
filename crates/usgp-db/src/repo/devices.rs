@@ -6,8 +6,9 @@
 //   without both (constraints and guard in migration 0004).
 // - NIST 800-53: IA-5 - only the SHA-256 of the bearer token is stored.
 // - NIST 800-53: AC-7 - failed code attempts counted per session.
-// - NIST 800-53: SC-5 - session counts for the per-IP and global caps,
-//   serialised by an advisory lock.
+// - NIST 800-53: SC-5 - session counts for the per-source-network, per
+//   boot service and global caps, serialised by an advisory lock; idle
+//   unauthorised sessions expire (finding SEC-001).
 // - SPEC: specs/targeting.md#REQ-TGT-010, #REQ-TGT-013, #REQ-TGT-014,
 //   #REQ-TGT-016
 // - Decisions 0018 items 1, 7 and 10; 0020
@@ -29,8 +30,10 @@ use super::conv::{
     col_opt_json, col_opt_micros, col_text, col_u64, mac_params, texts, to_i64, to_json, to_uuid,
 };
 use crate::error::DbError;
-use crate::model::{ChosenPackage, DeviceSession, NewDeviceSession, SessionAuth};
-use crate::pool::PgTx;
+use crate::model::{
+    ChosenPackage, DeviceSession, NewDeviceSession, SessionAuth, SessionScope, source_network,
+};
+use crate::pool::{Bookkeeping, PgTx};
 
 const COLUMNS: &str = "id, token_sha256, boot_service_id, source_ip, macs, firmware, arch, \
      secure_boot, memory_bytes, agent_version, display_code, state, auth_method, auth_code_id, \
@@ -191,16 +194,30 @@ pub(crate) async fn lock_quota(tx: &mut PgTx) -> Result<(), DbError> {
 pub(crate) async fn count(
     tx: &mut PgTx,
     states: &[SessionState],
-    source_ip: Option<IpAddr>,
+    scope: SessionScope,
 ) -> Result<u64, DbError> {
     let st = texts(states, SessionState::as_str);
+    let (net, prefix): (Option<IpAddr>, i32) = match scope {
+        SessionScope::SourceNetwork(ip) => {
+            let (n, p) = source_network(ip);
+            (Some(n), i32::from(p))
+        }
+        _ => (None, 0),
+    };
+    let bs = match scope {
+        SessionScope::BootService(b) => Some(to_uuid(b.as_bytes())),
+        _ => None,
+    };
+    // `<<=` is "contained in or equal"; an address of the other family is
+    // never contained.
     let row = tx
         .query_opt(
             "count device_session",
             "SELECT count(*) AS n FROM device_session \
              WHERE (cardinality($1::text[]) = 0 OR state = ANY($1)) \
-             AND ($2::inet IS NULL OR source_ip = $2)",
-            &[&st, &source_ip],
+             AND ($2::inet IS NULL OR source_ip <<= set_masklen($2::inet, $3::int)) \
+             AND ($4::uuid IS NULL OR boot_service_id = $4)",
+            &[&st, &net, &prefix, &bs],
         )
         .await?;
     match row {
@@ -212,9 +229,7 @@ pub(crate) async fn count(
 pub(crate) async fn touch(tx: &mut PgTx, id: SessionId, at: UnixMicros) -> Result<(), DbError> {
     let n = tx
         .execute_bookkeeping(
-            "touch device_session",
-            "UPDATE device_session SET last_seen_at_us = GREATEST(last_seen_at_us, $2) \
-             WHERE id = $1",
+            Bookkeeping::TouchSession,
             &[&to_uuid(id.as_bytes()), &at.as_micros()],
         )
         .await?;
@@ -382,14 +397,19 @@ pub(crate) async fn set_state(
     Ok(())
 }
 
-pub(crate) async fn expire(tx: &mut PgTx, at: UnixMicros) -> Result<Vec<SessionId>, DbError> {
+pub(crate) async fn expire(
+    tx: &mut PgTx,
+    at: UnixMicros,
+    idle_before: UnixMicros,
+) -> Result<Vec<SessionId>, DbError> {
     let rows = tx
         .query_write(
             "expire device_session",
             "UPDATE device_session SET state = 'expired', ended_at_us = $1, end_reason = $2 \
-             WHERE state IN ('awaiting_authorisation', 'authorised') AND expires_at_us <= $1 \
+             WHERE (state IN ('awaiting_authorisation', 'authorised') AND expires_at_us <= $1) \
+             OR (state = 'awaiting_authorisation' AND last_seen_at_us <= $3) \
              RETURNING id",
-            &[&at.as_micros(), &EXPIRED_REASON],
+            &[&at.as_micros(), &EXPIRED_REASON, &idle_before.as_micros()],
         )
         .await?;
     let mut ids = rows

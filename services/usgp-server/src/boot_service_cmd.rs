@@ -11,6 +11,13 @@
 //!   and if the name is in use.
 //! - **Disable** sets the record to `disabled`: the relay's certificate
 //!   then gets 401 and its devices are offered nothing.
+//! - **Raise-generation** sets a boot service's boot-policy generation to
+//!   a higher value after a database restore (finding NIST-013): relays
+//!   refuse a list whose generation is not above the one they hold, so
+//!   after a restore the operator raises the restored generation above
+//!   every relay's (the relay logs the generation it holds). A value not
+//!   above the current one is refused (recorded); the generation never
+//!   decreases (migration 0004 guard).
 //!
 //! A boot stop is reversed only through the operator API
 //! (`POST /v1/boot-stops/{id}/clear`, permission `device.boot_reenable`;
@@ -34,7 +41,25 @@
 //   rules (caller).
 // - NIST 800-53: AU-2, AU-3, AU-12; AU-5 - every change and refusal is
 //   recorded; a change whose record cannot be written is not made.
-// - SPEC: specs/targeting.md#REQ-TGT-001; decisions 0016, 0021 item 1
+// - NIST 800-53: CP-10 (System Recovery and Reconstitution) - after a
+//   restore the boot-policy generation is raised by a recorded local
+//   command so relays accept new lists (finding NIST-013).
+// - SPEC: specs/targeting.md#REQ-TGT-001;
+//   specs/boot-network.md#REQ-BOOT-067; decisions 0016, 0021 items 1, 2
+
+// POAM: CP-10/CP-9 (extends POAM-36) - after a database restore the
+// boot-policy generation goes back with the data; relays then refuse every
+// new list (rollback) until an administrator runs `boot-service
+// raise-generation` with a value above the relays'. Nothing detects the
+// restore or raises it automatically, and stops added after the backup are
+// lost from the restored database (the relays keep their last list until
+// it is replaced).
+
+// POAM: IA-5/CA-5 (relay enrolment rotation, finding NIST-015) - a relay's
+// client certificate is bound by its fingerprint at manual enrolment and
+// has no rotation path: renewing the certificate means disabling the boot
+// service and enrolling a new record (new id, new assignments). Expiry
+// (`cert_not_after`) is recorded but not enforced ahead of time.
 
 use std::time::UNIX_EPOCH;
 
@@ -55,6 +80,10 @@ pub const BOOT_SERVICE_ENROL_REFUSED: &str = "boot_service.enrol.refused";
 pub const BOOT_SERVICE_DISABLED: &str = "boot_service.disabled";
 /// A disable was refused.
 pub const BOOT_SERVICE_DISABLE_REFUSED: &str = "boot_service.disable.refused";
+/// A boot-policy generation was raised (finding NIST-013).
+pub const GENERATION_RAISED: &str = "boot_policy.generation.raised";
+/// A generation raise was refused.
+pub const GENERATION_RAISE_REFUSED: &str = "boot_policy.generation.raise.refused";
 
 /// Why a boot-service command failed.
 #[derive(Debug, thiserror::Error)]
@@ -309,4 +338,64 @@ pub async fn disable<S: Store>(
     } else {
         Disabled::AlreadyDisabled
     })
+}
+
+/// Raises a boot service's boot-policy generation to `to` (finding
+/// NIST-013). Returns the generation before the raise.
+///
+/// # Errors
+///
+/// [`BootServiceCmdError::Refused`] (recorded): `boot_service_not_found`,
+/// `generation_not_higher` (`to` is not above the current generation);
+/// [`BootServiceCmdError::Invalid`] for 0 or a value above `i64::MAX`
+/// (not recorded: nothing was attempted); or a database/audit failure
+/// (nothing changed).
+pub async fn raise_generation<S: Store>(
+    store: &S,
+    chain: &AuditChain,
+    who: &LocalUser,
+    id: BootServiceId,
+    to: u64,
+) -> Result<u64, BootServiceCmdError> {
+    if to == 0 || i64::try_from(to).is_err() {
+        return Err(BootServiceCmdError::Invalid(
+            "--to must be 1 to 9223372036854775807",
+        ));
+    }
+    let refused = || {
+        who.draft(GENERATION_RAISE_REFUSED, Outcome::Refused)
+            .target("boot_service", &id.to_string())
+            .detail(Detail::new().with("requested_generation", &to))
+    };
+    let mut tx = store.begin().await?;
+    let Some(b) = tx.boot_service(id).await? else {
+        tx.rollback().await;
+        return Err(refuse(store, chain, refused(), "boot_service_not_found").await);
+    };
+    let before = tx.boot_policy_generation(id).await?;
+    match tx.raise_boot_policy_generation(id, to).await {
+        Ok(()) => {}
+        Err(e) if e.is_conflict() => {
+            tx.rollback().await;
+            let d = refused().detail(
+                Detail::new()
+                    .with("requested_generation", &to)
+                    .with("current_generation", &before),
+            );
+            return Err(refuse(store, chain, d, "generation_not_higher").await);
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let d = who
+        .draft(GENERATION_RAISED, Outcome::Success)
+        .target("boot_service", &id.to_string())
+        .detail(
+            Detail::new()
+                .with("name", b.name.as_str())
+                .with("previous_generation", &before)
+                .with("generation", &to)
+                .with("reason", "restore"),
+        );
+    append_commit(chain, tx, &d).await?;
+    Ok(before)
 }

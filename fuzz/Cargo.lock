@@ -954,6 +954,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "usgp-deploy"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "usgp-common",
+ "usgp-crypto",
+ "usgp-disk",
+ "usgp-image",
+ "usgp-proto",
+ "usgp-wincfg",
+]
+
+[[package]]
 name = "usgp-dhcp"
 version = "0.0.0"
 dependencies = [
@@ -966,6 +980,7 @@ version = "0.0.0"
 dependencies = [
  "thiserror",
  "usgp-common",
+ "usgp-proto",
 ]
 
 [[package]]
@@ -979,9 +994,11 @@ dependencies = [
  "usgp-dhcp",
  "usgp-disk",
  "usgp-image",
+ "usgp-preboot-agent",
  "usgp-proto",
  "usgp-relay",
  "usgp-tftp",
+ "usgp-winapi",
 ]
 
 [[package]]
@@ -999,6 +1016,24 @@ dependencies = [
  "usgp-common",
  "usgp-crypto",
  "usgp-proto",
+]
+
+[[package]]
+name = "usgp-preboot-agent"
+version = "0.0.0"
+dependencies = [
+ "httparse",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "usgp-common",
+ "usgp-crypto",
+ "usgp-deploy",
+ "usgp-disk",
+ "usgp-image",
+ "usgp-proto",
+ "usgp-winapi",
+ "zeroize",
 ]
 
 [[package]]
@@ -1043,6 +1078,21 @@ name = "usgp-tftp"
 version = "0.0.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "usgp-winapi"
+version = "0.0.0"
+dependencies = [
+ "usgp-image",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "usgp-wincfg"
+version = "0.0.0"
+dependencies = [
+ "usgp-common",
 ]
 
 [[package]]

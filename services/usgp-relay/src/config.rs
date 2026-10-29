@@ -18,6 +18,15 @@
 //! `block_wrap`, raises the `[tftp]` file-size and duration defaults for
 //! Windows PE images, and adds the `[server_feed]` section (the signed
 //! boot-policy pull of decision 0021).
+//!
+//! `[server_feed]` is optional for an M1 manifest (no `[pe_kit]`), which
+//! starts unchanged without it. When the boot manifest has a `[pe_kit]`,
+//! `[server_feed]` with `enabled = true` is **required**: otherwise start-up
+//! and `--check-config` are refused (exit 78, `relay.config.rejected` with
+//! field `server_feed.enabled`, and `relay.start` failure for `--config`),
+//! because without the stop list the relay would keep booting devices whose
+//! jobs succeeded (REQ-BOOT-067; [`crate::check_kit_has_feed`]). The check
+//! needs the manifest, so it runs in [`crate::prepare`], not here.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: CM-6 (Configuration Settings) - documented defaults,
@@ -217,7 +226,8 @@ pub struct SuppressionDocument {
 
 /// `[server_feed]`: the signed boot-policy pull (plan section 3.6;
 /// decision 0021). Every key other than `enabled` is read only when
-/// `enabled = true`.
+/// `enabled = true`. Required (with `enabled = true`) when the boot
+/// manifest has a `[pe_kit]`; see the module documentation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerFeedDocument {

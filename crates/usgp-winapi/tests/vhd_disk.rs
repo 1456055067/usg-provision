@@ -12,10 +12,32 @@
 //! Run with `--ignored` but without `USGP_WIN_VHD=1`, it fails rather than
 //! passing silently.
 //!
+//! It also records GPT-OBS-001 (REL-M3-WU15-001): the GPT DiskPart wrote is
+//! read back through `RawDisk` with `usgp_disk::parse_gpt` and the default
+//! limits, and one line `GPT-OBS-001 accepted: ...` or `GPT-OBS-001
+//! refused: ...` is printed for the CI summary. A refusal fails the test:
+//! relaxing the reader's strictness (impl-notes-wu3 U-6) needs a decision.
+//!
+//! DiskPart script commands (`create vdisk file= maximum= type=`, `attach
+//! vdisk`, `detach vdisk`, `convert gpt`, `create partition primary`,
+//! `format fs= quick label=`): `specs/standards/winpe.md` §11 (SR-7).
+//! `select vdisk file=` is not itself summarised there; §11 says only, as
+//! a reading, that a VHD must be selected before it is attached (spec gap
+//! noted in the fix notes; test harness only). The
+//! script is run with `diskpart /s`, which the deployment samples use but
+//! the "diskpart" page does not describe (OPEN-WINPE-2), and the exit-code
+//! values are not documented (OPEN-WINPE-3). So DiskPart's exit status is
+//! only a first filter: what this test relies on is the read-back (the
+//! disk that appeared, the layout, the GPT, the volume's extents and file
+//! system).
+//!
 //! COMPLIANCE MAPPING:
 //! - NIST 800-53: SA-11 (Developer Testing and Evaluation)
-//! - SPEC: specs/standards/windows-storage-firmware-api.md §5, §7, §8
-//! - SPEC: specs/disk.md (DISK-1) - disk tests on image files only
+//! - SPEC: specs/standards/windows-storage-firmware-api.md §2, §5, §7, §8
+//! - SPEC: specs/standards/winpe.md §11 (DiskPart commands; OPEN-WINPE-2,
+//!   OPEN-WINPE-3)
+//! - SPEC: specs/disk.md (DISK-1) - disk tests on image files only;
+//!   REQ-DISK-009 (GPT read-back), OPEN-GPT-1
 
 #![cfg(windows)]
 
@@ -24,8 +46,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use usgp_disk::{BlockDevice, GptLimits, parse_gpt};
 use usgp_winapi::WinApiError;
-use usgp_winapi::disk::{self, DiskQuery, PartitionStyle, RawDisk, Writability};
+use usgp_winapi::disk::{
+    self, DiskInterface, DiskQuery, PartitionStyle, RawDisk, TableId, Writability,
+};
 use usgp_winapi::paths::DriveLetter;
 use usgp_winapi::volume;
 
@@ -88,6 +113,34 @@ impl Drop for Vhd {
     }
 }
 
+/// `RawDisk` as a read-only `usgp-disk` block device: GPT-OBS-001 reads
+/// through the same handle type the agent writes with. Writes are refused.
+struct ReadOnly(RawDisk);
+
+impl BlockDevice for ReadOnly {
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    fn logical_sector(&self) -> u32 {
+        self.0.logical_sector()
+    }
+
+    fn read_at(&mut self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.0
+            .read_at(off, buf)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    fn write_at(&mut self, _off: u64, _buf: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::other("GPT-OBS-001 reads only"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn wait_for<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
@@ -133,6 +186,47 @@ fn vhd_raw_io_update_and_volume_letters() {
     assert_eq!(info.geometry.size_bytes, size);
     assert_eq!(info.layout.style, PartitionStyle::Raw);
     assert_eq!(info.writability, Writability::Writable);
+    assert_eq!(info.interface_path, None, "opened by number");
+
+    // BOOT-002: the disk's interface path (spec §2) opens the same device,
+    // for queries and for write, and the identity read on the write handle
+    // is the one read on the query handle.
+    let iface = disk::interfaces()
+        .expect("interfaces")
+        .into_iter()
+        .find(|i| i.number == n)
+        .expect("the VHD's interface");
+    let by_path = DiskQuery::open_interface(&iface)
+        .expect("open by interface path")
+        .inspect()
+        .expect("inspect by path");
+    assert_eq!(by_path.interface_path.as_deref(), Some(iface.path.as_str()));
+    assert_eq!(by_path.descriptor, info.descriptor);
+    assert_eq!(by_path.layout.table_id(), TableId::None);
+    let w = RawDisk::open_interface_for_write(&iface, size).expect("open by path for write");
+    assert_eq!(w.number(), n);
+    assert_eq!(
+        w.descriptor().expect("descriptor on the write handle"),
+        info.descriptor
+    );
+    assert_eq!(
+        w.layout().expect("layout on the write handle").table_id(),
+        TableId::None
+    );
+    drop(w);
+    assert!(matches!(
+        RawDisk::open_interface_for_write(&iface, size + 512),
+        Err(WinApiError::DeviceMismatch { .. })
+    ));
+    // A path whose disk now has another number is refused.
+    let moved = DiskInterface {
+        number: n.wrapping_add(1000),
+        path: iface.path.clone(),
+    };
+    assert!(matches!(
+        RawDisk::open_interface_for_write(&moved, size),
+        Err(WinApiError::DeviceMismatch { .. })
+    ));
 
     // Opening for write re-checks the size the job recorded.
     assert!(matches!(
@@ -185,6 +279,46 @@ fn vhd_raw_io_update_and_volume_letters() {
     .expect("diskpart layout and format");
     let layout = DiskQuery::open(n).expect("open").layout().expect("layout");
     assert_eq!(layout.style, PartitionStyle::Gpt);
+
+    // GPT-OBS-001 (REL-M3-WU15-001): usgp-disk's reader accepts the GPT
+    // DiskPart wrote, read through the agent's own write-handle type.
+    let mut dev = ReadOnly(RawDisk::open_interface_for_write(&iface, size).expect("open"));
+    let table = dev
+        .0
+        .layout()
+        .expect("layout on the write handle")
+        .table_id();
+    match parse_gpt(&mut dev, &GptLimits::default()) {
+        Ok(v) => {
+            println!(
+                "GPT-OBS-001 accepted: entries {} used {} of {} bytes, first/last usable \
+                 {}/{}, array LBA {} (backup {}), block {}",
+                v.entry_count,
+                v.entries.len(),
+                v.entry_size,
+                v.first_usable,
+                v.last_usable,
+                v.primary_array_lba,
+                v.backup_array_lba,
+                v.block
+            );
+            let g = match table {
+                TableId::Gpt(g) => g,
+                other => panic!("Windows reports {other:?} for a GPT disk"),
+            };
+            assert_eq!(
+                v.disk_guid,
+                usgp_disk::Guid::from_fields(g.data1, g.data2, g.data3, g.data4),
+                "the disk GUID usgp-disk reads is the one Windows reports"
+            );
+            assert_eq!(v.entries.len(), layout.partitions.len());
+        }
+        Err(e) => {
+            println!("GPT-OBS-001 refused: {e}");
+            panic!("GPT-OBS-001 refused: {e} (relaxing U-6 needs a decision)");
+        }
+    }
+    drop(dev);
     let data = layout
         .partitions
         .iter()

@@ -11,7 +11,11 @@ side's choice (DEC-0019 records the binding choice; it adds no spec
 text). The follow-up request SR-3b (2026-10-28) added §13 to §19 and
 OPEN-WAPI-4 to 6 (AUDITED 2026-10-28; the OPEN items stay open).
 SR-3c (2026-10-28) added §20 to §25 and OPEN-WAPI-7 to 12 (AUDITED
-2026-10-28 after the fix round; the OPEN items stay open).
+2026-10-28 after the fix round; the OPEN items stay open). SR-7
+(2026-10-29) added §26, §27 and OPEN-WAPI-13, 14 (AUDITED
+2026-10-29; the OPEN items stay open). REL-M3-WU15-003 (2026-10-29)
+added §28 and OPEN-WAPI-15 (AUDITED 2026-10-29; OPEN-WAPI-15 stays
+open).
 
 Sources: Microsoft Learn Win32 and driver reference pages, one page
 per function, structure or control code, named in each section below.
@@ -360,6 +364,18 @@ Microsoft facts, not product behaviour.
   encrypted, directory, device, virtual) (§22).
 - **OPEN-WAPI-12** (SR-3c, AUDITED): whether `FILE_ATTRIBUTE_NORMAL` is valid on
   a directory (§22).
+- **OPEN-WAPI-13** (SR-7, AUDITED): the handle access and open flags
+  that `FSCTL_GET_REPARSE_POINT` needs, the largest output buffer, and
+  its errors for a file without a reparse point or a buffer that is
+  too small (§26).
+- **OPEN-WAPI-14** (SR-7, AUDITED): which of the naming rules of §27
+  NTFS itself enforces when a name reaches it through `\\?\` (for
+  example a trailing space or period, or a reserved device name). The
+  page gives only the Win32-level rules.
+- **OPEN-WAPI-15** (REL-M3-WU15-003, AUDITED): the pages read do not
+  state outright that `SetDefaultDllDirectories` has no effect on an
+  executable's load-time imports (§28); the statement there is a
+  reading.
 
 ## 13. Volumes not backed by a disk (SR-3b item 3; AUDITED)
 
@@ -904,3 +920,189 @@ Pages: "GetDriveTypeW function" (§13), "Naming a Volume" (§8).
   path needs the trailing backslash. **[reading]** If `GetDriveType`
   accepts one, it would be in the form `\\?\Volume{...}\`, with the
   backslash. Not confirmed.
+
+## 26. Reading reparse points, the process token, open flags (SR-7; AUDITED)
+
+Pages: "FSCTL_GET_REPARSE_POINT", "OpenProcessToken function",
+"GetCurrentProcess function", "Access Rights for Access-Token
+Objects", "CreateFileW function". Reparse buffer layouts: topic 24 §2
+to §4.
+
+- **`FSCTL_GET_REPARSE_POINT`.** Sent to a handle on a file or
+  directory with no input; the output buffer receives the reparse
+  data of that file or directory (the buffer formats of topic 24).
+  The page does **not** state the handle access or open flags needed,
+  the largest buffer to supply, or the errors for "not a reparse
+  point" and "buffer too small" (**OPEN-WAPI-13**). Not supported on
+  cluster shared volumes.
+- **Opening a reparse point itself** ("CreateFileW"): with
+  `FILE_FLAG_OPEN_REPARSE_POINT` the normal reparse processing does
+  not happen and the open returns a handle to the reparse point (for a
+  symbolic link, the link, not its target). The flag is ignored if the
+  file is not a reparse point and cannot be combined with
+  `CREATE_ALWAYS`. Without it, opening a symbolic link opens the
+  target.
+- **Opening a directory** ("CreateFileW"): `FILE_FLAG_BACKUP_SEMANTICS`
+  must be set to get a directory handle (only open-existing is valid).
+  The same flag marks a backup or restore open; security checks are
+  overridden only when the caller holds the backup and restore
+  privileges (§23).
+- **Flag values** (stated on the CreateFileW page):
+  `FILE_FLAG_BACKUP_SEMANTICS` = `0x02000000`,
+  `FILE_FLAG_OPEN_REPARSE_POINT` = `0x00200000`. (Also listed:
+  `FILE_FLAG_NO_BUFFERING` `0x20000000`, `FILE_FLAG_OVERLAPPED`
+  `0x40000000`.)
+- **Getting the token for `AdjustTokenPrivileges` (§10).**
+  - `GetCurrentProcess()` returns a pseudo handle for the calling
+    process (currently the value −1; Microsoft says to call the
+    function rather than hard-code it). It has full access to the
+    process, is valid only in that process, is not inherited, and
+    need not be closed (closing it has no effect).
+  - `OpenProcessToken(process, desired access, out token)` opens the
+    process's access token. The process handle needs
+    `PROCESS_QUERY_LIMITED_INFORMATION` (the pseudo handle has it).
+    The access asked for is checked against the token's DACL.
+    `TOKEN_ADJUST_PRIVILEGES` is the right needed to enable or disable
+    privileges; `TOKEN_QUERY` the right to query the token (needed by
+    `AdjustTokenPrivileges` when the previous state is asked for,
+    §10). The page gives no numeric values for these rights
+    (OPEN-WAPI-1). Nonzero on success. The returned token handle
+    **must** be closed with `CloseHandle`.
+
+## 27. File and stream naming rules (SR-7, BOOT-006; AUDITED)
+
+Pages: "Naming Files, Paths, and Namespaces" (dated 2024-08-28),
+"File Streams (Local File Systems)" (dated 2025-07-08). Both are
+Win32 pages. They state the rules for applications using the Windows
+APIs and say that each file system (NTFS, FAT, exFAT, UDF, CDFS) may
+add its own rules; they do **not** give a separate NTFS-only list.
+
+- **Characters not allowed in a file or directory name** (the page's
+  general rule, "regardless of the file system"):
+  - the reserved characters `<`, `>`, `:`, `"`, `/`, `\`, `|`, `?`,
+    `*` (the backslash separates path components; the colon is also
+    the stream separator, below);
+  - the character with value 0 (NUL);
+  - characters with values 1 to 31, **except in alternate data stream
+    names, where they are allowed**;
+  - any other character the target file system does not allow.
+  Otherwise any character of the current code page, including Unicode
+  and the extended range 128 to 255, may be used.
+- **Reserved device names:** `CON`, `PRN`, `AUX`, `NUL`, `COM1` to
+  `COM9`, `LPT1` to `LPT9`, and also `COM` and `LPT` followed by the
+  superscript digits ¹, ² or ³ (Windows treats these as digits). The
+  names are also reserved when followed by an extension: `NUL.txt` and
+  `NUL.tar.gz` both mean `NUL`. They are reserved in every directory.
+  The page explains them as names in the NT device namespace kept for
+  compatibility.
+- **Trailing space or period:** a file or directory name should not
+  end with a space or a period. The page says the underlying file
+  system may support such names but the Windows shell and user
+  interface do not. A leading period (`.temp`) is fine. `.` and `..`
+  as whole components mean the current and parent directory.
+- **Case:** names should be treated as case-insensitive (NTFS can
+  support case-sensitive names but does not by default); drive letters
+  are case-insensitive.
+- **The `\\?\` prefix** sends the rest of the string to the file
+  system without Win32 parsing. It lifts the `MAX_PATH` limit (with
+  the Unicode functions) and allows `.` and `..` to be used as names
+  in the path. **[reading]** This is the documented split between the
+  Win32 layer and the file system: names that the Win32 rules reject
+  or rewrite may still reach the file system through `\\?\`. The page
+  does not list which of the rules above the file system itself
+  enforces (**OPEN-WAPI-14**).
+- **Length:** each component is limited by the file system's maximum
+  component length (reported by `GetVolumeInformation`, §15). The page
+  gives no number for it. A whole path is limited to `MAX_PATH`, 260
+  characters, before Windows 10 version 1607; later versions lift the
+  limit only when a registry or Group Policy setting enables it.
+  8.3 short names (base 8, extension 3) may also exist (§21).
+- **Alternate data streams** ("File Streams"):
+  - full name: `filename:streamname:streamtype`, for example a stream
+    `s1` of `f.dat` is `f.dat:s1:$DATA`;
+  - the default data stream is unnamed; `filename::$DATA` is the same
+    as `filename`;
+  - any character legal in a file name is legal in a stream name,
+    spaces included (and, per the naming page, values 1 to 31);
+    `$DATA` is itself a legal stream name;
+  - stream types always start with `$` and are internal to NTFS; users
+    cannot create new types;
+  - for a one-character file name, use a `.\` prefix or a full path,
+    or Windows may read `x:stream` as a drive letter and path;
+  - §19 gives the `:name:$DATA` form that stream enumeration returns.
+
+## 28. DLL search order and how to limit it (REL-M3-WU15-003; AUDITED)
+
+Pages: "Dynamic-link library search order" (dated 2023-02-08),
+"Dynamic-Link Library Security", "SetDefaultDllDirectories function".
+For unpackaged desktop applications such as the agent.
+
+- **When a search happens.** If a DLL is named without a full path,
+  the loader searches for it "at load time". A DLL's own dependencies
+  are always searched for by module name only, even when the first
+  DLL was loaded by full path.
+- **Steps before any folder is searched**, in order: DLL redirection;
+  API sets; side-by-side (manifest) redirection; the list of modules
+  already loaded (a module with the same name is reused, wherever it
+  came from); **known DLLs**. Known DLLs are a per-Windows-version
+  list in the registry key
+  `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`;
+  a DLL on that list is always taken from the system's copy, with its
+  dependencies. From Windows 11 21H2 the package dependency graph is
+  searched next.
+- **Standard folder order** with safe DLL search mode on (the
+  default):
+  1. the folder the application was loaded from (its own folder);
+  2. the system folder (`GetSystemDirectory`, §16);
+  3. the 16-bit system folder;
+  4. the Windows folder;
+  5. the current folder;
+  6. the folders in `PATH` (not the per-application "App Paths" key).
+  So the application's own folder comes **first** among folders, after
+  the steps above.
+- **Safe DLL search mode** is on by default (since Windows XP SP2). It
+  is controlled by the registry value `SafeDllSearchMode` under
+  `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager`; setting it
+  to 0 turns it off, and then the current folder moves up to second,
+  right after the application's folder. Calling `SetDllDirectory`
+  with a folder also turns it off in effect while that folder is set;
+  `SetDllDirectory("")` removes the current folder from the order, and
+  `SetDllDirectory(NULL)` restores the default. A parent process's
+  `SetDllDirectory` call also affects a child started afterwards.
+- **Restricting the search** (`SetDefaultDllDirectories`, Windows 8
+  and later):
+  - Sets the process-wide default directories used when
+    `LoadLibrary`/`LoadLibraryEx` is called without
+    `LOAD_LIBRARY_SEARCH_*` flags, or when the system must search for
+    dependencies of a DLL loaded by full path. It lasts for the life of
+    the process and cannot be reverted; individual `LoadLibraryEx`
+    calls can still pass their own flags.
+  - Flags (values stated): `LOAD_LIBRARY_SEARCH_APPLICATION_DIR`
+    `0x00000200` (the application's folder);
+    `LOAD_LIBRARY_SEARCH_USER_DIRS` `0x00000400` (folders added with
+    `AddDllDirectory` or `SetDllDirectory`, in unspecified order);
+    `LOAD_LIBRARY_SEARCH_SYSTEM32` `0x00000800`;
+    `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS` `0x00001000` (the three above
+    together; Microsoft calls it the recommended maximum).
+    `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR` (the loading DLL's own folder,
+    for its dependencies only) is named but its value is not on this
+    page (OPEN-WAPI-1).
+  - Order when several are set: DLL's own folder, application folder,
+    user-added folders, System32. The current folder and `PATH` are
+    not searched.
+- **Load-time imports.** **[reading]** `SetDefaultDllDirectories` is a
+  call the program makes while running, so it can only affect DLL
+  loads after the call. DLLs that the executable imports directly are
+  resolved by the loader when the process starts, before the
+  program's code runs, so they follow the standard order above (the
+  application's folder first). The pages do not say this in so many
+  words (**OPEN-WAPI-15**).
+- **Microsoft's guidance against DLL planting** ("Dynamic-Link Library
+  Security"): use
+  full paths when loading; use the `LOAD_LIBRARY_SEARCH` flags or
+  `SetDefaultDllDirectories`; consider DLL redirection or a manifest;
+  keep safe DLL search mode on; consider `SetDllDirectory("")` early
+  in start-up; do not rely on `SearchPath` unless safe search mode is
+  set for it. An attacker who can write to any folder in the search
+  path before the real DLL's folder can have a malicious copy loaded,
+  with the program's privileges.

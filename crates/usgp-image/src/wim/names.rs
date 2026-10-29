@@ -59,8 +59,72 @@ pub(crate) fn decode_utf16le(bytes: &[u8], kind: NameKind) -> Result<String, Met
         .map_err(|_| kind.error("unpaired surrogate"))
 }
 
-/// Checks one decoded component: not empty, not `.` or `..`, and free of
-/// `\`, `/`, `:` and NUL (M-04).
+/// The reserved device names (`windows-storage-firmware-api.md` §27):
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, and
+/// `COM` and `LPT` followed by a superscript digit one, two or three.
+const RESERVED_DEVICE_NAMES: [&str; 28] = [
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}",
+    "LPT\u{b9}",
+    "LPT\u{b2}",
+    "LPT\u{b3}",
+];
+
+/// True if `s` is a reserved device name, with or without an extension
+/// (§27: `NUL.txt` and `NUL.tar.gz` both mean `NUL`).
+///
+/// Names are compared without case (§27, "Case"). Spaces at the end of the
+/// part before the first period are also ignored: §27 does not say
+/// whether `CON .txt` means `CON`, so it is refused (fail closed).
+fn is_reserved_device_name(s: &str) -> bool {
+    let base = s.split('.').next().unwrap_or(s).trim_end_matches(' ');
+    let upper = base.to_uppercase();
+    RESERVED_DEVICE_NAMES.contains(&upper.as_str())
+}
+
+/// Checks one decoded component against the Windows naming rules of
+/// `windows-storage-firmware-api.md` §27 (M-04 and BOOT-006):
+///
+/// - not empty, not `.` or `..`;
+/// - none of the reserved characters `<`, `>`, `:`, `"`, `/`, `\`, `|`,
+///   `?`, `*`, and no NUL;
+/// - no character with a value from 1 to 31, except in a stream name,
+///   where §27 allows them;
+/// - not a reserved device name, with or without an extension;
+/// - no space or period at the end.
+///
+/// §27 gives these as the Win32 rules and leaves open which of them NTFS
+/// itself enforces (OPEN-WAPI-14). All of them are refused here, for
+/// every kind of name, so that the check before the wipe refuses every
+/// name the apply could fail on (fail closed). The one exception is the
+/// control characters in stream names, which §27 states are allowed.
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-10 (Information Input Validation)
+// - SPEC: specs/standards/windows-storage-firmware-api.md §27
+// - SPEC: specs/disk.md#REQ-DISK-004 (refuse before anything is written)
 pub(crate) fn check_component(s: &str, kind: NameKind) -> Result<(), MetadataError> {
     if s.is_empty() {
         return Err(kind.error("empty"));
@@ -68,8 +132,22 @@ pub(crate) fn check_component(s: &str, kind: NameKind) -> Result<(), MetadataErr
     if s == "." || s == ".." {
         return Err(kind.error("dot component"));
     }
-    if s.chars().any(|c| matches!(c, '\\' | '/' | ':' | '\0')) {
+    if s.chars().any(|c| {
+        matches!(
+            c,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '\0'
+        )
+    }) {
         return Err(kind.error("reserved character"));
+    }
+    if kind != NameKind::Stream && s.chars().any(|c| ('\u{1}'..='\u{1f}').contains(&c)) {
+        return Err(kind.error("control character"));
+    }
+    if is_reserved_device_name(s) {
+        return Err(kind.error("reserved device name"));
+    }
+    if s.ends_with([' ', '.']) {
+        return Err(kind.error("trailing space or period"));
     }
     Ok(())
 }
@@ -95,8 +173,10 @@ impl Component {
     ///
     /// # Errors
     ///
-    /// [`MetadataError::Name`] if `s` is empty, `.`, `..`, or contains
-    /// `\`, `/`, `:` or NUL.
+    /// [`MetadataError::Name`] if `s` is empty, `.` or `..`, or breaks a
+    /// naming rule of `windows-storage-firmware-api.md` §27 (reserved or
+    /// control characters, NUL, a reserved device name, a trailing space
+    /// or period).
     pub fn new(s: &str) -> Result<Self, MetadataError> {
         check_component(s, NameKind::Long)?;
         Ok(Self(s.to_owned()))
@@ -274,9 +354,72 @@ mod tests {
             assert!(Component::new(bad).is_err(), "{bad:?}");
             assert!(StreamName::new(bad).is_err(), "{bad:?}");
         }
-        for good in ["a", "...", ".x", "x.", " sp ace", "\u{10400}"] {
+        for good in ["a", ".x", " sp ace", "\u{10400}", "a.b.c"] {
             assert!(Component::new(good).is_ok(), "{good:?}");
         }
+    }
+
+    /// BOOT-006: every §27 rule is refused for entry and short names, and
+    /// for stream names except the control characters §27 allows there.
+    #[test]
+    fn section_27_naming_rules() {
+        let reserved_chars = ["a<b", "a>b", "a\"b", "a|b", "a?b", "a*b"];
+        let control = ["a\u{1}b", "\u{1f}", "tab\there", "\nx"];
+        let device = [
+            "CON",
+            "con",
+            "Prn",
+            "aux",
+            "NUL",
+            "nul.txt",
+            "NUL.tar.gz",
+            "COM1",
+            "com9.log",
+            "LPT1",
+            "lpt9",
+            "COM\u{b9}",
+            "com\u{b2}.x",
+            "LPT\u{b3}",
+            "CON .txt",
+        ];
+        let trailing = ["x.", "x ", "...", "name. ", "a.b."];
+        for bad in reserved_chars
+            .iter()
+            .chain(&control)
+            .chain(&device)
+            .chain(&trailing)
+        {
+            assert!(Component::new(bad).is_err(), "{bad:?}");
+            assert!(ImagePath::parse(&format!("dir\\{bad}")).is_err(), "{bad:?}");
+        }
+        for bad in reserved_chars.iter().chain(&device).chain(&trailing) {
+            assert!(StreamName::new(bad).is_err(), "{bad:?}");
+        }
+        for bad in ["A<B", "CON", "NUL.TXT", "X\u{1}", "AUX.", "COM1 "] {
+            assert!(ShortName::new(bad).is_err(), "{bad:?}");
+        }
+        // §27 allows values 1 to 31 in stream names.
+        for good in control {
+            assert!(StreamName::new(good).is_ok(), "{good:?}");
+        }
+        // Not reserved: other names that merely start like one.
+        for good in [
+            "CONSOLE", "con1", "COM0", "COM10", "LPT", "COM", "NULL.txt", ".con", "x.CON", "a b",
+            "PRN_x",
+        ] {
+            assert!(Component::new(good).is_ok(), "{good:?}");
+            assert!(StreamName::new(good).is_ok(), "{good:?}");
+        }
+        let e = Component::new("aux.c").err();
+        assert!(
+            matches!(
+                e,
+                Some(MetadataError::Name {
+                    what: "reserved device name"
+                })
+            ),
+            "{e:?}"
+        );
     }
 
     #[test]

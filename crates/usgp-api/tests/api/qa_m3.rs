@@ -450,11 +450,26 @@ async fn every_choice_and_state_change_has_au3_fields() {
         assert_device_au3(&recs[0], &sid, kind, id);
     }
     // One record per step change: steps 2..4 started by report, 1..4
-    // completed by report.
+    // completed by report, and step 5 started and completed by the
+    // success report (finding NIST-009).
     let started = mine("job.step.started");
     let completed = mine("job.step.completed");
-    assert_eq!(started.len(), 3, "{started:?}");
-    assert_eq!(completed.len(), 4, "{completed:?}");
+    assert_eq!(started.len(), 4, "{started:?}");
+    assert_eq!(completed.len(), 5, "{completed:?}");
+    for r in [started.last().unwrap(), completed.last().unwrap()] {
+        assert!(r.detail.contains("\"step\":\"5\""), "{}", r.detail);
+        assert!(r.detail.contains("\"implied_by\":\"succeeded\""));
+    }
+    // The final record carries the step history and the claimed MACs.
+    let done = &mine("job.succeeded")[0];
+    for want in [
+        "\"steps\":\"1:done:",
+        ",5:done:",
+        "\"macs\":\"02:00:00:00:10:01\"",
+        "\"claimed\":\"macs\"",
+    ] {
+        assert!(done.detail.contains(want), "{want} in {}", done.detail);
+    }
     for r in started.iter().chain(&completed) {
         assert_device_au3(r, &sid, "job", &job);
     }
@@ -501,6 +516,9 @@ async fn every_choice_and_state_change_has_au3_fields() {
         "{}",
         stops[0].detail
     );
+    // Decision 0023 item 2: the stop is marked as based on a claim.
+    assert!(stops[0].detail.contains("\"claimed\":\"mac\""));
+    assert!(stops[0].detail.contains("\"mac_basis\":\"agent_claim\""));
 }
 
 /// REQ-JOB-014, REQ-TGT-015: no session token or code value appears in

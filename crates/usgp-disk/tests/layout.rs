@@ -12,9 +12,11 @@ pub mod common;
 use common::{GB, GIB, MIB, TestRng, facts, layout, round_down};
 use usgp_disk::guid::types;
 use usgp_disk::layout::{
-    MIN_DISK_BYTES, RECOVERY_ATTRIBUTES, WINDOWS_MIN_BYTES, recovery_partition_bytes,
+    MIN_DISK_BYTES, RECOVERY_ATTRIBUTES, WINDOWS_FREE_BYTES, WINDOWS_MIN_BYTES,
+    recovery_partition_bytes,
 };
 use usgp_disk::{LayoutError, PartRole, WindowsUefiLayout, minimum_disk_bytes};
+use usgp_disk::{fs_overhead_bytes, image_budget_bytes, windows_bytes_needed};
 
 fn bytes(l: &WindowsUefiLayout, p: &usgp_disk::Part) -> u64 {
     p.len_lbas() * u64::from(l.block)
@@ -235,6 +237,72 @@ fn layout_fits_on_its_minimum_disk() {
                 .unwrap();
             assert!(l.windows_bytes() >= image, "{lg} {image}");
             assert!(l.windows_bytes() >= WINDOWS_MIN_BYTES);
+            // The space reserve: the image fits the budget on its minimum
+            // disk (decision 0023 item 3).
+            assert!(l.image_budget_bytes().unwrap() >= image, "{lg} {image}");
+            assert!(l.windows_bytes() >= windows_bytes_needed(image).unwrap());
         }
+    }
+}
+
+/// BOOT-003 / decision 0023 item 3: the Windows partition must hold the
+/// image, the file-system overhead estimate and 16 GiB free.
+#[test]
+fn space_reserve_formula() {
+    assert_eq!(WINDOWS_FREE_BYTES, 16 * GIB);
+    // Overhead: a tenth, rounded up, at least 1 GiB.
+    assert_eq!(fs_overhead_bytes(0), GIB);
+    assert_eq!(fs_overhead_bytes(10 * GIB), GIB);
+    assert_eq!(fs_overhead_bytes(30 * GIB), 3 * GIB);
+    assert_eq!(fs_overhead_bytes(31), GIB);
+    assert_eq!(fs_overhead_bytes(100 * GIB + 1), 10 * GIB + 1);
+    // Needed = image + overhead + 16 GiB, rounded up to 1 MiB, at least
+    // 20 GiB.
+    assert_eq!(windows_bytes_needed(0), Ok(WINDOWS_MIN_BYTES));
+    assert_eq!(windows_bytes_needed(30 * GIB), Ok(49 * GIB));
+    assert_eq!(windows_bytes_needed(30 * GIB + 1), Ok(49 * GIB + MIB));
+    assert!(windows_bytes_needed(u64::MAX).is_err());
+    assert!(minimum_disk_bytes(512, 0, u64::MAX - 1).is_err());
+}
+
+/// The disk minimum and the budget checked before the wipe use the same
+/// formula: an image fits a partition's budget exactly when the partition
+/// is at least what the image needs.
+#[test]
+fn budget_and_minimum_agree() {
+    assert_eq!(image_budget_bytes(WINDOWS_MIN_BYTES - 1), None);
+    for w in [
+        WINDOWS_MIN_BYTES,
+        WINDOWS_MIN_BYTES + 1,
+        40 * GIB,
+        49 * GIB,
+        49 * GIB - 1,
+        900 * GIB + 12_345,
+        u64::MAX / 2,
+    ] {
+        let b = image_budget_bytes(w).unwrap();
+        assert!(windows_bytes_needed(b).unwrap() <= w, "{w}");
+        assert!(windows_bytes_needed(b + 1).is_ok_and(|n| n > w), "{w}");
+    }
+    assert_eq!(image_budget_bytes(49 * GIB), Some(30 * GIB));
+
+    // With a 600 MiB recovery image: the budget is well below the raw
+    // Windows partition (the old check), and an image just over it needs a
+    // bigger disk than this one.
+    for (size, lg) in [
+        (MIN_DISK_BYTES, 512),
+        (MIN_DISK_BYTES, 4096),
+        (round_down(300 * GB, 4096), 4096),
+    ] {
+        let l = layout(size, lg, lg, 3).unwrap();
+        let budget = l.image_budget_bytes().unwrap();
+        assert!(budget + WINDOWS_FREE_BYTES + GIB <= l.windows_bytes());
+        assert!(budget <= image_budget_bytes(l.windows_bytes()).unwrap());
+        assert!(image_budget_bytes(l.windows_bytes()).unwrap() - budget <= 4 * MIB);
+        // Exactly the images that pass the disk minimum on this disk.
+        assert!(minimum_disk_bytes(lg, 600 * MIB, budget).unwrap() <= l.disk_bytes());
+        assert!(minimum_disk_bytes(lg, 600 * MIB, budget + 1).unwrap() > l.disk_bytes());
+        // The old check (raw partition size) let far larger images through.
+        assert!(minimum_disk_bytes(lg, 600 * MIB, l.windows_bytes()).unwrap() > l.disk_bytes());
     }
 }

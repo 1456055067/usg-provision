@@ -7,14 +7,14 @@
 //! boot services, decisions 0016 and 0021) and the application store
 //! (`store`: everything else); on the memory store both are one store.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use usgp_audit::{Actor, AuditDraft, AuditRecord, Detail, Interface, Outcome};
 use usgp_common::Sha256Digest;
 use usgp_crypto::{HmacKey, HmacTag, KeyId};
 use usgp_db::{
     BootService, ChosenPackage, DbError, NewAuthCode, NewBootStop, NewDeviceSession, NewJob,
-    Operator, Package, RepoTx, SessionAuth, Store,
+    Operator, Package, RepoTx, SessionAuth, SessionScope, Store,
 };
 use usgp_proto::device::{DeviceArch, FirmwareKind, SecureBootState, SessionState};
 use usgp_proto::disk::{
@@ -37,6 +37,11 @@ pub const WIPE_EVENT: &str = "disk.wipe.authorised";
 /// `t` plus `secs` seconds.
 pub fn later(t: UnixMicros, secs: i64) -> UnixMicros {
     UnixMicros::new(t.as_micros() + secs * 1_000_000).unwrap()
+}
+
+/// The earliest time (an idle cut-off that expires nothing).
+pub fn epoch() -> UnixMicros {
+    UnixMicros::new(0).unwrap()
 }
 
 /// A random unicast, locally administered MAC.
@@ -661,15 +666,18 @@ pub async fn flow_sessions<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) 
     tx.lock_device_session_quota().await.unwrap();
     let ip = s.source_ip;
     assert!(
-        tx.count_device_sessions(&[SessionState::AwaitingAuthorisation], Some(ip))
-            .await
-            .unwrap()
+        tx.count_device_sessions(
+            &[SessionState::AwaitingAuthorisation],
+            SessionScope::SourceNetwork(ip)
+        )
+        .await
+        .unwrap()
             >= 1
     );
     assert_eq!(
         tx.count_device_sessions(
             &[SessionState::AwaitingAuthorisation],
-            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+            SessionScope::SourceNetwork(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
         )
         .await
         .unwrap(),
@@ -865,7 +873,7 @@ pub async fn flow_sessions<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) 
     // Expiry: none due now; all live ones due after their expiry.
     let mut tx = store.begin().await.unwrap();
     assert!(
-        !tx.expire_device_sessions(now())
+        !tx.expire_device_sessions(now(), epoch())
             .await
             .unwrap()
             .contains(&again.id)
@@ -873,7 +881,10 @@ pub async fn flow_sessions<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) 
     // Nothing expired → nothing to audit → commits.
     tx.commit().await.unwrap();
     let mut tx = store.begin().await.unwrap();
-    let expired = tx.expire_device_sessions(later(now(), 7200)).await.unwrap();
+    let expired = tx
+        .expire_device_sessions(later(now(), 7200), epoch())
+        .await
+        .unwrap();
     assert!(expired.contains(&again.id));
     // Expiring changed state: no commit without its records.
     for id in &expired {
@@ -912,7 +923,10 @@ pub async fn flow_sessions<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) 
 pub async fn flow_expiry_is_audited<S: Store>(store: &S, a: &Audit) {
     let s = open_session(store, a, None, macs(1)).await;
     let mut tx = store.begin().await.unwrap();
-    let ids = tx.expire_device_sessions(later(now(), 7200)).await.unwrap();
+    let ids = tx
+        .expire_device_sessions(later(now(), 7200), epoch())
+        .await
+        .unwrap();
     assert!(ids.contains(&s.id));
     assert!(matches!(tx.commit().await, Err(DbError::Unaudited)));
     let mut tx = store.begin().await.unwrap();
@@ -942,6 +956,15 @@ pub async fn flow_job_success<A: Store, S: Store>(admin: &A, store: &S, a: &Audi
     assert_eq!(j.session_id, s.id);
     assert_eq!(j.macs, device_macs);
     assert_eq!(tx.job_by_session(s.id).await.unwrap().unwrap().id, job);
+    // Decision 0023 item 2: the running job holds its MACs.
+    assert_eq!(tx.running_jobs_for_macs(&device_macs).await.unwrap(), [job]);
+    assert!(tx.running_jobs_for_macs(&macs(2)).await.unwrap().is_empty());
+    assert!(
+        tx.active_boot_stops_for_macs(&device_macs)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let steps = tx.job_steps(job).await.unwrap();
     assert_eq!(steps.len(), 5);
     assert_eq!(steps.first().unwrap().state, StepState::Running);
@@ -1069,6 +1092,29 @@ pub async fn flow_job_success<A: Store, S: Store>(admin: &A, store: &S, a: &Audi
     assert_eq!(tx.boot_policy_generation(bs.id).await.unwrap(), 1);
     let stops = tx.list_boot_stops(Some(bs.id), true).await.unwrap();
     assert_eq!(stops.len(), 2);
+    // Decision 0023 item 2: the stops are found by MAC; the finished job
+    // no longer holds them.
+    assert_eq!(
+        tx.active_boot_stops_for_macs(&device_macs)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let one = MacList::new(vec![*device_macs.as_slice().first().unwrap()]).unwrap();
+    assert_eq!(tx.active_boot_stops_for_macs(&one).await.unwrap().len(), 1);
+    assert!(
+        tx.active_boot_stops_for_macs(&macs(1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        tx.running_jobs_for_macs(&device_macs)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     // A second active stop for the same MAC adds nothing.
     let dup = NewBootStop {
         id: BootStopId::from_random_bytes(rand_bytes()),
@@ -1155,6 +1201,14 @@ pub async fn flow_job_success<A: Store, S: Store>(admin: &A, store: &S, a: &Audi
         1
     );
     assert_eq!(tx.list_boot_stops(None, false).await.unwrap().len(), 2);
+    // A cleared stop is no longer found by its MAC.
+    assert_eq!(
+        tx.active_boot_stops_for_macs(&device_macs)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     // After clearing, the MAC can be stopped again.
     let re = NewBootStop {
         id: BootStopId::from_random_bytes(rand_bytes()),
@@ -1385,5 +1439,192 @@ pub async fn flow_wipe_guard<A: Store, S: Store>(admin: &A, store: &S, a: &Audit
     j.wipe_audit_seq = first.wipe_audit_seq;
     j.wipe_record_hash = first.wipe_record_hash;
     assert!(tx.insert_job(&j).await.unwrap_err().is_conflict());
+    tx.rollback().await;
+}
+
+/// Finding SEC-001: pending sessions counted per source network (an
+/// IPv4 address, or the IPv6 /64) and per boot service; idle sessions
+/// that were never authorised expire.
+pub async fn flow_session_scopes_and_idle<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let op = enrol(admin, a, "scope operator").await;
+    let bs = enrol_boot_service(admin, a, "relay scopes").await;
+    let other_bs = enrol_boot_service(admin, a, "relay scopes two").await;
+    let v6 = |s: &str| IpAddr::V6(s.parse::<Ipv6Addr>().unwrap());
+    let mut opened = Vec::new();
+    for (ip, b) in [
+        (v6("2001:db8:1:2::5"), bs.id),
+        (v6("2001:db8:1:2:ffff::9"), bs.id),
+        (v6("2001:db8:1:3::5"), other_bs.id),
+        (IpAddr::V4(Ipv4Addr::new(10, 20, 1, 3)), other_bs.id),
+    ] {
+        let mut n = new_session(Some(b), macs(1));
+        n.source_ip = ip;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_device_session(&n).await.unwrap();
+        append(
+            a,
+            &mut tx,
+            "device.session.opened",
+            "device_session",
+            &n.id.to_string(),
+        )
+        .await;
+        tx.commit().await.unwrap();
+        opened.push(n);
+    }
+    let pending = [
+        SessionState::AwaitingAuthorisation,
+        SessionState::Authorised,
+    ];
+    let mut tx = store.begin().await.unwrap();
+    tx.lock_device_session_quota().await.unwrap();
+    for (scope, want) in [
+        (SessionScope::SourceNetwork(v6("2001:db8:1:2:abcd::1")), 2),
+        (SessionScope::SourceNetwork(v6("2001:db8:1:3::")), 1),
+        (SessionScope::SourceNetwork(v6("2001:db8:1:4::5")), 0),
+        (
+            SessionScope::SourceNetwork(IpAddr::V4(Ipv4Addr::new(10, 20, 1, 3))),
+            1,
+        ),
+        // Another IPv4 address in the same /24 is another source.
+        (
+            SessionScope::SourceNetwork(IpAddr::V4(Ipv4Addr::new(10, 20, 1, 4))),
+            0,
+        ),
+        (SessionScope::BootService(bs.id), 2),
+        (SessionScope::BootService(other_bs.id), 2),
+    ] {
+        assert_eq!(
+            tx.count_device_sessions(&pending, scope).await.unwrap(),
+            want,
+            "{scope:?}"
+        );
+    }
+    assert!(
+        tx.count_device_sessions(&pending, SessionScope::All)
+            .await
+            .unwrap()
+            >= 4
+    );
+    tx.rollback().await;
+
+    // One of the four is authorised: idle expiry spares it.
+    let kept = opened.first().unwrap();
+    let mut tx = store.begin().await.unwrap();
+    tx.authorise_device_session(kept.id, SessionAuth::Approval(op.id), now())
+        .await
+        .unwrap();
+    append(
+        a,
+        &mut tx,
+        "device.session.approved",
+        "device_session",
+        &kept.id.to_string(),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    // A cut-off before the sessions were seen expires nothing.
+    let mut tx = store.begin().await.unwrap();
+    let ids = tx
+        .expire_device_sessions(now(), later(kept.created_at, -60))
+        .await
+        .unwrap();
+    assert!(opened.iter().all(|o| !ids.contains(&o.id)));
+    tx.rollback().await;
+    // A cut-off after: the three waiting ones expire before their TTL.
+    let mut tx = store.begin().await.unwrap();
+    let ids = tx
+        .expire_device_sessions(now(), later(now(), 1))
+        .await
+        .unwrap();
+    for o in opened.iter().skip(1) {
+        assert!(ids.contains(&o.id));
+        append(
+            a,
+            &mut tx,
+            "device.session.expired",
+            "device_session",
+            &o.id.to_string(),
+        )
+        .await;
+    }
+    assert!(!ids.contains(&kept.id));
+    for id in ids.iter().filter(|i| opened.iter().all(|o| o.id != **i)) {
+        append(
+            a,
+            &mut tx,
+            "device.session.expired",
+            "device_session",
+            &id.to_string(),
+        )
+        .await;
+    }
+    tx.commit().await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(
+        tx.device_session(kept.id).await.unwrap().unwrap().state,
+        SessionState::Authorised
+    );
+    assert_eq!(
+        tx.count_device_sessions(&pending, SessionScope::BootService(other_bs.id))
+            .await
+            .unwrap(),
+        0
+    );
+    tx.rollback().await;
+}
+
+/// Finding NIST-013: the administrative role raises a boot service's
+/// generation after a restore; it never lowers it or sets it equal.
+pub async fn flow_raise_generation<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let bs = enrol_boot_service(admin, a, "relay restored").await;
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(tx.bump_boot_policy_generation(bs.id).await.unwrap(), 1);
+    append(
+        a,
+        &mut tx,
+        "boot_policy.generation.initialised",
+        "boot_service",
+        &bs.id.to_string(),
+    )
+    .await;
+    tx.commit().await.unwrap();
+
+    let mut tx = admin.begin().await.unwrap();
+    tx.raise_boot_policy_generation(bs.id, 1000).await.unwrap();
+    append(
+        a,
+        &mut tx,
+        "boot_policy.generation.raised",
+        "boot_service",
+        &bs.id.to_string(),
+    )
+    .await;
+    tx.commit().await.unwrap();
+    let mut tx = admin.begin().await.unwrap();
+    for to in [1000, 999, 1] {
+        assert!(
+            tx.raise_boot_policy_generation(bs.id, to)
+                .await
+                .unwrap_err()
+                .is_conflict(),
+            "{to}"
+        );
+    }
+    tx.rollback().await;
+    let mut tx = admin.begin().await.unwrap();
+    assert!(matches!(
+        tx.raise_boot_policy_generation(bs.id, 0).await,
+        Err(DbError::InvalidArgument { .. })
+    ));
+    tx.rollback().await;
+    // Raising is a state change: no commit without its record.
+    let mut tx = admin.begin().await.unwrap();
+    tx.raise_boot_policy_generation(bs.id, 2000).await.unwrap();
+    assert!(matches!(tx.commit().await, Err(DbError::Unaudited)));
+    let mut tx = store.begin().await.unwrap();
+    assert_eq!(tx.boot_policy_generation(bs.id).await.unwrap(), 1000);
+    // The next stop change continues from the raised value.
+    assert_eq!(tx.bump_boot_policy_generation(bs.id).await.unwrap(), 1001);
     tx.rollback().await;
 }

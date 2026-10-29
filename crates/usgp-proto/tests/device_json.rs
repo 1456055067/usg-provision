@@ -607,8 +607,13 @@ mod device_json {
         assert!(parse::<EndSessionV1>(&too_many).is_err());
         assert!(parse::<EndSessionV1>(r#"{"reason":"bored"}"#).is_err());
         assert!(parse::<EndSessionV1>(&j.replace("usb_disk", "looks_fine")).is_err());
-        // The two agent-only reasons (WU-12 integration) are wire values.
-        for r in ["volumes_undetermined", "partition_table_undescribable"] {
+        // The agent-only reasons (WU-12 integration; SEC-003) are wire
+        // values.
+        for r in [
+            "volumes_undetermined",
+            "partition_table_undescribable",
+            "indistinguishable_disks",
+        ] {
             let e: EndSessionV1 = parse(&j.replace("usb_disk", r)).unwrap();
             assert_eq!(e.refused_disks.first().unwrap().reason.as_str(), r);
             assert!(serde_json::to_string(&e).unwrap().contains(r));

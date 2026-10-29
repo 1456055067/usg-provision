@@ -643,6 +643,7 @@ pub fn parse_gpt(dev: &mut dyn BlockDevice, limits: &GptLimits) -> Result<GptVie
         mbr::Lba0::Protective => {}
         mbr::Lba0::Empty => return Err(GptError::NoProtectiveMbr("no MBR signature")),
         mbr::Lba0::Legacy(_) => return Err(GptError::NoProtectiveMbr("legacy MBR")),
+        mbr::Lba0::Hybrid(_) => return Err(GptError::NoProtectiveMbr("hybrid MBR")),
     }
 
     let p_raw = read_block(dev, PRIMARY_HEADER_LBA)?;

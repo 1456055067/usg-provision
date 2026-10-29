@@ -258,6 +258,26 @@ mod t {
     }
 
     #[tokio::test]
+    async fn m3_session_scopes_and_idle() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_session_scopes_and_idle(&db.admin, &db.app, &a).await;
+        db.finish().await;
+    }
+
+    /// Finding NIST-013 on PostgreSQL: the administrative role may raise
+    /// the generation (migration 0004 grant); the guard refuses a lower
+    /// or equal one.
+    #[tokio::test]
+    async fn m3_raise_generation() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        m3::flow_raise_generation(&db.admin, &db.app, &a).await;
+        flow_chain_verifies(&db.app, &a).await;
+        db.finish().await;
+    }
+
+    #[tokio::test]
     async fn m3_job_success() {
         let db = TestDb::migrated().await;
         let a = init_audit(&db.app).await;
@@ -440,7 +460,8 @@ mod t {
     }
 
     /// Decisions 0016 and 0021: the administrative role enrols and
-    /// disables boot services, and touches nothing else of 0004.
+    /// disables boot services, may raise a boot-policy generation
+    /// (finding NIST-013), and touches nothing else of 0004.
     #[tokio::test]
     async fn m3_admin_role_least_privilege() {
         let db = TestDb::migrated().await;
@@ -461,8 +482,8 @@ mod t {
             ),
             ("SELECT count(*) FROM boot_stop", "read boot_stop"),
             (
-                "INSERT INTO boot_policy_generation VALUES (gen_random_uuid(), 1)",
-                "insert boot_policy_generation",
+                "DELETE FROM boot_policy_generation",
+                "delete boot_policy_generation",
             ),
             ("DELETE FROM boot_service", "delete boot_service"),
             ("TRUNCATE boot_service", "truncate boot_service"),

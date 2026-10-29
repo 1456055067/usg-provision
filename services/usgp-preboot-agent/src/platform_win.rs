@@ -11,19 +11,30 @@
 //!   if that cannot be established, every disk is treated as boot media
 //!   (fail closed). A disk whose volumes cannot all be placed is refused
 //!   (WU-5 lock rule).
-//! - **Open**: only the chosen disk, re-inspected and compared with what
-//!   the person confirmed; every volume on it locked and dismounted; then
-//!   opened for write with the job's recorded size (`RawDisk`).
+//! - **Open**: only the chosen disk, re-inspected through its interface
+//!   path (topic 23 §2) and compared with what the person confirmed;
+//!   every volume on it locked and dismounted; then opened for write by
+//!   that same path with the job's recorded size (`RawDisk`), and the
+//!   descriptor (model, serial, bus) and partition-table identity read on
+//!   the write handle itself must match the listing (BOOT-002, SEC-003).
 //! - **Format**: `IOCTL_DISK_UPDATE_PROPERTIES`, locks released, each new
 //!   volume resolved by its exact extent on the chosen disk, a free letter
-//!   assigned (never `X:`), DiskPart run with a script that selects only
-//!   that letter, and the result read back (file system and extent).
+//!   assigned (never `X:`), the script written create-new under a random
+//!   name (SEC-008), the letter re-resolved to the same volume and extent
+//!   immediately before DiskPart starts (BOOT-001), DiskPart run with a
+//!   script that selects only that letter, and the result read back (file
+//!   system, label and extent).
 //! - **Boot files**: BCDBoot from the applied image with `/s` naming the
-//!   ESP; `\EFI\Microsoft\Boot\bootmgfw.efi` must then exist.
+//!   ESP (`uefi-boot-manager.md` §9.4); `\EFI\Microsoft\Boot\bootmgfw.efi`
+//!   must then exist.
 //! - **Firmware variables**: `BootOrder` and `Boot####` only, mapped from
 //!   `usgp_disk::uefi::BootVarName` onto `usgp_winapi::vars::WritableBootVar`
 //!   (the restriction holds at both layers).
-//! - **Power**: `wpeutil reboot` or `wpeutil shutdown`.
+//! - **Power**: `wpeutil Reboot` or `wpeutil Shutdown` (`winpe.md` §5.2).
+//! - **Privileges** (AC-6, NIST-001): none is enabled at start-up; the
+//!   agent only checks that its token holds them. The sink enables restore
+//!   and backup for the apply step (and security or create-symbolic-link
+//!   per call); the firmware privilege is enabled per firmware call.
 //!
 //! Every external tool and every wait is bounded by [`WaitBudget`], which
 //! the session sizes below the job plan's limits (WU-8 POAM).
@@ -38,6 +49,11 @@
 // - NIST 800-53: SI-7 - boot files come from the verified applied image
 //   (BCDBoot from it).
 // - NIST 800-53: SC-5 - every tool and wait bounded.
+// - NIST 800-53: AC-6 (Least Privilege) - privileges checked at start-up,
+//   enabled only by the operation that needs them (usgp-winapi).
+// - SPEC: specs/standards/windows-storage-firmware-api.md §2, §7, §10, §23
+// - SPEC: specs/standards/winpe.md §5.2, §11;
+//   specs/standards/uefi-boot-manager.md §9.4
 // - SPEC: specs/disk.md#REQ-DISK-005, #REQ-DISK-008, #REQ-DISK-015,
 //   #REQ-DISK-016
 // - SPEC: specs/boot-network.md#REQ-BOOT-065, #REQ-BOOT-066
@@ -53,6 +69,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use usgp_crypto::CryptoProvider;
 use usgp_deploy::platform::{
     BootFiles, FirmwareVars as FirmwareVarsTrait, FormattedVolume, FwError, OpenedTarget, Platform,
     PlatformError, PlatformErrorKind, VolumeOps, VolumeSpec,
@@ -64,7 +81,9 @@ use usgp_image::apply::{ApplyRoot, ApplySink};
 use usgp_proto::device::{DeviceArch, FirmwareKind, MacAddress, SecureBootState};
 use usgp_proto::disk::{FileSystem, PartitionKind};
 use usgp_winapi::WinApiError;
-use usgp_winapi::disk::{self, DiskInfo, MediaType, RawDisk, Writability};
+use usgp_winapi::disk::{
+    self, DeviceDescriptor, DiskInfo, DiskInterface, MediaType, RawDisk, TableId, Writability,
+};
 use usgp_winapi::firmware::{self, FirmwareMode, FirmwareVars};
 use usgp_winapi::paths::{DriveLetter, VolumeGuidPath};
 use usgp_winapi::privilege::{self, Privilege};
@@ -74,7 +93,7 @@ use usgp_winapi::vars::{
 use usgp_winapi::volume::{self, LockedVolume, VolumeBacking};
 use usgp_winapi::{net, system};
 
-use crate::disks::{DiskEntry, FoundDisk};
+use crate::disks::{Discriminator, DiskEntry, FoundDisk, TableIdentity};
 use crate::host::{Host, HostError, HostFacts, PowerAction, WaitBudget};
 use crate::wintools::{self, ToolError, VolumeMatch};
 
@@ -169,13 +188,7 @@ fn guid_of(g: &usgp_winapi::parse::Guid) -> Guid {
 /// The facts and partition kinds of one inspected disk.
 fn found_of(info: &DiskInfo, boot: Option<&BTreeSet<u32>>) -> FoundDisk {
     let d = &info.descriptor;
-    let model = [d.vendor_id.as_deref(), d.product_id.as_deref()]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let (model, serial, bus) = shown_identity(d);
     let (logical, physical) = match info.sector_sizes {
         Some(s) => (s.logical, s.physical),
         None => (
@@ -209,14 +222,9 @@ fn found_of(info: &DiskInfo, boot: Option<&BTreeSet<u32>>) -> FoundDisk {
             identity: DiskIdentity {
                 device_number: info.number,
                 model,
-                serial: d
-                    .serial_number
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
+                serial,
             },
-            bus: bus_of(d.bus),
+            bus,
             removable: d.removable_media || info.geometry.media == MediaType::Removable,
             read_only: info.writability != Writability::Writable,
             logical_sector: logical,
@@ -227,7 +235,37 @@ fn found_of(info: &DiskInfo, boot: Option<&BTreeSet<u32>>) -> FoundDisk {
         },
         kinds,
         volumes_known: volume::volumes_on_disk(info.number).is_ok(),
+        discriminator: Discriminator {
+            interface_path: info.interface_path.clone(),
+            table: table_identity(info.layout.table_id()),
+        },
     }
+}
+
+fn table_identity(t: TableId) -> TableIdentity {
+    match t {
+        TableId::Gpt(g) => TableIdentity::Gpt(guid_of(&g)),
+        TableId::Mbr(sig) => TableIdentity::Mbr(sig),
+        _ => TableIdentity::None,
+    }
+}
+
+/// The identity shown to the person, from a descriptor (as in `found_of`).
+fn shown_identity(d: &DeviceDescriptor) -> (String, Option<String>, Bus) {
+    let model = [d.vendor_id.as_deref(), d.product_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let serial = d
+        .serial_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    (model, serial, bus_of(d.bus))
 }
 
 /// The Windows PE host.
@@ -239,7 +277,8 @@ pub struct WinHost {
 
 impl WinHost {
     /// Reads the system directory and, on UEFI, opens firmware variable
-    /// access (which enables the privilege it needs).
+    /// access. Checks that the token holds every privilege the job needs,
+    /// leaving each disabled (NIST-001).
     ///
     /// # Errors
     ///
@@ -248,14 +287,17 @@ impl WinHost {
         // The Windows sink needs these for every apply (security
         // descriptors, owners, SACLs, symbolic links and junctions):
         // without any of them the agent does not start, rather than fail
-        // after the wipe.
+        // after the wipe. Each is enabled and at once disabled; the sink
+        // enables them again only for the apply step (usgp-winapi
+        // `privilege`). The firmware privilege is checked by
+        // `firmware_mode` below, the same way.
         for p in [
             Privilege::Restore,
             Privilege::Backup,
             Privilege::Security,
             Privilege::CreateSymbolicLink,
         ] {
-            privilege::enable(p).map_err(|e| host_err("enable a privilege", &e))?;
+            privilege::check_held(p).map_err(|e| host_err("check a privilege", &e))?;
         }
         let system_dir =
             system::system_directory().map_err(|e| host_err("system directory", &e))?;
@@ -345,11 +387,12 @@ impl Host for WinHost {
     }
 
     fn power(&mut self, action: PowerAction) -> Result<(), HostError> {
+        // `winpe.md` §5.2 (SR-7): `wpeutil <command>`, one command per
+        // invocation; `Reboot` restarts and `Shutdown` shuts down the
+        // WinPE session; neither takes an argument. Spelt as documented
+        // (CR-SR7-001).
         let mut cmd = Command::new(self.system_dir.join("wpeutil.exe"));
-        cmd.arg(match action {
-            PowerAction::Restart => "reboot",
-            PowerAction::Shutdown => "shutdown",
-        });
+        cmd.arg(wintools::wpeutil_command(action));
         wintools::run_bounded(cmd, POWER_LIMIT).map_err(|e| HostError(format!("wpeutil: {e:?}")))
     }
 }
@@ -446,12 +489,27 @@ impl Platform for WinPlatform<'_> {
             return Err(perr(PlatformErrorKind::Refused, WHAT));
         }
         let n = sh.chosen.found.facts.identity.device_number;
+        // BOOT-002: the disk is re-opened by the interface path it was
+        // listed with, so the handles below are that device even if disk
+        // numbers moved; no path, no write (fail closed).
+        let iface = DiskInterface {
+            number: n,
+            path: sh
+                .chosen
+                .found
+                .discriminator
+                .interface_path
+                .clone()
+                .ok_or(perr(PlatformErrorKind::IdentityMismatch, WHAT))?,
+        };
         let boot = boot_disks(&self.system_dir);
-        let info = disk::DiskQuery::open(n)
+        let info = disk::DiskQuery::open_interface(&iface)
             .and_then(|q| q.inspect())
             .map_err(|e| perr(win_kind(&e), WHAT))?;
         let now = found_of(&info, boot.as_ref());
-        if !same_disk(&sh.chosen.found.facts, &now.facts) {
+        if !same_disk(&sh.chosen.found.facts, &now.facts)
+            || now.discriminator != sh.chosen.found.discriminator
+        {
             return Err(perr(PlatformErrorKind::IdentityMismatch, WHAT));
         }
         if !now.volumes_known {
@@ -464,8 +522,24 @@ impl Platform for WinPlatform<'_> {
         // properties updated (WU-5); released in `format`.
         let locks = volume::lock_volumes_on_disk(n)
             .map_err(|_| perr(PlatformErrorKind::Refused, "lock and dismount volumes"))?;
-        let raw =
-            RawDisk::open_for_write(n, want.size_bytes).map_err(|e| perr(win_kind(&e), WHAT))?;
+        let raw = RawDisk::open_interface_for_write(&iface, want.size_bytes)
+            .map_err(|e| perr(win_kind(&e), WHAT))?;
+        // BOOT-002: identity read on the write handle itself (model,
+        // serial, bus, and the table's GPT disk GUID or MBR signature).
+        let on_handle = raw.descriptor().map_err(|e| perr(win_kind(&e), WHAT))?;
+        let table = raw
+            .layout()
+            .map(|l| table_identity(l.table_id()))
+            .map_err(|e| perr(win_kind(&e), WHAT))?;
+        let (model, serial, bus) = shown_identity(&on_handle);
+        let was = &sh.chosen.found;
+        if model != was.facts.identity.model
+            || serial != was.facts.identity.serial
+            || bus != was.facts.bus
+            || table != was.discriminator.table
+        {
+            return Err(perr(PlatformErrorKind::IdentityMismatch, WHAT));
+        }
         let rc = Rc::new(RefCell::new(raw));
         sh.locks = locks;
         sh.disk = Some(Rc::clone(&rc));
@@ -578,12 +652,52 @@ impl WinVolumes {
                 .map_err(|e| perr(win_kind(&e), "assign a drive letter"))?;
             letter
         };
-        let script = std::env::temp_dir().join(format!("usgp-format-{n}-{}.txt", spec.number));
-        std::fs::write(
-            &script,
-            wintools::diskpart_script(letter.letter(), spec.fs, spec.label),
+        // SEC-008: a new file with a random name (create-new: an existing
+        // or planted file of that name is never reused or followed).
+        let mut random = [0u8; 16];
+        usgp_crypto::provider()
+            .fill_random(&mut random)
+            .map_err(|_| perr(PlatformErrorKind::Refused, "random script name"))?;
+        let script = wintools::write_script_new(
+            &std::env::temp_dir(),
+            random,
+            &wintools::diskpart_script(letter.letter(), spec.fs, spec.label),
         )
         .map_err(|e| perr(PlatformErrorKind::Io(e.kind()), "write the format script"))?;
+        // BOOT-001: immediately before DiskPart starts, the letter must
+        // still name the volume resolved above, at exactly the planned
+        // extent on the chosen disk (REQ-DISK-015).
+        // POAM: BOOT-001 residual - DiskPart opens the volume itself, so
+        // our lock cannot be held across its start; a change in the few
+        // milliseconds between this check and DiskPart's `select volume`
+        // is caught only by the read-back below (file system, label,
+        // extent), after the format.
+        let at_letter = volume::volume_at(letter).ok();
+        let extents: Vec<wintools::Extent> = volume::disk_extents(&vol)
+            .map(|e| {
+                e.iter()
+                    .map(|x| (x.disk_number, x.starting_offset, x.length))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !wintools::letter_still_names(
+            at_letter.as_ref().map(VolumeGuidPath::as_str),
+            vol.as_str(),
+            &extents,
+            (n, spec.start_bytes, spec.size_bytes),
+        ) {
+            let _ = std::fs::remove_file(&script);
+            return Err(perr(
+                PlatformErrorKind::IdentityMismatch,
+                "volume at the drive letter before formatting",
+            ));
+        }
+        // `winpe.md` §11 (SR-7): DiskPart runs a command file with
+        // `diskpart /s <file>` in Microsoft's deployment samples, though
+        // the "diskpart" page does not describe `/s` (OPEN-WINPE-2), and
+        // the exit-code values are not documented (OPEN-WINPE-3). The exit
+        // status is therefore only a first filter: the real check is the
+        // read-back below (file system, label, extent).
         let mut cmd = Command::new(self.system_dir.join("diskpart.exe"));
         cmd.arg("/s").arg(&script);
         let ran = wintools::run_bounded(cmd, self.budget.tool);

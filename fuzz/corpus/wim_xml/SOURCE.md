@@ -5,7 +5,7 @@ builder (`WimBuilder`, feature `testkit`) and, for the XML-only seeds,
 `usgp_image::wim::xml::encode_utf16` of text written in the generator. None
 comes from a third-party WIM file or tool, from Windows media, from a
 packet capture or log, or from any deployment of another product
-(fuzz/README.md, seed origin rule; decision 0006 item 4). The DISM-made R1
+(fuzz/README.md, seed origin rule; decision 0006 items 1-3). The DISM-made R1
 samples are **not** used as seeds.
 
 Each seed is the XML data resource (BOM + UTF-16LE; the range the

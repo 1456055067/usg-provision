@@ -132,7 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           hits="$(cargo tree --locked --workspace -e features,normal,build --target all --prefix none \
-            | grep -E '(feature "(test-pki|testkit|dism-samples|pg-integration|large-tests)"|^x509-cert feature "builder")' \
+            | grep -E '(feature "(test-pki|testkit|dism-samples|pg-integration|large-tests|parse-testkit|sink-testkit)"|^x509-cert feature "builder")' \
             | sort -u)" || true
           if [ -n "$hits" ]; then
             echo "::error::test-only features reach the shipped build graph:"
@@ -140,6 +140,29 @@ jobs:
             exit 1
           fi
           echo "test-only features: none in the shipped build graph"
+      - name: No sim feature in the Windows agent build graph (NIST-010, CM-7)
+        # The simulated platform must never reach the shipped Windows agent.
+        # Inverted on usgp-deploy: a root command-line feature shows only
+        # in the inverted tree. The query must first detect --features sim,
+        # so a broken query fails. Off Windows the agent is sim-only by
+        # design and is never shipped (fips-linkage only scans it; the only
+        # agent artifact is the Windows pair from windows-agent).
+        run: |
+          set -euo pipefail
+          q=(cargo tree --locked -e "features,normal,build" --target x86_64-pc-windows-msvc
+            -i usgp-deploy --prefix none)
+          self="$("${q[@]}" -p usgp-preboot-agent --features sim | grep -F 'feature "sim"' || true)"
+          if [ -z "$self" ]; then
+            echo "::error::sim gate self-check: --features sim was not detected; the query is broken"
+            exit 1
+          fi
+          hits="$({ "${q[@]}" -p usgp-preboot-agent; "${q[@]}" --workspace; } | grep -F 'feature "sim"' | sort -u || true)"
+          if [ -n "$hits" ]; then
+            echo "::error::sim reaches the Windows agent build graph:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "sim: not in the Windows agent build graph"
       - run: scripts/check-pure-rust.sh
       - run: scripts/check-names.sh
       - run: NAMES_FORCE_GREP=1 scripts/check-names.sh
@@ -242,7 +265,10 @@ jobs:
 
   windows-agent:
     # M3 WU-0 skeleton (plan sections 1.2(d) and 10.2; decision 0019); WU-15
-    # adds the linkage map check, VHD tests and the DISM apply oracle.
+    # pins the FIPS toolchain (REL-M3-W0-001), runs the VHD tests with a
+    # sentinel disk (QA-001) and builds the agent pair artifact
+    # (REL-M3-W0-002). Still open: the linker-map check and the DISM apply
+    # oracle (impl-notes-wu15).
     # Native x86_64-pc-windows-msvc build with the static CRT
     # (.cargo/config.toml). Records the WU-0 probes in the job summary:
     #   1. aws-lc-fips-sys builds and passes its power-on self-test with a
@@ -284,52 +310,90 @@ jobs:
             ~/.cargo/git
             target
           key: windows-agent-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
-      - name: FIPS module build toolchain (Windows; recorded, not yet pinned)
+      - name: FIPS module build toolchain (Windows; pinned, REL-M3-W0-001)
         # AWS-LC FIPS on Windows needs Go, Perl, CMake, Ninja, NASM, MSVC and
         # libclang (bindgen; no pre-generated Windows bindings ship).
         # Strawberry Perl, never Git's MSYS perl.
+        #
+        # Pins (CM-2, SR-4; change deliberately, CM-3, and record the change
+        # in CHANGELOG.md):
+        # - NASM is not in the runner image: installed from Chocolatey at an
+        #   exact version, and the installed package file must have the
+        #   SHA-512 the Chocolatey feed published for that version.
+        # - Ninja is the runner image's: exact version asserted.
+        # - Go, CMake, Perl, LLVM (libclang) and Visual Studio come from the
+        #   runner image (windows-2025, image 20261021.278 when pinned):
+        #   version series asserted, as the Linux fips-toolchain action does;
+        #   exact versions and SHA-256 of each tool are recorded.
+        # A drift fails the job; it is never silently accepted.
+        env:
+          PIN_NASM_CHOCO: "3.2.0"
+          PIN_NASM_NUPKG_SHA512: "78A722FAC25A736929A1171BF6BB9A54FA3E373532B114AB364F7479E15663B50749A89D1C0B54367125EB2D73F7C616487A5745FAE5EA06D41480EC8F95CA88"
+          PIN_NINJA: "1.13.2"
+          SERIES_GO: "1.24"
+          SERIES_CMAKE: "4.4"
+          SERIES_PERL: "5.42"
+          SERIES_LLVM: "20.1"
+          SERIES_VS: "18"
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          foreach ($p in 'nasm', 'ninja') {
-            if (-not (Get-Command $p -ErrorAction SilentlyContinue)) {
-              choco install $p -y --no-progress
-            }
+          function Fail([string]$s) { Write-Output "::error::$s (pinned toolchain, REL-M3-W0-001)"; exit 1 }
+          function Series([string]$name, [string]$want, [string]$got) {
+            if ($got -ne $want -and -not $got.StartsWith("$want.")) { Fail "$name is $got, expected $want.x" }
           }
+          choco install nasm --version="$env:PIN_NASM_CHOCO" -y --no-progress --allow-downgrade
+          $choco = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { 'C:\ProgramData\chocolatey' }
+          $nupkg = Join-Path $choco 'lib\nasm\nasm.nupkg'
+          if (-not (Test-Path -LiteralPath $nupkg)) { Fail "no $nupkg after choco install" }
+          $h = (Get-FileHash -LiteralPath $nupkg -Algorithm SHA512).Hash
+          if ($h -ne $env:PIN_NASM_NUPKG_SHA512) { Fail "nasm.nupkg SHA-512 is $h, expected $env:PIN_NASM_NUPKG_SHA512" }
           $nasmDir = 'C:\Program Files\NASM'
-          if (Test-Path -LiteralPath $nasmDir) {
-            Add-Content -LiteralPath $env:GITHUB_PATH -Value $nasmDir -Encoding utf8
-            $env:PATH = "$nasmDir;$env:PATH"
-          }
+          if (-not (Test-Path -LiteralPath (Join-Path $nasmDir 'nasm.exe'))) { Fail "nasm.exe not in $nasmDir" }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value $nasmDir -Encoding utf8
+          $env:PATH = "$nasmDir;$env:PATH"
           $llvm = 'C:\Program Files\LLVM\bin'
-          if (-not (Test-Path -LiteralPath (Join-Path $llvm 'libclang.dll'))) {
-            Write-Output "::error::libclang.dll not found in $llvm (bindgen needs it)"
-            exit 1
-          }
+          if (-not (Test-Path -LiteralPath (Join-Path $llvm 'libclang.dll'))) { Fail "libclang.dll not found in $llvm (bindgen needs it)" }
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm" -Encoding utf8
           foreach ($t in 'go', 'cmake', 'ninja', 'nasm', 'perl') {
-            if (-not (Get-Command $t -ErrorAction SilentlyContinue)) {
-              Write-Output "::error::$t not found"
-              exit 1
-            }
+            if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { Fail "$t not found" }
           }
+          $nasm = (Get-Command nasm).Source
+          if ($nasm -ne (Join-Path $nasmDir 'nasm.exe')) { Fail "nasm resolves to $nasm, not the pinned $nasmDir\nasm.exe" }
           $perl = (Get-Command perl).Source
-          if ($perl -match '\\Git\\') {
-            Write-Output "::error::perl resolves to Git's MSYS perl ($perl); Strawberry Perl is required"
-            exit 1
-          }
+          if ($perl -match '\\Git\\') { Fail "perl resolves to Git's MSYS perl ($perl); Strawberry Perl is required" }
+          $ninjaV = (ninja --version).Trim()
+          if ($ninjaV -ne $env:PIN_NINJA) { Fail "ninja is $ninjaV, expected exactly $env:PIN_NINJA" }
+          $nasmV = (nasm -v) -join ' '
+          if ($nasmV -notmatch '^NASM version 3\.') { Fail "nasm reports '$nasmV', expected NASM 3.x from choco $env:PIN_NASM_CHOCO" }
+          $goV = (go env GOVERSION).Trim() -replace '^go', ''
+          Series go $env:SERIES_GO $goV
+          $cmakeV = ((cmake --version)[0] -split ' ')[2]
+          Series cmake $env:SERIES_CMAKE $cmakeV
+          $perlV = (perl -e 'print $^V') -replace '^v', ''
+          Series perl $env:SERIES_PERL $perlV
+          $clangLine = (& (Join-Path $llvm 'clang.exe') --version)[0]
+          $clangV = if ($clangLine -match 'clang version ([0-9.]+)') { $Matches[1] } else { '' }
+          Series 'llvm (libclang)' $env:SERIES_LLVM $clangV
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property catalog_productDisplayVersion
-          $lines = @('### windows-agent: FIPS module build toolchain (recorded)', '```text')
-          $lines += "go:     $(go version)"
-          $lines += "cmake:  $((cmake --version)[0])"
-          $lines += "ninja:  $(ninja --version)"
-          $lines += "nasm:   $(nasm -v)"
-          $lines += "perl:   $perl $(perl -e 'print $^V')"
-          $lines += "clang:  $((& (Join-Path $llvm 'clang.exe') --version)[0])"
-          $lines += "msvc:   Visual Studio $vs"
+          $vsV = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Series 'visual studio' $env:SERIES_VS $vsV
+          $vcTools = Get-Content -LiteralPath (Join-Path $vsPath 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -TotalCount 1
+          function Sha([string]$f) { "$((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLowerInvariant())  $f" }
+          $lines = @('### windows-agent: FIPS module build toolchain (pinned, REL-M3-W0-001)', '```text')
+          $lines += "nasm:   $nasmV (choco nasm $env:PIN_NASM_CHOCO, nupkg SHA-512 pinned)"
+          $lines += "ninja:  $ninjaV (pinned exactly)"
+          $lines += "go:     $goV (series $env:SERIES_GO)"
+          $lines += "cmake:  $cmakeV (series $env:SERIES_CMAKE)"
+          $lines += "perl:   $perlV $perl (series $env:SERIES_PERL)"
+          $lines += "clang:  $clangV (series $env:SERIES_LLVM)"
+          $lines += "msvc:   Visual Studio $vsV, VC tools $vcTools (series $env:SERIES_VS)"
           $lines += "rustc:  $(rustc -V)"
           $lines += "runner: $env:ImageOS $env:ImageVersion"
+          $lines += 'sha256:'
+          foreach ($t in 'nasm', 'ninja', 'go', 'cmake', 'perl') { $lines += Sha (Get-Command $t).Source }
+          $lines += Sha (Join-Path $llvm 'libclang.dll')
           $lines += '```'
           $lines | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
       - name: "Probe 1: FIPS module build, static CRT and self-test (release agent)"
@@ -432,6 +496,215 @@ jobs:
             exit 1
           }
           Write-Output 'usgp-winapi link probe: ok'
+      - name: VHD tests as administrator (QA-001; plan section 10.2), sentinel disk untouched
+        # The only tests that write a real disk: usgp-winapi's vhd_disk (raw
+        # I/O, property update, volume resolution by extents, letters) and
+        # winsink (WinSink apply on an NTFS VHD volume, links, short names,
+        # descriptor control bits). One thread: the tests drive DiskPart and
+        # pick free drive letters.
+        #
+        # "Other disks untouched" (REQ-DISK-015): a 64 MiB fixed VHD (raw
+        # sectors followed by a 512-byte footer) filled with a pattern is
+        # attached read-write for the whole run; the SHA-256 of its sectors
+        # must be the same after detaching. It proves no test wrote to a disk
+        # it did not create; it cannot prove that for the runner's own disk.
+        #
+        # Also writes the OPEN-WAPI-7 lines (DACL control bits, WU-5) and the
+        # GPT-OBS-001 line (vhd_disk reads DiskPart's GPT back with
+        # usgp_disk::parse_gpt, REL-M3-WU15-001) to the job summary. A
+        # missing or refused GPT-OBS-001 fails the step.
+        env:
+          USGP_WIN_VHD: "1"
+          VHD_TESTS: >-
+            vhd_raw_io_update_and_volume_letters synthetic_wim_applies_to_a_vhd_volume
+            links_and_junctions_are_applied_byte_for_byte short_names_disabled_fail_by_name
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Note([string]$s) { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $s -Encoding utf8 }
+          $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+          if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Write-Output '::error::the VHD tests need administrator rights; the step is not elevated (NOT RUN is never PASS)'
+            exit 1
+          }
+          function Invoke-DiskPartScript([string[]]$lines) {
+            $f = Join-Path $env:RUNNER_TEMP "diskpart-$([guid]::NewGuid()).txt"
+            Set-Content -LiteralPath $f -Value $lines -Encoding ascii
+            $out = diskpart.exe /s $f 2>&1
+            $code = $LASTEXITCODE
+            Remove-Item -LiteralPath $f
+            if ($code -ne 0) { Write-Output $out; throw "diskpart exited $code" }
+          }
+          function SectorHash([string]$f, [long]$n) {
+            $fs = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite')
+            try {
+              $sha = [Security.Cryptography.SHA256]::Create()
+              $buf = [byte[]]::new(1048576)
+              $left = $n
+              while ($left -gt 0) {
+                $got = $fs.Read($buf, 0, [int][Math]::Min([long]$buf.Length, $left))
+                if ($got -le 0) { throw "short read of $f" }
+                [void]$sha.TransformBlock($buf, 0, $got, $null, 0)
+                $left -= $got
+              }
+              [void]$sha.TransformFinalBlock($buf, 0, 0)
+              ($sha.Hash | ForEach-Object { $_.ToString('x2') }) -join ''
+            } finally { $fs.Dispose() }
+          }
+          $sent = Join-Path $env:RUNNER_TEMP 'usgp-sentinel.vhd'
+          if (Test-Path -LiteralPath $sent) { Remove-Item -LiteralPath $sent }
+          Invoke-DiskPartScript @("create vdisk file=`"$sent`" maximum=64 type=fixed")
+          $n = (Get-Item -LiteralPath $sent).Length - 512
+          if ($n -ne 64MB) { Write-Output "::error::sentinel VHD has $n data bytes, expected $(64MB)"; exit 1 }
+          # A pattern, so any write shows (zeros could hide a zero write); no
+          # partition table, so Windows leaves the disk RAW.
+          $pat = [byte[]]::new(1048576)
+          $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+          $rng.GetBytes($pat)
+          $pat[510] = 0; $pat[511] = 0
+          $fs = [IO.File]::Open($sent, 'Open', 'ReadWrite')
+          try { for ($i = 0; $i -lt 64; $i++) { $fs.Write($pat, 0, $pat.Length) } } finally { $fs.Dispose() }
+          $before = SectorHash $sent $n
+          Invoke-DiskPartScript @("select vdisk file=`"$sent`"", 'attach vdisk')
+          $img = Get-DiskImage -ImagePath $sent
+          if (-not $img.Attached) { Write-Output '::error::sentinel VHD did not attach'; exit 1 }
+          $sentDisk = ($img | Get-Disk).Number
+          $log = Join-Path $env:RUNNER_TEMP 'vhd-tests.log'
+          $status = 0
+          try {
+            # Test output on stderr must not stop the step; the exit status
+            # and the per-test lines decide. --show-output (not --nocapture)
+            # keeps each "test NAME ... ok" line whole and still prints what
+            # the tests print (the OPEN-WAPI-7 lines).
+            $ErrorActionPreference = 'Continue'
+            cargo test --locked --target $env:TARGET -p usgp-winapi --features sink-testkit `
+              --test vhd_disk --test winsink -- --ignored --show-output --test-threads=1 2>&1 |
+              Tee-Object -FilePath $log
+            $status = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = 'Stop'
+            $still = (Get-DiskImage -ImagePath $sent).Attached
+            Invoke-DiskPartScript @("select vdisk file=`"$sent`"", 'detach vdisk')
+          }
+          $after = SectorHash $sent $n
+          $plain = @((Get-Content -LiteralPath $log) -replace '\x1b\[[0-9;]*m', '')
+          $bad = @()
+          foreach ($t in ($env:VHD_TESTS -split '\s+' | Where-Object { $_ })) {
+            if (-not ($plain -match "^test $t \.\.\. ok$")) { $bad += $t }
+          }
+          $wapi = @($plain | Where-Object { $_ -match '^OPEN-WAPI-7 ' })
+          $obs = @($plain | Where-Object { $_ -match 'GPT-OBS-001' })
+          Note '### VHD tests (QA-001): vhd_disk and winsink with --ignored, USGP_WIN_VHD=1'
+          Note '```text'
+          Note "cargo test exit: $status"
+          foreach ($l in @($plain | Where-Object { $_ -match '^test .* \.\.\. ' -or $_ -match '^test result:' })) { Note $l }
+          Note "sentinel disk $sentDisk ($sent): attached for the whole run: $still"
+          Note "sentinel sectors sha256 before: $before"
+          Note "sentinel sectors sha256 after:  $after"
+          Note '```'
+          Note '### OPEN-WAPI-7: DACL protected and auto-inherited control bits (stored vs applied)'
+          Note '```text'
+          if ($wapi.Count) { foreach ($l in $wapi) { Note $l } } else { Note '(no OPEN-WAPI-7 line printed)' }
+          Note '```'
+          Note '### GPT-OBS-001: our read-back of a GPT that DiskPart wrote'
+          Note '```text'
+          if ($obs.Count) { foreach ($l in $obs) { Note $l } } else { Note 'NOT RUN: vhd_disk printed no GPT-OBS-001 line' }
+          Note '```'
+          if (-not @($obs | Where-Object { $_ -match 'GPT-OBS-001 accepted' }).Count) {
+            Write-Output '::error title=GPT-OBS-001::no "GPT-OBS-001 accepted" line from vhd_disk (NOT RUN or refused is never PASS)'
+            exit 1
+          }
+          if ($status -ne 0) { Write-Output "::error::VHD tests: cargo test exited $status"; exit 1 }
+          if ($bad.Count) { Write-Output "::error::VHD tests did not run and pass: $($bad -join ', ') (NOT RUN is never PASS)"; exit 1 }
+          if (-not $wapi.Count) { Write-Output '::error::winsink printed no OPEN-WAPI-7 line'; exit 1 }
+          if (-not $still) { Write-Output '::error::the sentinel VHD was detached during the run; the untouched check is void'; exit 1 }
+          if ($before -ne $after) { Write-Output "::error::the sentinel disk changed during the VHD tests (REQ-DISK-015): $before -> $after"; exit 1 }
+          Write-Output 'VHD tests: 4 passed; sentinel disk unchanged'
+      - name: Release agent artifact, exe and FIPS DLL as a hashed pair (REL-M3-W0-002)
+        # The agent ships as two files that must stay together: the .exe and
+        # the AWS-LC FIPS module DLL it imports at load time. Built alone
+        # with -p (REL-M3-W0-004: no feature unification with the workspace).
+        # Checks: exactly one module DLL, named for the aws-lc-fips-sys
+        # version in Cargo.lock; the exe imports it and no other AWS-LC DLL;
+        # neither imports a dynamic C runtime; the staged pair passes
+        # --self-test (FIPS mode) from a directory holding only the pair; no
+        # clean-room name in either (CR-303). SHA256SUMS lists both files;
+        # PAIR.sha256 is the SHA-256 of SHA256SUMS, so one digest names the
+        # pair. Not signed (REL-M3-WU15-002); not a release, a CI artifact.
+        id: agent-artifact
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Fail([string]$s) { Write-Output "::error::agent artifact: $s"; exit 1 }
+          # NIST-010: the shipped pair is never built with the simulation.
+          $sim = cargo tree --locked -p usgp-preboot-agent -e features,normal,build --target $env:TARGET -i usgp-deploy --prefix none |
+            Select-String -SimpleMatch 'feature "sim"'
+          if ($LASTEXITCODE -ne 0) { Fail "cargo tree exited $LASTEXITCODE" }
+          if ($sim) { Fail "the agent's Windows build graph enables sim: $($sim -join '; ')" }
+          cargo build --locked --release --target $env:TARGET -p usgp-preboot-agent
+          if ($LASTEXITCODE -ne 0) { Fail "cargo build exited $LASTEXITCODE" }
+          $out = "target\$env:TARGET\release"
+          $exe = Join-Path $out 'usgp-preboot-agent.exe'
+          $lock = Get-Content -LiteralPath Cargo.lock -Raw
+          if ($lock -notmatch '(?m)^name = "aws-lc-fips-sys"\r?\nversion = "([0-9]+)\.([0-9]+)\.([0-9]+)"') { Fail 'aws-lc-fips-sys not in Cargo.lock' }
+          $dllName = "aws_lc_fips_$($Matches[1])_$($Matches[2])_$($Matches[3])_crypto.dll"
+          $dlls = @(Get-ChildItem -Path "$out\build" -Filter '*.dll' -Recurse |
+            Where-Object { $_.FullName -match '\\aws-lc-fips-sys-' -and $_.Name -match '^aws_lc_fips_.*\.dll$' })
+          $names = @($dlls | ForEach-Object Name | Sort-Object -Unique)
+          if ($names.Count -ne 1 -or $names[0] -ne $dllName) { Fail "module DLLs found: $($names -join ', '); expected exactly $dllName" }
+          $hashes = @($dlls | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash } | Sort-Object -Unique)
+          if ($hashes.Count -ne 1) { Fail "$dllName exists in $($dlls.Count) build directories with different content" }
+          $dll = $dlls[0].FullName
+          $readobj = 'C:\Program Files\LLVM\bin\llvm-readobj.exe'
+          function Imports([string]$f) {
+            & $readobj --coff-imports $f | Select-String -Pattern '^\s*Name:\s*(\S+\.dll)\s*$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value.ToLowerInvariant() } | Sort-Object -Unique
+          }
+          $ei = @(Imports $exe)
+          $di = @(Imports $dll)
+          if ($ei -notcontains $dllName.ToLowerInvariant()) { Fail "the exe does not import $dllName (imports: $($ei -join ' '))" }
+          $otherLc = @($ei | Where-Object { $_ -match '^aws_lc' -and $_ -ne $dllName.ToLowerInvariant() })
+          if ($otherLc.Count) { Fail "the exe imports another AWS-LC DLL: $($otherLc -join ' ')" }
+          $crt = '^(vcruntime|msvcp|msvcr|ucrtbase|concrt|vccorlib|api-ms-win-crt-)'
+          $b = @($ei | Where-Object { $_ -match $crt })
+          if ($b.Count) { Fail "the exe imports a dynamic C runtime: $($b -join ' ')" }
+          $b = @($di | Where-Object { $_ -match $crt })
+          if ($b.Count) { Fail "$dllName imports a dynamic C runtime: $($b -join ' ')" }
+          $sha = $env:GITHUB_SHA.Substring(0, 12)
+          $name = "usgp-preboot-agent-$sha-x86_64-pc-windows-msvc"
+          $dist = Join-Path 'target\agent-dist' $name
+          if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item -LiteralPath $exe -Destination $dist
+          Copy-Item -LiteralPath $dll -Destination $dist
+          foreach ($f in @(Get-ChildItem -LiteralPath $dist -File)) {
+            $hit = Select-String -LiteralPath $f.FullName -Pattern 'tan[i]um' -Quiet -Encoding latin1
+            if ($hit) { Fail "clean-room name in $($f.Name) (CR-303)" }
+          }
+          $msg = & (Join-Path $dist 'usgp-preboot-agent.exe') --self-test 2>&1
+          if ($LASTEXITCODE -ne 0) { Fail "staged pair --self-test exited $LASTEXITCODE ($msg)" }
+          $sums = @(Get-ChildItem -LiteralPath $dist -File | Sort-Object Name | ForEach-Object {
+              "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)"
+            })
+          [IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS'), (($sums -join "`n") + "`n"))
+          $pair = (Get-FileHash -LiteralPath (Join-Path $dist 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path $dist 'PAIR.sha256'), "$pair  SHA256SUMS`n")
+          $lines = @('### Agent artifact (exe + FIPS DLL, hashed as a pair)', '```text')
+          $lines += "artifact: $name"
+          $lines += $sums
+          $lines += "pair (sha256 of SHA256SUMS): $pair"
+          $lines += "exe imports: $($ei -join ' ')"
+          $lines += "self-test from the staged pair: $msg"
+          $lines += 'placement: both files in one directory that only the operator can write (impl-notes-wu15, WU-16)'
+          $lines += '```'
+          $lines | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$dist" -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$name" -Encoding utf8
+      - name: Upload the agent pair (CI artifact, not a release)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.agent-artifact.outputs.name }}
+          path: ${{ steps.agent-artifact.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 30
 
   testing-workspaces:
     # Test-only workspaces (plan WU-9, WU-10): excluded from the product
@@ -569,7 +842,11 @@ jobs:
       - name: Audit the fuzz workspace lockfile (REL-008)
         # bans and licenses are skipped by design: the fuzz workspace uses
         # libfuzzer-sys (decision 0002), which the main policy bans, and it
-        # is never shipped.
+        # is never shipped. CR-SR7-006: from the root, fuzz/.cargo/config.toml
+        # is not read, so the fuzz build directory is named here; nothing
+        # may create fuzz/target/ (decision 0005).
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/fuzz
         run: |
           cargo audit --file fuzz/Cargo.lock
           cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories sources
@@ -986,6 +1263,10 @@ jobs:
           targets="$targets gpt_readback efi_load_option wim_metadata wim_apply_plan tftp_window"
           targets="$targets tftp_name device_session_msgs job_plan boot_manifest pe_coff"
           targets="$targets agent_config relay_boot_policy relay_feed_url"
+          # M3 fix round 1 (NIST-011).
+          targets="$targets agent_http_head"
+          # M3 fix round 1 (SEC-004).
+          targets="$targets winapi_sd winapi_reparse"
           for f in fuzz_targets/*.rs; do
             t="$(basename "$f" .rs)"
             case " $targets " in
@@ -1001,8 +1282,11 @@ jobs:
     # Each target runs for its plan length with no crash, OOM or timeout:
     # M1 exit criterion 3 (dhcp_packet, tftp_packet, 600 s) and M2 plan
     # section 10 (wim_header, wim_xml, xpress_chunk 600 s; wim_lookup,
-    # wim_check, api_json 60 s smoke) and the M3 WU-14 targets (60 s
-    # smoke), all with -rss_limit_mb=2048 -timeout=10 (impl-notes-wu9).
+    # wim_check, api_json 60 s smoke) and the M3 WU-14 targets: 600 s for
+    # the six that parse network or file input (plan M3 section 10.1:
+    # wim_metadata, wim_apply_plan, gpt_readback, device_session_msgs,
+    # job_plan, tftp_window), 60 s smoke for the rest; all with
+    # -rss_limit_mb=2048 -timeout=10 (impl-notes-wu9).
     # Scheduled and manual only; fuzz-build replays the seeds on every
     # change. Each matrix job builds the FIPS module too, hence the
     # toolchain step and the longer timeout.
@@ -1040,31 +1324,33 @@ jobs:
           - target: api_json
             max_len: 70000
             secs: 60
-          # M3 plan WU-14 targets: 60 s smoke each (impl-notes-wu14).
+          # M3 plan WU-14 targets (impl-notes-wu14); 600 s for the six
+          # network and file parsers (plan section 10.1, WU-15), 60 s smoke
+          # for the others.
           - target: gpt_readback
             max_len: 65536
-            secs: 60
+            secs: 600
           - target: efi_load_option
             max_len: 8192
             secs: 60
           - target: wim_metadata
             max_len: 65536
-            secs: 60
+            secs: 600
           - target: wim_apply_plan
             max_len: 65536
-            secs: 60
+            secs: 600
           - target: tftp_window
             max_len: 1024
-            secs: 60
+            secs: 600
           - target: tftp_name
             max_len: 512
             secs: 60
           - target: device_session_msgs
             max_len: 16384
-            secs: 60
+            secs: 600
           - target: job_plan
             max_len: 16384
-            secs: 60
+            secs: 600
           - target: boot_manifest
             max_len: 16384
             secs: 60
@@ -1079,6 +1365,19 @@ jobs:
             secs: 60
           - target: relay_feed_url
             max_len: 1024
+            secs: 60
+          # NIST-011: the agent's response head (16 KiB head limit plus
+          # room for the selector and a partial body).
+          - target: agent_http_head
+            max_len: 16448
+            secs: 60
+          # SEC-004: descriptors (the 64 KiB parser limit) and reparse
+          # buffers (header plus a few names).
+          - target: winapi_sd
+            max_len: 65536
+            secs: 60
+          - target: winapi_reparse
+            max_len: 4096
             secs: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1138,10 +1437,13 @@ jobs:
   boot-smoke:
     # M1 exits 1, 2 (in QEMU), 4 (binding) and 5 (plan section 10.5; owner
     # approval Q-5). Linux with root: network namespaces, bridges and taps.
+    # M3 (plan section 10.3, QA-002): S9, the BOOT-5 stop through the real
+    # server on PostgreSQL, the relay's signed feed and the simulated agent;
+    # S10, OVMF boots GPTs written by usgp-disk (GPT-OBS-002, OPEN-GPT-1).
     # Exit 0 is PASS; 1 is FAIL; 77 is NOT RUN and fails this job (see the
     # result rule at the top of this file).
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1150,7 +1452,9 @@ jobs:
         run: scripts/ci-free-disk.sh
       - uses: ./.github/actions/fips-toolchain
         with:
-          extra-packages: qemu-system-x86 ovmf iproute2
+          # dosfstools, mtools: FAT on the S9 and S10 disks; gdisk: sgdisk -v,
+          # an independent check of our GPT (S9, S10).
+          extra-packages: qemu-system-x86 ovmf iproute2 dosfstools mtools gdisk
       - name: Install Rust (product and testing toolchain files)
         run: |
           set -euo pipefail
@@ -1188,7 +1492,7 @@ jobs:
           {
             echo '### Boot smoke environment'
             echo '```text'
-            dpkg-query -W qemu-system-x86 ovmf iproute2
+            dpkg-query -W qemu-system-x86 ovmf iproute2 dosfstools mtools gdisk
             qemu-system-x86_64 --version | head -n 1
             for f in $fw; do
               if [ -f "$f" ]; then sha256sum "$f"; else echo "MISSING $f"; fi
@@ -1198,10 +1502,23 @@ jobs:
           for f in $fw; do
             [ -f "$f" ] || { echo "::error::firmware file $f not installed by the ovmf package"; exit 1; }
           done
-      - name: Build relay, cli, netlab and payloads (as the runner user)
+      - name: Build relay, cli, server, agent, netlab and payloads (as the runner user)
         run: scripts/boot-smoke.sh build
+      - name: Start PostgreSQL 16 for S9 (TLS, certificate-only login, checked)
+        # The same digest-pinned container and throwaway PKI as
+        # pg-integration (decisions 0008, 0012, 0016), started as the runner
+        # user before the harness; sudo -E passes USGP_TEST_PG_* to it.
+        id: pg
+        run: |
+          set -euo pipefail
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "::error::boot-smoke runs as root; usgp-server's admin-key rule needs a normal user"
+            exit 1
+          fi
+          scripts/pg-test-setup.sh up 2>&1 | tee "$RUNNER_TEMP/pg-setup.log"
+          cat "$RUNNER_TEMP/usgp-pg-test/pg-test.env" >> "$GITHUB_ENV"
       - name: Boot smoke (root; exit 77 is NOT RUN, never PASS)
-        timeout-minutes: 90
+        timeout-minutes: 120
         env:
           USGP_BOOT_SMOKE_OUT: ${{ github.workspace }}/target/boot-smoke/ci-run
         run: |
@@ -1214,6 +1531,10 @@ jobs:
             echo '```text'
             sed -n '/boot-smoke summary/,$p' target/boot-smoke/console.log
             echo "exit $status"
+            echo '```'
+            echo '### GPT-OBS-002 (S10: OVMF and GPTs written by usgp-disk)'
+            echo '```text'
+            cat "$USGP_BOOT_SMOKE_OUT/s10/gpt-obs-002.txt" 2> /dev/null || echo "S10 wrote no record (see the summary above)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           case "$status" in
@@ -1231,6 +1552,17 @@ jobs:
               exit 1
               ;;
           esac
+      - name: Re-check the database configuration and remove it (decision 0012)
+        if: ${{ always() && steps.pg.outcome != 'skipped' }}
+        env:
+          PG_OUTCOME: ${{ steps.pg.outcome }}
+        run: |
+          status=0
+          if [ "$PG_OUTCOME" = success ]; then
+            scripts/pg-test-setup.sh check || status=$?
+          fi
+          scripts/pg-test-setup.sh down || true
+          exit "$status"
       - name: Name scan of the release binaries, payloads and evidence (CR-303)
         # Runs even when the boot smoke failed, so the evidence can still be
         # uploaded. No exclusions; exit 1 on a hit, exit 2 if an artifact is

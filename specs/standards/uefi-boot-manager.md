@@ -202,6 +202,36 @@ applied Windows image bootable.
 - Firmware may itself reorder or add options (§2), so a lasting order is
   not guaranteed on every platform.
 
+### 9.4 Invocation forms (SR-7; AUDITED 2026-10-29)
+
+Sources: "BCDBoot Command-Line Options" (updated 2026-03-23) and the
+UEFI sample in "Deployment lab sample scripts" (facts only).
+
+- **Form:** `bcdboot <source> [/l <locale>] [/s <volume letter> [/f
+  <firmware type>]] …` plus the other options in §9.1 and §9.2.
+- **`<source>`** (required, first): the Windows directory to copy the
+  boot files from, given as a path such as `<drive>:\Windows` (for an
+  applied image, the `\Windows` folder on the Windows partition).
+- **`/s <volume letter>`**: the volume letter of the system partition,
+  written with a colon (for example `S:`). Microsoft says it should not
+  be used in typical deployments and is meant for a disk that will boot
+  on another computer. On UEFI, BCDBoot copies the boot files and
+  creates the BCD store on that partition, and **does not create the
+  firmware (NVRAM) entry**; the device then relies on the firmware
+  default path (§9.2, OPEN-UBM-1). Microsoft's own UEFI deployment
+  sample nevertheless passes `/s` with the system partition's letter.
+- **`/f <UEFI|BIOS|ALL>`**: allowed only together with `/s`. When
+  omitted the default is `UEFI` on UEFI/GPT systems (boot files go to
+  `\Efi\Microsoft\Boot`) and `BIOS` on BIOS/MBR systems (`\Boot`).
+  **[reading]** "UEFI/GPT system" means the system BCDBoot runs on, so
+  in WinPE booted in UEFI mode (`winpe.md` §5.3) the default is UEFI.
+- **`/l`**: locale; default `en-us`.
+- **Which bcdboot.exe:** the tool is in `%WINDIR%\System32` of Windows
+  and of WinPE, and in the ADK. Microsoft's apply flow (§9.1) and its
+  UEFI sample run the copy **from the applied image**, that is
+  `\Windows\System32\bcdboot.exe` on the Windows partition, with that
+  partition's `\Windows` as `<source>`.
+
 ### Open point
 
 - **OPEN-UBM-1**: on a device prepared from WinPE with the system

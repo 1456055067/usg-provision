@@ -16,13 +16,13 @@ use usgp_common::Sha256Digest;
 use usgp_proto::limits::MAX_BOOT_SERVICE_PACKAGES;
 use usgp_proto::ops::{BootServiceStatus, IpCidr, SubnetList};
 use usgp_proto::{
-    BootServiceId, BootStopId, DisplayName, JobId, OperatorId, PackageId, UnixMicros,
+    BootServiceId, BootStopId, DisplayName, JobId, MacList, OperatorId, PackageId, UnixMicros,
 };
 
 use super::content::cas_miss;
 use super::conv::{
     check_text, col, col_digest, col_enum, col_id, col_mac, col_micros, col_opt_id, col_opt_micros,
-    col_text, col_u64, to_uuid,
+    col_text, col_u64, mac_params, to_i64, to_uuid,
 };
 use crate::error::DbError;
 use crate::model::{BootService, BootServicePackage, BootStop, NewBootStop};
@@ -281,6 +281,20 @@ pub(crate) async fn stops(
     rows.iter().map(stop_from_row).collect()
 }
 
+pub(crate) async fn active_stops_for_macs(
+    tx: &mut PgTx,
+    macs: &MacList,
+) -> Result<Vec<BootStop>, DbError> {
+    let sql = format!(
+        "SELECT {STOP_COLUMNS} FROM boot_stop \
+         WHERE cleared_at_us IS NULL AND mac = ANY($1::bytea[]) ORDER BY created_at_us, id"
+    );
+    let rows = tx
+        .query("list boot_stop by mac", &sql, &[&mac_params(macs)])
+        .await?;
+    rows.iter().map(stop_from_row).collect()
+}
+
 pub(crate) async fn add_stop(tx: &mut PgTx, s: &NewBootStop) -> Result<bool, DbError> {
     let n = tx
         .execute(
@@ -347,4 +361,35 @@ pub(crate) async fn bump_generation(tx: &mut PgTx, id: BootServiceId) -> Result<
         Some(r) => col_u64(r, "generation"),
         None => Err(DbError::Corrupt { what: "generation" }),
     }
+}
+
+pub(crate) async fn raise_generation(
+    tx: &mut PgTx,
+    id: BootServiceId,
+    to: u64,
+) -> Result<(), DbError> {
+    if to == 0 {
+        return Err(DbError::InvalidArgument {
+            what: "generation 0",
+        });
+    }
+    let to = to_i64(to, "generation")?;
+    // Raises only: an equal or lower target changes nothing (and the
+    // 0004 guard would refuse it anyway).
+    let rows = tx
+        .query_write(
+            "raise boot_policy_generation",
+            "INSERT INTO boot_policy_generation (boot_service_id, generation) VALUES ($1, $2) \
+             ON CONFLICT (boot_service_id) DO UPDATE SET generation = $2 \
+             WHERE boot_policy_generation.generation < $2 \
+             RETURNING generation",
+            &[&to_uuid(id.as_bytes()), &to],
+        )
+        .await?;
+    if rows.is_empty() {
+        return Err(DbError::Conflict {
+            what: "boot_policy_generation",
+        });
+    }
+    Ok(())
 }

@@ -21,5 +21,19 @@ fn facts_and_disks_are_read_without_writing() {
     assert!(disks.iter().any(|d| d.facts.hosts_boot_environment));
     for d in &disks {
         assert_eq!(d.kinds.len(), d.facts.partitions.len());
+        // BOOT-002: every listed disk carries its interface path, which
+        // the write handle is opened by.
+        assert!(d.discriminator.interface_path.is_some());
+    }
+    // NIST-001: start-up and the reads above leave no privilege in use.
+    use usgp_winapi::privilege::{self, Privilege};
+    for p in [
+        Privilege::SystemEnvironment,
+        Privilege::Restore,
+        Privilege::Backup,
+        Privilege::Security,
+        Privilege::CreateSymbolicLink,
+    ] {
+        assert_eq!(privilege::users(p), 0, "{}", p.name());
     }
 }

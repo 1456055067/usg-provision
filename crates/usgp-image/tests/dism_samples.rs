@@ -1633,7 +1633,7 @@ mod dism {
 
     /// The testkit encoder (`TreeSpec`) writes only entry forms DISM wrote
     /// in S13 (and S01 for the non-BMP name), so synthetic apply tests
-    /// exercise observed layouts only (decision 0006 item 4).
+    /// exercise observed layouts only (decision 0006 items 1-3).
     #[test]
     fn builder_metadata_matches_dism() {
         let dir = samples_dir();

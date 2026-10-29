@@ -10,6 +10,14 @@
 // - NIST 800-53: SC-13 (Cryptographic Protection), SI-6 (Security and
 //   Privacy Function Verification) - module status and known answer.
 // - DECISION: docs/decisions/0001, 0018 item 6
+//
+// POAM: SC-13 (FIPS in WinPE) - the FIPS module's self-test and mode are
+// checked here and at every start-up, but whether the validated module's
+// operational environment covers Windows PE is not established: this
+// test has run only on the Windows CI runner (Windows Server), not in
+// WinPE. Lab MT-2 records `--self-test` output in the operator's WinPE;
+// until it does and the module's security policy is checked for WinPE,
+// SC-13 for the agent is partial (NIST-015).
 
 use std::fmt::Write as _;
 

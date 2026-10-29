@@ -32,7 +32,9 @@
 //! - [`fs`]: the tree writer behind `winsink::WinSink` (feature `sink`,
 //!   which brings `usgp-image`'s `ApplySink`).
 //!
-//! On targets other than Windows the crate is empty.
+//! On targets other than Windows the crate holds only its pure, OS-neutral
+//! parts: [`parse`] (built for every target so its checks can be fuzzed,
+//! SEC-004) and, in tests, the other pure helpers.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SA-15 (Development Process, Standards, and Tools),
@@ -47,6 +49,12 @@
 mod ffi;
 #[cfg(windows)]
 mod layout;
+#[cfg(any(windows, test))]
+mod privscope;
+
+// Every target: the bounds checks that guard the FFI (descriptor and
+// reparse-buffer checks) are fuzzed off Windows too (SEC-004).
+pub mod parse;
 
 #[cfg(any(windows, test))]
 pub mod fsvalues;
@@ -54,8 +62,6 @@ pub mod fsvalues;
 pub mod manifest_text;
 #[cfg(any(windows, test))]
 pub mod netaddr;
-#[cfg(any(windows, test))]
-pub mod parse;
 #[cfg(any(windows, test))]
 pub mod paths;
 #[cfg(any(windows, test))]

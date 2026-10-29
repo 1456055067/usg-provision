@@ -11,9 +11,11 @@
 // - NIST 800-53: AC-7 (Unsuccessful Logon Attempts) - code attempts capped
 //   per session and per source address.
 // - NIST 800-53: SC-5 (Denial-of-Service Protection) - session opens per
-//   source per minute, pending sessions per source and in total,
-//   connection caps, body and header limits.
-// - NIST 800-53: AC-12 (Session Termination) - pending sessions expire.
+//   source per minute and in total, pending sessions per source network,
+//   per boot service and in total, connection caps, body and header
+//   limits (finding SEC-001).
+// - NIST 800-53: AC-12 (Session Termination) - pending sessions expire;
+//   unauthorised sessions expire sooner when idle.
 // - SPEC: specs/targeting.md#REQ-TGT-013 (code attempts limited),
 //   #REQ-TGT-014 (pending sessions expire; OPEN-TGT-1 fail-closed default)
 // - SPEC: specs/progress.md#REQ-JOB-007 (retry), #REQ-JOB-011 (timeouts)
@@ -107,10 +109,20 @@ pub struct DeviceConfig {
     pub pending_session_ttl: Duration,
     /// Pending sessions in total (64).
     pub max_pending_sessions: u64,
-    /// Pending sessions per source address (4).
+    /// Pending sessions per source (an IPv4 address or an IPv6 /64) (4).
     pub max_pending_sessions_per_ip: u64,
+    /// Pending sessions per boot service (32; finding SEC-001, our
+    /// choice: one subnet cannot hold every slot of the server).
+    pub max_pending_sessions_per_boot_service: u64,
+    /// A session never authorised and not heard from for this long
+    /// expires before its TTL (120 s; finding SEC-001; the agent polls
+    /// every `poll_ms`).
+    pub unauthorised_idle_timeout: Duration,
     /// Session opens per source per minute (10).
     pub session_opens_per_ip_per_min: u32,
+    /// Session opens per minute from all sources together (120; finding
+    /// SEC-001).
+    pub session_opens_per_min: u32,
     /// Failed code attempts before the session is refused (5).
     pub code_attempts_per_session: u32,
     /// Code attempts per source per minute (10).
@@ -147,7 +159,10 @@ impl Default for DeviceConfig {
             pending_session_ttl: Duration::from_secs(3600),
             max_pending_sessions: 64,
             max_pending_sessions_per_ip: 4,
+            max_pending_sessions_per_boot_service: 32,
+            unauthorised_idle_timeout: Duration::from_secs(120),
             session_opens_per_ip_per_min: 10,
+            session_opens_per_min: 120,
             code_attempts_per_session: 5,
             code_attempts_per_ip_per_min: 10,
             poll_ms: 2000,
@@ -170,7 +185,7 @@ impl DeviceConfig {
         let secs = |d: Duration, lo: u64, hi: u64| (lo..=hi).contains(&d.as_secs());
         let step = |s: u32| (1..=MAX_STEP_TIMEOUT_S).contains(&s);
         let j = &self.jobs;
-        let checks: [(bool, &'static str, &'static str); 22] = [
+        let checks: [(bool, &'static str, &'static str); 25] = [
             (
                 (1..=4096).contains(&self.max_connections),
                 "device_api.max_connections",
@@ -224,9 +239,30 @@ impl DeviceConfig {
                 "1 to 100000, and per source 1 to the total",
             ),
             (
+                (1..=self.max_pending_sessions)
+                    .contains(&self.max_pending_sessions_per_boot_service),
+                "device_api.max_pending_sessions_per_boot_service",
+                "1 to device_api.max_pending_sessions",
+            ),
+            (
+                secs(
+                    self.unauthorised_idle_timeout,
+                    30,
+                    self.pending_session_ttl.as_secs(),
+                ) && self.unauthorised_idle_timeout.as_millis()
+                    >= u128::from(self.poll_ms).saturating_mul(5),
+                "device_api.unauthorised_idle_timeout_s",
+                "30 to device_api.pending_session_ttl_s, and at least 5 poll intervals",
+            ),
+            (
                 (1..=1000).contains(&self.session_opens_per_ip_per_min),
                 "device_api.session_opens_per_ip_per_min",
                 "1 to 1000",
+            ),
+            (
+                (1..=100_000).contains(&self.session_opens_per_min),
+                "device_api.session_opens_per_min",
+                "1 to 100000",
             ),
             (
                 (1..=20).contains(&self.code_attempts_per_session),
@@ -314,6 +350,46 @@ struct Window {
 struct RateState {
     sources: HashMap<IpAddr, Window>,
     overflow: Option<Window>,
+}
+
+/// Events per minute from every source together (finding SEC-001: a
+/// ceiling on session opens however many sources send them).
+#[derive(Debug)]
+pub struct GlobalRate {
+    per_min: u32,
+    window: Mutex<Option<Window>>,
+}
+
+impl GlobalRate {
+    /// A limiter allowing `per_min` events per minute in total.
+    #[must_use]
+    pub fn new(per_min: u32) -> Self {
+        Self {
+            per_min,
+            window: Mutex::new(None),
+        }
+    }
+
+    /// True (and counted) if one more event fits now.
+    pub fn admit(&self, now: Instant) -> bool {
+        let mut g = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        let w = g.get_or_insert(Window {
+            start: now,
+            count: 0,
+        });
+        if now.saturating_duration_since(w.start) >= WINDOW {
+            *w = Window {
+                start: now,
+                count: 0,
+            };
+        }
+        if w.count < self.per_min {
+            w.count = w.count.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Events per source (IPv4 address or IPv6 /64) per minute. Memory is
@@ -405,6 +481,57 @@ mod tests {
             ..base
         };
         assert!(c.validate().is_err());
+    }
+
+    /// Finding SEC-001: the new caps are range-checked.
+    #[test]
+    fn sec001_settings_checked() {
+        let base = DeviceConfig::default();
+        assert_eq!(base.max_pending_sessions_per_boot_service, 32);
+        assert_eq!(base.unauthorised_idle_timeout, Duration::from_secs(120));
+        assert_eq!(base.session_opens_per_min, 120);
+        for (c, setting) in [
+            (
+                DeviceConfig {
+                    max_pending_sessions_per_boot_service: 65,
+                    ..base.clone()
+                },
+                "device_api.max_pending_sessions_per_boot_service",
+            ),
+            (
+                DeviceConfig {
+                    unauthorised_idle_timeout: Duration::from_secs(5),
+                    ..base.clone()
+                },
+                "device_api.unauthorised_idle_timeout_s",
+            ),
+            (
+                DeviceConfig {
+                    unauthorised_idle_timeout: Duration::from_secs(30),
+                    poll_ms: 10_000,
+                    ..base.clone()
+                },
+                "device_api.unauthorised_idle_timeout_s",
+            ),
+            (
+                DeviceConfig {
+                    session_opens_per_min: 0,
+                    ..base.clone()
+                },
+                "device_api.session_opens_per_min",
+            ),
+        ] {
+            assert_eq!(c.validate().unwrap_err().setting, setting);
+        }
+    }
+
+    #[test]
+    fn global_rate() {
+        let r = GlobalRate::new(2);
+        let t = Instant::now();
+        assert!(r.admit(t) && r.admit(t));
+        assert!(!r.admit(t));
+        assert!(r.admit(t + WINDOW));
     }
 
     #[test]

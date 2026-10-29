@@ -285,10 +285,19 @@ pub struct DeviceApiDocument {
     pub pending_session_ttl_s: Option<i64>,
     /// Pending sessions in total (default 64).
     pub max_pending_sessions: Option<i64>,
-    /// Pending sessions per source address (default 4).
+    /// Pending sessions per source (an IPv4 address or an IPv6 /64)
+    /// (default 4).
     pub max_pending_sessions_per_ip: Option<i64>,
+    /// Pending sessions per boot service (default 32; finding SEC-001).
+    pub max_pending_sessions_per_boot_service: Option<i64>,
+    /// A never-authorised session idle this long expires, s (default 120;
+    /// finding SEC-001).
+    pub unauthorised_idle_timeout_s: Option<i64>,
     /// Session opens per source per minute (default 10).
     pub session_opens_per_ip_per_min: Option<i64>,
+    /// Session opens per minute from all sources (default 120; finding
+    /// SEC-001).
+    pub session_opens_per_min: Option<i64>,
     /// Failed code attempts before the session is refused (default 5).
     pub code_attempts_per_session: Option<i64>,
     /// Code attempts per source per minute (default 10).
@@ -1234,10 +1243,25 @@ fn device_section(
         d.max_pending_sessions_per_ip,
         c.max_pending_sessions_per_ip,
     )?;
+    c.max_pending_sessions_per_boot_service = wide(
+        "device_api.max_pending_sessions_per_boot_service",
+        d.max_pending_sessions_per_boot_service,
+        c.max_pending_sessions_per_boot_service,
+    )?;
+    c.unauthorised_idle_timeout = secs(
+        "device_api.unauthorised_idle_timeout_s",
+        d.unauthorised_idle_timeout_s,
+        c.unauthorised_idle_timeout,
+    )?;
     c.session_opens_per_ip_per_min = num(
         "device_api.session_opens_per_ip_per_min",
         d.session_opens_per_ip_per_min,
         c.session_opens_per_ip_per_min,
+    )?;
+    c.session_opens_per_min = num(
+        "device_api.session_opens_per_min",
+        d.session_opens_per_min,
+        c.session_opens_per_min,
     )?;
     c.code_attempts_per_session = num(
         "device_api.code_attempts_per_session",

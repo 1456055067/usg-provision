@@ -53,5 +53,8 @@ pub use error::{DiskError, GptCopy, GptError, LayoutError, UefiError};
 pub use executor::{WipeAuthorisation, WipeEvidence, wipe_and_write};
 pub use gpt::{GptLimits, GptPlan, GptView, PartitionEntry, parse_gpt};
 pub use guid::Guid;
-pub use layout::{Part, PartRole, WindowsUefiLayout, minimum_disk_bytes};
+pub use layout::{
+    Part, PartRole, WindowsUefiLayout, fs_overhead_bytes, image_budget_bytes, minimum_disk_bytes,
+    windows_bytes_needed,
+};
 pub use wipe::{ByteRange, WipePlan};

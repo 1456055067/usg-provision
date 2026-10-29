@@ -331,7 +331,8 @@ decide.
    Microsoft's BCDBoot and its boot-order effect; OPEN-UBM-1; AUDITED
    2026-10-28. M3 build added §10: `EFI_LOAD_OPTION`, the global
    variable GUID and attributes, and the device path header, End,
-   Hard Drive and File Path nodes; OPEN-UBM-2; AUDITED 2026-10-28).
+   Hard Drive and File Path nodes; OPEN-UBM-2; AUDITED 2026-10-28.
+   SR-7 added §9.4, BCDBoot invocation forms; AUDITED 2026-10-29).
 6. *(conditional)* UEFI Secure Boot and the signed boot chain (UEFI
    specification, Secure Boot chapter; Microsoft public guidance on signing
    requirements). Relates to Secure Boot (Unconfirmed). **Summarised as
@@ -406,7 +407,9 @@ decide.
     information and §9 RAM disk, AUDITED 2026-10-28, with OPEN-WINPE-1; network boot
     of WinPE is topic 22. M3 build added §10, the PE/COFF `Machine`
     field and the x64 value, from Microsoft's PE format page and UEFI
-    §2.1.1; AUDITED 2026-10-28).
+    §2.1.1; AUDITED 2026-10-28. SR-7 added `wpeutil` Reboot and
+    Shutdown to §5.2, and §11 (DiskPart scripted commands), with
+    OPEN-WINPE-2 to 4, which stay open; AUDITED 2026-10-29).
 12. Offline driver injection (DISM driver servicing; INF/CAB packaging).
     For DRV-1, DRV-2.
 13. Offline domain join provisioning (Microsoft Learn `djoin` documentation).
@@ -482,7 +485,12 @@ decide.
     short names, basic file information and attributes, backup and
     restore privileges, setting reparse points, `GetDriveType` with
     volume GUID paths) and OPEN-WAPI-7 to 12, AUDITED 2026-10-28 after
-    its fix round; the OPEN items stay open).
+    its fix round; the OPEN items stay open. SR-7 added §26, reading
+    reparse points, the process token and two open-flag values, and
+    §27, file and stream naming rules, with OPEN-WAPI-13 and 14;
+    AUDITED 2026-10-29, the OPEN items stay open. REL-M3-WU15-003
+    added §28, DLL search order and how to limit it, with
+    OPEN-WAPI-15, which stays open; AUDITED 2026-10-29).
 24. Reparse data and security descriptors ([MS-FSCC] reparse tags and
     the generic, mount-point and symbolic-link reparse buffers;
     [MS-DTYP] SID, ACL, ACE header and the self-relative security

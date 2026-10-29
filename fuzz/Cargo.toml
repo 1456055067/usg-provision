@@ -33,6 +33,13 @@ usgp-tftp = { path = "../crates/usgp-tftp" }
 # M3 (plan WU-14): the relay's boot-policy feed and feed URL parser, used
 # through its library target only (no sockets are opened).
 usgp-relay = { path = "../services/usgp-relay" }
+# M3 fix round 1 (NIST-011): the agent's HTTP response-head parser, through
+# its library target only (no sockets are opened; off Windows the library
+# carries the simulated platform, which the fuzz workspace never runs).
+usgp-preboot-agent = { path = "../services/usgp-preboot-agent" }
+# SEC-004: usgp-winapi's OS-neutral `parse` checks with the synthetic
+# layouts of `parse-testkit` (test and fuzz only; never in a release build).
+usgp-winapi = { path = "../crates/usgp-winapi", features = ["parse-testkit"] }
 
 [[bin]]
 name = "dhcp_packet"
@@ -171,6 +178,27 @@ bench = false
 [[bin]]
 name = "relay_boot_policy"
 path = "fuzz_targets/relay_boot_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_http_head"
+path = "fuzz_targets/agent_http_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "winapi_sd"
+path = "fuzz_targets/winapi_sd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "winapi_reparse"
+path = "fuzz_targets/winapi_reparse.rs"
 test = false
 doc = false
 bench = false

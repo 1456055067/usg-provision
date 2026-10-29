@@ -24,10 +24,15 @@
 // COMPLIANCE MAPPING:
 // - NIST 800-53: AC-3 (Access Enforcement) - nothing is listed or written
 //   before the session is authorised and the wipe confirmed.
-// - NIST 800-53: IA-3 (Device Identification and Authentication),
-//   SC-8 (Transmission Confidentiality and Integrity), SC-23 (Session
-//   Authenticity) - server-authenticated TLS with pinned anchors; bearer
-//   session token only inside TLS.
+// - NIST 800-53: SC-8 (Transmission Confidentiality and Integrity),
+//   IA-5(2) (Public Key-Based Authentication) - the agent authenticates
+//   the server by TLS with pinned anchors and the configured name before
+//   it sends anything (NIST-002).
+// - NIST 800-53: SC-23 (Session Authenticity), AC-12 (Session
+//   Termination) - the bearer session token travels only inside that TLS
+//   and is held only in memory. The device itself is not authenticated
+//   to the server by a device credential: IA-3 is partial (POAM: IA-3
+//   (TB-2), registered server-side in usgp-api `device/auth.rs`).
 // - NIST 800-53: SC-13 (Cryptographic Protection) - FIPS self-test first.
 // - NIST 800-53: SI-7 (Software, Firmware, and Information Integrity) -
 //   the signed plan and every chunk verified by the engine before use.

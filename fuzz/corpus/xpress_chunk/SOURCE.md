@@ -5,7 +5,7 @@ test encoder (`usgp_image::testkit::xpress_enc`, feature `testkit`),
 written from `specs/standards/wim-compression.md` only. None comes from a
 third-party XPRESS or WIM implementation, test vector set or corpus, from
 Windows media, or from any deployment of another product (fuzz/README.md,
-seed origin rule; decision 0006 item 4).
+seed origin rule; decision 0006 items 1-3).
 
 Framing (defined in `fuzz_targets/xpress_chunk.rs`): octet 0 even = decode
 mode, octets 1-2 = expected output length - 1 (little-endian), then the

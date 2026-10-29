@@ -14,6 +14,9 @@
 // - NIST 800-53: SI-10 (Information Input Validation); SA-11 (Developer
 //   Testing and Evaluation) - apply-fidelity oracle input
 // - SPEC: specs/preinstall-env.md REQ-PE-017 (through the tree manifest)
+// - SPEC: specs/standards/windows-storage-firmware-api.md §26 (reparse
+//   read, open flags; OPEN-WAPI-13);
+//   specs/standards/reparse-and-security-descriptors.md §2
 // - DECISION: docs/decisions/0019-windows-api-binding.md
 
 use std::fs::OpenOptions;
@@ -145,11 +148,24 @@ pub fn attributes_and_tag(path: &Path) -> Result<(u32, u32)> {
 
 /// The complete reparse buffer of the reparse point at `path` (header and
 /// data), read with `FSCTL_GET_REPARSE_POINT` on a handle that does not
-/// follow it. Used to compare an applied link with the buffer that was set
-/// (the check `fsutil reparsepoint query` makes).
+/// follow it.
 ///
-/// SR request: `FSCTL_GET_REPARSE_POINT` is not summarised in topic 23 or
-/// 24; this relies only on success and the returned bytes.
+/// **Test only.** Its one caller is `tests/winsink.rs`, which compares an
+/// applied link with the buffer that was set. Nothing in the agent's apply
+/// or boot path calls it.
+///
+/// - SPEC: topic 23 §26 (SR-7): the control code is sent with no input
+///   and returns the reparse data in the topic 24 §2 buffer format;
+///   `FILE_FLAG_OPEN_REPARSE_POINT` opens the reparse point itself rather
+///   than its target, and `FILE_FLAG_BACKUP_SEMANTICS` is needed for a
+///   directory handle (flag values from windows-sys).
+/// - **OPEN-WAPI-13:** the page does not state the handle access needed,
+///   the largest buffer, or the errors for "not a reparse point" and
+///   "buffer too small". So: the access is `FILE_READ_ATTRIBUTES` (if that
+///   is not enough the call fails and the test fails, never passes); the
+///   buffer is the topic 24 §2 maximum (8-byte header plus a 16-bit
+///   `ReparseDataLength`); any error is an error. Only success and the
+///   returned bytes are relied on.
 pub fn reparse_buffer(path: &Path) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)

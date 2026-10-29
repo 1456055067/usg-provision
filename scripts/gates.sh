@@ -13,7 +13,8 @@
 #
 # Optional environment:
 #   GATES_FUZZ_SECONDS  run each fuzz target for this many seconds (CI
-#                       fuzz-smoke uses 600, or 60 for the M2 smoke targets).
+#                       fuzz-smoke uses 600, or 60 for the M2 smoke and M3
+#                       WU-14 targets).
 #                       Unset: seeds are replayed only.
 #   USGP_TEST_PG_*      PostgreSQL for the pg-integration tests, from
 #                       `scripts/pg-test-setup.sh up` (docs/BUILDING.md
@@ -305,10 +306,15 @@ run cargo audit --file fuzz/Cargo.lock
 run cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories sources
 run_in fuzz cargo fmt --all --check
 run_in fuzz cargo clippy --locked --all-targets -- -D warnings
-# <target>:<max_len>, as the CI fuzz-smoke matrix (impl-notes-wu8, -wu9).
-# Build output is target/fuzz (fuzz/.cargo/config.toml, decision 0005).
+# <target>:<max_len>, as the CI fuzz-smoke matrix (impl-notes-wu8, -wu9;
+# M3 WU-14 from gpt_readback on). Build output is target/fuzz
+# (fuzz/.cargo/config.toml, decision 0005).
 fuzz_targets="dhcp_packet:1600 tftp_packet:4096 wim_header:1024 wim_xml:16384
-  xpress_chunk:70000 wim_lookup:4096 wim_check:262144 api_json:70000"
+  xpress_chunk:70000 wim_lookup:4096 wim_check:262144 api_json:70000
+  gpt_readback:65536 efi_load_option:8192 wim_metadata:65536
+  wim_apply_plan:65536 tftp_window:1024 tftp_name:512
+  device_session_msgs:16384 job_plan:16384 boot_manifest:16384
+  pe_coff:4096 agent_config:4096 relay_boot_policy:256 relay_feed_url:1024"
 # QA-003: libFuzzer counts time the host spends asleep against the unit
 # being run, so a macOS sleep during a timed run reads as a timeout. On
 # Darwin every fuzz run is wrapped in `caffeinate -i` (no idle sleep while

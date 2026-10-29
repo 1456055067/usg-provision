@@ -670,3 +670,79 @@ async fn confirm_once() {
     assert_eq!(tx.list_jobs(&[]).await.unwrap().len(), 1);
     tx.rollback().await;
 }
+
+/// QA-004: a BIOS (or non-x64) device is refused the list for its own
+/// firmware, and the boot service, which has a usable package, is not
+/// reported as having none.
+#[tokio::test]
+async fn device_mismatch_is_not_a_boot_service_fault() {
+    let h = Harness::m3().await;
+    let rd = h.ready_device("bios", &["02:00:00:00:00:20"]).await;
+    for (firmware, arch) in [("bios", "x64"), ("uefi", "arm64")] {
+        let mut hi = hello(&["02:00:00:00:00:21"]);
+        hi["firmware"] = firmware.into();
+        hi["arch"] = arch.into();
+        let r = h.dev("POST", "/v1/device/sessions", None, Some(hi)).await;
+        assert_eq!(r.status, 201);
+        let token = r.json()["token"].as_str().unwrap().to_owned();
+        let (_, code) = h.issue_code().await;
+        assert_eq!(h.submit_code(&token, &code).await.status, 200);
+        let r = h
+            .dev("GET", "/v1/device/session/packages", Some(&token), None)
+            .await;
+        assert_eq!(r.status, 200);
+        assert_eq!(r.json()["packages"], serde_json::json!([]));
+        let rec = h.events("device.session.packages.read").pop().unwrap();
+        assert_eq!(rec.outcome, "refused");
+        assert_eq!(rec.reason.as_deref(), Some("firmware_unsupported"));
+        assert!(rec.detail.contains(&format!("\"firmware\":\"{firmware}\"")));
+        assert!(rec.detail.contains(&format!("\"arch\":\"{arch}\"")));
+    }
+    assert!(h.events("boot_service.no_usable_package").is_empty());
+    // The boot service is still shown with its usable package.
+    let r = h
+        .get(Who::Admin, &format!("/v1/boot-services/{}", rd.bs))
+        .await;
+    assert_eq!(r.json()["usable_count"], 1);
+    // A UEFI x64 device is offered it, and nothing is reported missing.
+    let r = h
+        .dev(
+            "GET",
+            "/v1/device/session/packages",
+            Some(&rd.session.token),
+            None,
+        )
+        .await;
+    assert_eq!(r.json()["packages"].as_array().unwrap().len(), 1);
+    assert!(h.events("boot_service.no_usable_package").is_empty());
+}
+
+/// `boot_service.no_usable_package` is kept for a boot service that has
+/// nothing usable, with its reason.
+#[tokio::test]
+async fn empty_boot_service_reported_with_reason() {
+    let h = Harness::m3().await;
+    let relay = h.relay_cert("relay empty");
+    let bs = h
+        .enrol_boot_service(
+            &relay,
+            "Empty",
+            &["127.0.0.0/8"],
+            usgp_proto::ops::BootServiceStatus::Active,
+        )
+        .await;
+    let s = h.open_session(&["02:00:00:00:00:22"]).await;
+    let (_, code) = h.issue_code().await;
+    assert_eq!(h.submit_code(&s.token, &code).await.status, 200);
+    let r = h
+        .dev("GET", "/v1/device/session/packages", Some(&s.token), None)
+        .await;
+    assert_eq!(r.json()["packages"], serde_json::json!([]));
+    let recs = h.events("boot_service.no_usable_package");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].reason.as_deref(), Some("no_usable_package"));
+    assert_eq!(recs[0].target_id.as_deref(), Some(bs.to_string().as_str()));
+    let read = h.events("device.session.packages.read").pop().unwrap();
+    assert_eq!(read.outcome, "success");
+    assert_eq!(read.reason.as_deref(), Some("no_usable_package"));
+}

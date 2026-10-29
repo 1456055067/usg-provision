@@ -34,6 +34,8 @@ mod packages;
 #[cfg(test)]
 mod qa_m2;
 #[cfg(test)]
+mod qa_m3;
+#[cfg(test)]
 mod real_wim;
 #[cfg(test)]
 mod routes_table;

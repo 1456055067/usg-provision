@@ -284,6 +284,98 @@ mod t {
         db.finish().await;
     }
 
+    /// Acceptance 3 on PostgreSQL (REQ-DISK-006, decision 0018 item 7;
+    /// QA-005): when the `disk.wipe.authorised` record cannot be written,
+    /// the confirmation transaction commits nothing: no job row, the
+    /// session unchanged (still authorised, same row), and the chain still
+    /// verifies. The failure is injected by a trigger, owned by the owner
+    /// role in this test's own database, that refuses only that event;
+    /// the trigger is then dropped and the same confirmation succeeds, so
+    /// the refusal was the injected one.
+    #[tokio::test]
+    async fn m3_wipe_record_failure_creates_no_job() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        let op = common::enrol(&db.admin, &a, "wipe fault operator").await;
+        let bs = m3::enrol_boot_service(&db.admin, &a, "relay wipe fault").await;
+        let p = m3::ready_package(&db.app, &a, &op).await;
+        let s = m3::ready_session(&db.app, &a, &op, bs.id, &p, m3::macs(1)).await;
+        let session_before = {
+            let mut tx = db.app.begin().await.unwrap();
+            let v = tx.device_session(s.id).await.unwrap().unwrap();
+            tx.rollback().await;
+            v
+        };
+        assert_eq!(session_before.state, SessionState::Authorised);
+        let head_before = usgp_audit::AuditRead::head(&db.app).await.unwrap();
+
+        let owner = db.raw_owner().await;
+        owner
+            .batch_execute(
+                "CREATE FUNCTION usgp_test_refuse_wipe_record() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN \
+                 IF NEW.event = 'disk.wipe.authorised' THEN \
+                 RAISE EXCEPTION 'test: wipe record refused' \
+                 USING ERRCODE = 'insufficient_privilege'; END IF; \
+                 RETURN NEW; END; $$; \
+                 CREATE TRIGGER usgp_test_refuse_wipe_record \
+                 BEFORE INSERT ON audit_record FOR EACH ROW \
+                 EXECUTE FUNCTION usgp_test_refuse_wipe_record();",
+            )
+            .await
+            .unwrap();
+
+        let r = m3::confirm(&db.app, &a, &s, bs.id, &p).await;
+        assert!(r.is_err(), "confirmation must fail without its wipe record");
+
+        let mut tx = db.app.begin().await.unwrap();
+        assert!(tx.job_by_session(s.id).await.unwrap().is_none());
+        assert!(tx.list_jobs(&[]).await.unwrap().is_empty());
+        assert_eq!(
+            tx.device_session(s.id).await.unwrap().unwrap(),
+            session_before
+        );
+        tx.rollback().await;
+        // Nothing of the failed transaction reached the chain (not even
+        // its `job.created` record).
+        assert_eq!(
+            usgp_audit::AuditRead::head(&db.app).await.unwrap(),
+            head_before
+        );
+        let raw = db.raw_app().await;
+        let jobs: i64 = raw
+            .query_one("SELECT count(*) FROM job", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(jobs, 0);
+        let wipes: i64 = raw
+            .query_one(
+                "SELECT count(*) FROM audit_record WHERE event = 'disk.wipe.authorised'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(wipes, 0);
+
+        // Restore: drop the injected trigger; the same confirmation now
+        // succeeds.
+        owner
+            .batch_execute(
+                "DROP TRIGGER usgp_test_refuse_wipe_record ON audit_record; \
+                 DROP FUNCTION usgp_test_refuse_wipe_record();",
+            )
+            .await
+            .unwrap();
+        let job = m3::confirm(&db.app, &a, &s, bs.id, &p).await.unwrap();
+        let mut tx = db.app.begin().await.unwrap();
+        assert_eq!(tx.job_by_session(s.id).await.unwrap().unwrap().id, job);
+        tx.rollback().await;
+        flow_chain_verifies(&db.app, &a).await;
+        db.finish().await;
+    }
+
     /// Plan section 3.8: the application role reads every new table,
     /// never writes boot services, deletes only assignments, and changes
     /// nothing else by DELETE or TRUNCATE.

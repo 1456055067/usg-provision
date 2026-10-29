@@ -16,14 +16,23 @@ members = ["."]
 libfuzzer-sys = "0.4"
 serde = "1"
 serde_json = "1"
-usgp-crypto = { path = "../crates/usgp-crypto" }
+# `test-pki` (test certificate hierarchy) is test-only; the fuzz workspace
+# is never shipped (decision 0002). `relay_boot_policy` uses it for the
+# relay's TLS client settings, which `BootPolicyFeed` needs but never uses
+# in the target (no network I/O).
+usgp-crypto = { path = "../crates/usgp-crypto", features = ["test-pki"] }
 usgp-dhcp = { path = "../crates/usgp-dhcp" }
+# M3 (plan WU-14): GPT read-back and UEFI boot-option parsing.
+usgp-disk = { path = "../crates/usgp-disk" }
 # `testkit` (WIM builder, XPRESS test encoder) is test-only; the fuzz
 # workspace is never shipped (decision 0002), so it may enable it for seeds
 # and the round-trip mode of `xpress_chunk`.
 usgp-image = { path = "../crates/usgp-image", features = ["testkit"] }
 usgp-proto = { path = "../crates/usgp-proto" }
 usgp-tftp = { path = "../crates/usgp-tftp" }
+# M3 (plan WU-14): the relay's boot-policy feed and feed URL parser, used
+# through its library target only (no sockets are opened).
+usgp-relay = { path = "../services/usgp-relay" }
 
 [[bin]]
 name = "dhcp_packet"
@@ -81,8 +90,105 @@ test = false
 doc = false
 bench = false
 
+# M3 (plan WU-14).
+[[bin]]
+name = "gpt_readback"
+path = "fuzz_targets/gpt_readback.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "efi_load_option"
+path = "fuzz_targets/efi_load_option.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wim_metadata"
+path = "fuzz_targets/wim_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wim_apply_plan"
+path = "fuzz_targets/wim_apply_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tftp_window"
+path = "fuzz_targets/tftp_window.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tftp_name"
+path = "fuzz_targets/tftp_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "device_session_msgs"
+path = "fuzz_targets/device_session_msgs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "job_plan"
+path = "fuzz_targets/job_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "boot_manifest"
+path = "fuzz_targets/boot_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pe_coff"
+path = "fuzz_targets/pe_coff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_config"
+path = "fuzz_targets/agent_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_boot_policy"
+path = "fuzz_targets/relay_boot_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_feed_url"
+path = "fuzz_targets/relay_feed_url.rs"
+test = false
+doc = false
+bench = false
+
 # Seed generator for fuzz/corpus/ (see fuzz/corpus/*/SOURCE.md). Pure
 # Rust; it does not use libfuzzer-sys.
 [[example]]
 name = "gen_seeds"
 path = "examples/gen_seeds.rs"
+
+# M3 seed generator (plan WU-14), same rules as `gen_seeds`.
+[[example]]
+name = "gen_seeds_m3"
+path = "examples/gen_seeds_m3.rs"

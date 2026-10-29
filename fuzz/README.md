@@ -57,6 +57,19 @@ cargo fuzz run <target> /tmp/work/<target> corpus/<target> -- -max_total_time=60
 | `wim_check` | a whole WIM file in memory (`check_wim` with the FIPS provider, `check_pe`) | no panic; listed reason code and operator text on every refusal; no `wim_check_stalled` unless progress stops it, and a stop at the first report never accepts; accepted: 1 to limit images, editions 1..N, boot index ≤ N, `check_pe` index in 1..N or `pe_no_usable_image` |
 | `xpress_chunk` | selector octet; decode (expected length + chunk) or round trip (`XpressDecoder`, `decode_xpress_chunk`, test encoder) | no panic; never writes past the expected length (sentinel); exact length (n - 1 and n + 1 fail); reused decoder equals a fresh one; own encoder output round-trips |
 | `api_json` | selector octet, then a JSON body, envelope, manifest payload or `If-Match` value (`usgp-proto`) | no panic; `body_too_large` exactly over the cap; parser detail ≤ 200 chars; requests, envelopes and manifests round-trip; validated requests are stable; `If-Match` accepted only in the canonical `"r<n>"` form |
+| `gpt_readback` | selector, LBA count, head and tail bytes of an in-memory disk (`usgp-disk` `parse_gpt`, `mbr::read_lba0`) | no panic; never writes; deterministic; accepted view within the layout and entry rules (REQ-DISK-009) with a protective MBR; limits monotone, `Limit` one entry below the table; a fixed-geometry table rebuilds as a `GptPlan` that matches and reads back equal; legacy records in slot order |
+| `efi_load_option` | selector; `Boot####` value, `BootOrder` value, variable name or ESP fields (`usgp-disk` `uefi`) | no panic; accepted option ends each path in one End node within limits, re-encodes to its exact bytes when printable ASCII (OPEN-UBM-2); limits monotone; `put_first` and `free_option_number` equal reference models; only `BootOrder` and `Boot####` named; our Windows option round-trips and `points_to` only its ESP |
+| `wim_metadata` | a decoded metadata resource (`usgp-image` `parse_metadata`, 1 MiB / 10,000-entry limits) | no panic; listed reason code; accepted tree satisfies the M-01 to M-23 shape rules (parents, depth, names, path length, attributes, security index, kinds, hard-link groups); counts; limits monotone, one entry or one level less refused with `wim_meta_limit_exceeded` |
+| `wim_apply_plan` | a whole WIM file, or a selector (image index, root, tamper offset) and file, or the re-base rule's inputs (`usgp-image` `verify_pass`, `apply`, `MemorySink`, `wim::reparse::prepare`) | no panic; listed reason code; verify and apply agree (same refusal, or same preview, bytes within it, one path per entry); a flipped octet is never accepted and nothing is written (SI-7); reparse buffers well framed; re-base rule equals a reference model of decision 0022 (copy, re-base onto the root in DISM's layout, refuse), output well formed, idempotent onto a drive root |
+| `tftp_window` | a windowed-transfer script: file length, window, wrap mode, RRQ, ops (`usgp-tftp` `admit_read_with`) | no panic; admission rules; DATA wire numbers `wire(index)` inside the window with no gap and the file's bytes; in flight at most the window (64); `acked_index` monotone; no `Send` on an ACK that does not advance; `Wait` before the deadline; retries capped; `wraps()` agrees; `Completed` only after the final ACK with the whole file reassembled |
+| `tftp_name` | selector; a request name, or NUL-separated published names (`usgp-tftp` `normalize_request_name`, `case_insensitive_collision`) | no panic; equals a reference model of the documented steps and refusal kinds; accepted names pass the allow-list, have no `.`/`..` component, are a fixed point and match case-insensitively; collisions reported exactly |
+| `device_session_msgs` | selector; a device session request or response body, or a text value (`usgp-proto` `device`, `progress`) | no panic; `body_too_large` exactly over the cap; bodies round-trip; a refused code or token is never echoed, never in `Debug`; MAC, code, display code, token, nonce, disk token and GUID text forms follow reference models and round-trip |
+| `job_plan` | selector; a plan payload, or a mode and a confirm response (`usgp-proto` `JobPlanV1`, `VerifiedJobPlan::verify`) | no panic; accepted payload canonical and round-trips; verify before parse (a refusing plan verifier is always the signature refusal and the content is never checked); checks 1 to 6 equal a reference model; an accepted plan carries the expected bindings and the content manifest's SHA-256; every refusal is an integrity failure with a plan reason code |
+| `boot_manifest` | boot manifest TOML with `[pe_kit]` (`usgp-proto` `BootManifest::from_toml`) | no panic; accepted manifest validates and round-trips through `to_toml`; `get` exact; kit within the font limit with distinct roles; `assess` equals a reference model |
+| `pe_coff` | a boot program's file head (`usgp-proto` `pe_coff::check_uefi_x64_application`) | no panic; equals a reference model of the documented field checks; independent of bytes outside them |
+| `agent_config` | selector; `agent.toml` text or a server URL (`usgp-proto` `AgentConfigFile::from_toml`, `parse_server_url`) | no panic; refusals name a key; accepted file has settings in range with a valid host and round-trips; an accepted URL rebuilt from host and port parses back equal |
+| `relay_boot_policy` | a script over lists the target signs at start-up, flipped and raw envelopes (`usgp-relay` `BootPolicyFeed::apply_bytes`) | no panic; fail closed before a list; every result equals a reference model of the documented check order (envelope, signature, payload, service, rollback, reuse); the gate holds exactly the model's list |
+| `relay_feed_url` | `[server_feed] url` text (`usgp-relay` `FeedUrl::parse`) | no panic; equals a reference model of `https://host[:port][/]`; `authority()` parses back; the agent's `parse_server_url` accepts it with the same host and port |
 
 ## M1 run length
 
@@ -99,3 +112,35 @@ SHA-1. Besides that, the only native code in the fuzz workspace is
 libFuzzer (decision 0002). No shipped crate changes for fuzzing.
 
 Seeds are regenerated with the commands in each `corpus/<target>/SOURCE.md`.
+
+## M3 run length
+
+Milestone M3 (plan WU-14) adds the thirteen targets above. Each runs for
+60 seconds in the `fuzz-smoke` job, with no crash, OOM or timeout (the
+M1 and M2 targets keep their lengths). The M3 plan's test section asks
+for 10 minutes per WU-14 target; the orchestrator set 60 s for this
+change, and the CI matrix entry is where the length is raised.
+
+```sh
+cd fuzz
+cargo fuzz build
+L='-rss_limit_mb=2048 -timeout=10 -print_final_stats=1'
+for e in gpt_readback:65536 efi_load_option:8192 wim_metadata:65536 \
+  wim_apply_plan:65536 tftp_window:1024 tftp_name:512 \
+  device_session_msgs:16384 job_plan:16384 boot_manifest:16384 \
+  pe_coff:4096 agent_config:4096 relay_boot_policy:256 relay_feed_url:1024; do
+  t="${e%%:*}"; mkdir -p "/tmp/work/$t"
+  cargo fuzz run "$t" "/tmp/work/$t" "corpus/$t" -- -max_total_time=60 -max_len="${e#*:}" $L
+done
+```
+
+`relay_boot_policy` signs its lists once per process with a key it
+generates and builds its (unused) TLS client from the `usgp-crypto` test
+PKI (feature `test-pki`, enabled in this workspace only); it opens no
+socket and writes no file. `job_plan` uses test-double signature
+verifiers: the ECDSA check itself is `usgp-crypto`'s and is tested there.
+
+M3 seeds are written by `examples/gen_seeds_m3.rs`
+(`cargo run --example gen_seeds_m3 -- corpus`); `wim_metadata` and
+`wim_apply_plan` also take the `usgp-image` example's seeds (see their
+`SOURCE.md`).

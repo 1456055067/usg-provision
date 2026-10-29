@@ -1,0 +1,7 @@
+schema_version = 1
+algorithm = "sha256"
+
+[[file]]
+name = "usgp-test-payload.efi"
+size = 5632
+sha256 = "babababababababababababababababababababababababababababababababa"

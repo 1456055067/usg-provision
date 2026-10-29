@@ -58,6 +58,9 @@ use crate::handlers::{code_of, json_response, parse_json, read_body};
 /// Draws at most this many ids, tokens and display codes on a collision.
 const DRAWS: usize = 4;
 
+/// Reason when the boot service has no usable package (REQ-TGT-008).
+const NO_USABLE_PACKAGE: &str = "no_usable_package";
+
 /// End reason when the code attempts are used up.
 pub(crate) const CODE_ATTEMPTS_EXHAUSTED: &str = "code_attempts_exhausted";
 
@@ -438,38 +441,60 @@ pub(crate) async fn packages<S: Store + 'static>(
     let cur = lock_live(api, &mut tx, s.id, &[SessionState::Authorised]).await?;
     tx.touch_device_session(s.id, at).await?;
     let mut recs = Vec::new();
-    let offers = match offered(api, &mut tx, &cur).await? {
-        Ok(o) => o,
-        Err(no) => {
-            if no == NoOffer::NoBootService {
+    // Why nothing is offered decides which record is written (QA-004):
+    // `boot_service.no_usable_package` only when the boot service itself
+    // has nothing usable; a device mismatch is the device's, not the boot
+    // service's.
+    let (offers, nothing_reason) = match offered(api, &mut tx, &cur).await? {
+        Ok(o) if o.is_empty() => {
+            if let Some(bs) = cur.boot_service_id {
                 let d = ctx
-                    .ok("device.session.no_boot_service")
-                    .reason(no.reason())
-                    .detail(Detail::new().with("source_ip", &cur.source_ip.to_string()));
+                    .ok("boot_service.no_usable_package")
+                    .target("boot_service", &bs.to_string())
+                    .reason(NO_USABLE_PACKAGE)
+                    .detail(Detail::new().with("session_id", &cur.id.to_string()));
                 recs.push(api.append(&mut tx, &d).await?);
             }
-            Vec::new()
+            (o, Some(NO_USABLE_PACKAGE))
         }
+        Ok(o) => (o, None),
+        Err(no @ NoOffer::NoBootService) => {
+            let d = ctx
+                .ok("device.session.no_boot_service")
+                .reason(no.reason())
+                .detail(Detail::new().with("source_ip", &cur.source_ip.to_string()));
+            recs.push(api.append(&mut tx, &d).await?);
+            (Vec::new(), Some(no.reason()))
+        }
+        Err(no @ NoOffer::DeviceUnsupported) => (Vec::new(), Some(no.reason())),
     };
-    if offers.is_empty()
-        && let Some(bs) = cur.boot_service_id
-    {
-        let d = ctx
-            .ok("boot_service.no_usable_package")
-            .target("boot_service", &bs.to_string())
-            .detail(Detail::new().with("session_id", &cur.id.to_string()));
-        recs.push(api.append(&mut tx, &d).await?);
-    }
+    let device_mismatch = nothing_reason == Some(NoOffer::DeviceUnsupported.reason());
     let ids = offers
         .iter()
         .map(|o| format!("{}@r{}", o.view.package_id, o.view.revision))
         .collect::<Vec<_>>()
         .join(",");
-    let d = ctx.ok("device.session.packages.read").detail(
-        Detail::new()
-            .with("count", &offers.len())
-            .with("packages", &ids),
-    );
+    let detail = Detail::new()
+        .with("count", &offers.len())
+        .with("packages", &ids);
+    let d = match nothing_reason {
+        // REQ-TGT-003: the device's claimed firmware or architecture is not
+        // UEFI on x64; the list is refused for that reason.
+        Some(r) if device_mismatch => ctx
+            .draft("device.session.packages.read", Outcome::Refused)
+            .reason(r)
+            .detail(
+                detail
+                    .with("firmware", cur.firmware.as_str())
+                    .with("arch", cur.arch.as_str())
+                    .with("claimed", "firmware,arch"),
+            ),
+        Some(r) => ctx
+            .ok("device.session.packages.read")
+            .reason(r)
+            .detail(detail),
+        None => ctx.ok("device.session.packages.read").detail(detail),
+    };
     recs.push(api.append(&mut tx, &d).await?);
     let list = DevicePackageListV1::new(offers.into_iter().map(|o| o.view).collect())
         .map_err(ApiError::internal_error)?;

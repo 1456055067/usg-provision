@@ -982,6 +982,10 @@ jobs:
         run: |
           set -euo pipefail
           targets="dhcp_packet tftp_packet wim_header wim_xml wim_lookup wim_check xpress_chunk api_json"
+          # M3 plan WU-14.
+          targets="$targets gpt_readback efi_load_option wim_metadata wim_apply_plan tftp_window"
+          targets="$targets tftp_name device_session_msgs job_plan boot_manifest pe_coff"
+          targets="$targets agent_config relay_boot_policy relay_feed_url"
           for f in fuzz_targets/*.rs; do
             t="$(basename "$f" .rs)"
             case " $targets " in
@@ -997,10 +1001,11 @@ jobs:
     # Each target runs for its plan length with no crash, OOM or timeout:
     # M1 exit criterion 3 (dhcp_packet, tftp_packet, 600 s) and M2 plan
     # section 10 (wim_header, wim_xml, xpress_chunk 600 s; wim_lookup,
-    # wim_check, api_json 60 s smoke), all with -rss_limit_mb=2048
-    # -timeout=10 (impl-notes-wu9). Scheduled and manual only; fuzz-build
-    # replays the seeds on every change. Each matrix job builds the FIPS
-    # module too, hence the toolchain step and the longer timeout.
+    # wim_check, api_json 60 s smoke) and the M3 WU-14 targets (60 s
+    # smoke), all with -rss_limit_mb=2048 -timeout=10 (impl-notes-wu9).
+    # Scheduled and manual only; fuzz-build replays the seeds on every
+    # change. Each matrix job builds the FIPS module too, hence the
+    # toolchain step and the longer timeout.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -1034,6 +1039,46 @@ jobs:
             secs: 60
           - target: api_json
             max_len: 70000
+            secs: 60
+          # M3 plan WU-14 targets: 60 s smoke each (impl-notes-wu14).
+          - target: gpt_readback
+            max_len: 65536
+            secs: 60
+          - target: efi_load_option
+            max_len: 8192
+            secs: 60
+          - target: wim_metadata
+            max_len: 65536
+            secs: 60
+          - target: wim_apply_plan
+            max_len: 65536
+            secs: 60
+          - target: tftp_window
+            max_len: 1024
+            secs: 60
+          - target: tftp_name
+            max_len: 512
+            secs: 60
+          - target: device_session_msgs
+            max_len: 16384
+            secs: 60
+          - target: job_plan
+            max_len: 16384
+            secs: 60
+          - target: boot_manifest
+            max_len: 16384
+            secs: 60
+          - target: pe_coff
+            max_len: 4096
+            secs: 60
+          - target: agent_config
+            max_len: 4096
+            secs: 60
+          - target: relay_boot_policy
+            max_len: 256
+            secs: 60
+          - target: relay_feed_url
+            max_len: 1024
             secs: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

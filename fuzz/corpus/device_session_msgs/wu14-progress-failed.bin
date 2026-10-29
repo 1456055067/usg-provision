@@ -1,0 +1,1 @@
+{"seq":9,"step":1,"event":"failed","failure":{"step":1,"category":"integrity","code":"chunk_digest_mismatch","files":[{"role":"image","name":"install.wim"}],"count":1,"attempts":1}}

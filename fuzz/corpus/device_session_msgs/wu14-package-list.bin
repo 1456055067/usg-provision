@@ -1,0 +1,2 @@
+
+{"packages":[{"package_id":"1c9e8a70-2b3d-4e5f-9a0b-c1d2e3f40516","revision":3,"name":"Field laptops","description":"Win 11","os":{"release":"windows-11","edition":"enterprise","architecture":"x64","source":"declared"},"image_bytes":5000000000,"required_disk_bytes":64000000000}]}

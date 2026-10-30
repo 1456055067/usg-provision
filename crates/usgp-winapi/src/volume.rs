@@ -248,6 +248,7 @@ pub fn set_only_letter(
     if before.contains(&letter) {
         return (before, Ok(()));
     }
+    // POAM: AC-3 - a non-Windows volume is not locked between reading its letters and removing them; a WinPE process could move a letter meanwhile and it would be lost (SEC-R47-001).
     let outcome = before
         .iter()
         .try_for_each(|l| remove_letter(*l))

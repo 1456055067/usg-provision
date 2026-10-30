@@ -127,7 +127,9 @@ start, a minimal authenticated operator API with audit arrives in M2.
 - Decisions before start: D-2, D-3, D-4, D-5.
 - Build order: `usgp-disk` ∥ `usgp-proto` (session, plan) → `usgp-deploy` →
   `usgp-image` (apply) → `usgp-preboot-agent`; `usgp-relay` BOOT-5 policy.
-- Status (2026-10-29, branch `m3/build`): built, **not met**.
+- Status (2026-10-29): gate accepted 2026-10-29; **not met until MT-2**.
+  The owner accepted the gate's POA&M items (POAM-38 to POAM-64) and
+  decisions on 2026-10-29.
   - Exit 1 (lab install) is the owner's lab procedure MT-2
     ([MT-2-lab.md](testing/MT-2-lab.md)), **NOT RUN**. Its CI parts
     passed: the agent and server against a synthetic WIM on a simulated
@@ -313,6 +315,7 @@ while the check is open (POAM-1).
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | M3 status: gate accepted by owner 2026-10-29; not met until MT-2. |
 | 2026-10-29 | M3 status: CI run 40980499705 green (all 35 jobs); M3 still not met. |
 | 2026-10-29 | M3 status recorded with CI run 40928612312 (failure in the Windows BOOT-004 VHD test only). |
 | 2026-10-29 | M3 status (built, not met; MT-2 and MT-1 NOT RUN; CI parts and runs named), the decisions taken, the relay enrolment brought forward from M5 (decision 0021) and what M5 still owes, the M4 constraint that no secret goes to a session authorised only by a code or an approval, and the answers to D-2 to D-5. |

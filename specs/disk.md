@@ -225,7 +225,8 @@ and checks it before formatting.
   copy them)
 - Basis: the read-back check before formatting is project design
 - Standards: `specs/standards/gpt.md` §3 to §7
-- Status: AUDITED (2026-10-28; CRC parameters: OPEN-GPT-1 in `gpt.md`)
+- Status: AUDITED (2026-10-28; CRC parameters: OPEN-GPT-1 in `gpt.md`,
+  closed in part (CI-GPT-1, AUDITED))
 
 ### REQ-DISK-010: Alignment
 

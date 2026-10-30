@@ -199,10 +199,17 @@ decision 0018 item 7).** The chain of evidence:
 | 2026-10-29 | M3 owner lab | MT-2, L1 to L12 | NOT RUN (owner action with licensed media; POAM-59) |
 | 2026-10-29 | M2 real media | MT-1 | NOT RUN (POAM-33); the procedure document now exists |
 
+## Owner decision log
+
+| Date | Decision | Effect |
+|------|----------|--------|
+| 2026-10-29 | M3 gate accepted (run `20261028-104815-m3-preboot-apply`, `gate.md`) | POAM-38 to POAM-63, the M3 extensions to POAM-1, 6, 11, 16, 18, 21, 26, 31 and 36 and the narrowed POAM-58 accepted; POAM-53 closure confirmed; SEC-R47-001 accepted as POAM-64; POAM-61 keeps tolerating directory ARCHIVE; POAM-62 keeps `SetSecurityInfo` until MT-2 L8; decision 0023 item 1 clarification confirmed. M3 is not met until MT-2 (POAM-59). |
+
 ## Document Change History
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | Added the owner decision log with the M3 gate acceptance. No new test evidence. |
 | 2026-10-29 | Added CI run 40980499705 (7cd5ecf, all 35 jobs green, Windows VHD and WinSink results, probes); preamble and M3 status updated; POAM-53 closed. M3 not met. |
 | 2026-10-29 | CI run 40928612312 recorded as stated (conclusion failure: `windows-agent` BOOT-004 VHD test failed with error 87 before any format; everything else named passed). Exit 3: PostgreSQL QA-005 test now PASS in CI. Preamble and M3 status updated; M3 not met. |
 | 2026-10-29 | M3 (WU-17; `m3/build` at 21c1efb). Added the M3 preamble, the M3 exit-criteria table (exit 1 NOT RUN; exits 2, 3 and 4 PASS in QA M3 with their limits; M3 not met), the wipe-guard and audit-before-wipe evidence chain, and rows for the M3 QA gate run, CI runs 40818350636, 40876728637, 40910029759 (as recorded) and 40928612312 (pending), the fix rounds' local runs, local M3 fuzzing, MT-2 and MT-1 NOT RUN. |

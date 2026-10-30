@@ -122,7 +122,10 @@ and GPT FAQ).
   another algorithm is stated (§4.2.1). The fetched pages do not state
   initial value, reflection or final XOR (**OPEN-GPT-1**: confirm the
   full parameter set, for example against a known-good disk image made
-  by Microsoft's tools, before relying on it).
+  by Microsoft's tools, before relying on it). The confirmation part is
+  now closed [observed, project CI] by GPT-OBS-001 and GPT-OBS-002; the
+  parameter values themselves stay OPEN (see Open points). (AUDITED
+  2026-10-29, CR-GPT.)
 - **HeaderCRC32**: set the field to zero, then compute over `HeaderSize`
   bytes of the header (§5.3.2).
 - **PartitionEntryArrayCRC32**: computed over
@@ -270,5 +273,23 @@ Further rules:
 
 - **OPEN-GPT-1**: full CRC-32 parameter set (initial value, reflection,
   final XOR); only the polynomial and the "CCITT32" name are stated.
+  - **Closed in part [observed, project CI]** (owner acceptance
+    2026-10-29; records in `docs/formats/gpt-observed.md`). Settled: the
+    "confirm against a known-good disk before relying on it" part, for
+    the CRC computation the project uses, in both directions.
+    GPT-OBS-001 (CI runs 40910029759, 40928612312, 40958577980,
+    40962201434, 40974183608, 40980499705; one runner image): a GPT
+    written by Windows DiskPart on a fresh 1 GiB disk with 512-byte
+    blocks was accepted by the project's own GPT reader. GPT-OBS-002
+    (boot smoke S10, CI 40876728637 to 40980499705): OVMF firmware
+    booted from GPTs written by the project (512- and 4096-byte
+    blocks), booted using the backup header and array when the primary
+    header's CRC was broken, and refused a disk whose two entry arrays
+    were altered, so the firmware checks the CRCs and accepts ours.
+  - **Still OPEN**: the numeric initial value, reflection and final XOR
+    are not stated by any cited public source, and the observations do
+    not state them; they show only that the project's computation agrees
+    with one Microsoft tool and one firmware build. Observations hold for
+    those builds only. (Sub-list AUDITED 2026-10-29, CR-GPT.)
 - **OPEN-GPT-2**: the MSR and ESP size conflict between the 2017 FAQ and
   the 2026 partition guidance (§10). This summary follows the newer page.

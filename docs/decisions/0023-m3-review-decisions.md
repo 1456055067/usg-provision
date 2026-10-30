@@ -14,10 +14,10 @@
    (an IPv4 address or an IPv6 /64). A request from another source network
    is refused and audited. A confirmed session expires with its job's
    lost-job timeout, so a token never outlives its job's activity.
-   Clarified 2026-10-29: for an unfinished job the token stops working
-   at last contact plus twice the lost-job timeout, so a lost job can
-   still resume (`specs/progress.md`); for a finished job, at finish
-   plus the lost-job timeout.
+   Clarified 2026-10-29, confirmed by owner 2026-10-29: for an
+   unfinished job the token stops working at last contact plus twice the
+   lost-job timeout, so a lost job can still resume (`specs/progress.md`);
+   for a finished job, at finish plus the lost-job timeout.
    Decision 0020's phrase "bound to the TLS session" is replaced by "bound
    to the session's source network, with an expiry". The residual risk (a
    host on the same source network) is recorded as a POA&M item.

@@ -323,8 +323,8 @@ fn vhd_raw_io_update_and_volume_letters() {
     match parse_gpt(&mut dev, &GptLimits::default()) {
         Ok(v) => {
             println!(
-                "GPT-OBS-001 accepted: entries {} used {} of {} bytes, first/last usable \
-                 {}/{}, array LBA {} (backup {}), block {}",
+                "GPT-OBS-001 accepted: entries {} ({} used, {} bytes each), first/last usable \
+                 {}/{}, array LBA {} (backup array LBA {}), block {}",
                 v.entry_count,
                 v.entries.len(),
                 v.entry_size,

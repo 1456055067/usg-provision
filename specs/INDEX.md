@@ -157,7 +157,7 @@ a decision.
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
 | CFG-1 | A deployment carries a Windows unattended-setup answer file, into which per-device values (such as computer name) are substituted at install time. | `specs/configuration.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-CFG-001 to 004, 011, 012; OPEN: 002, 004) | SRC-001, SRC-004, DEC-0010, DEC-0011 |
-| CFG-2 | A deployment sets computer name, domain/OU, time zone, local administrator password, and descriptive tags. | `specs/configuration.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-CFG-005 to 010; OPEN: 010) | SRC-001, SRC-004, SRC-009, DEC-0011, DEC-0018 |
+| CFG-2 | A deployment sets computer name, domain/OU, time zone, local administrator password, and descriptive tags. | `specs/configuration.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-CFG-005 to 010; OPEN: 010). REQ-CFG-013 AUDITED (project decision 0024, replaces the package-held password of 008) | SRC-001, SRC-004, SRC-009, DEC-0011, DEC-0018, DEC-0024 |
 | CFG-3 | Computer names come from operator-defined templates (including substrings such as the last N characters of a device value) or are entered at the device within operator-set restrictions. | `specs/configuration.md` | P2 | NOT SPECCED | SRC-004, SRC-006, SRC-007 |
 | CFG-4 | Operators can define extra key/value prompts answered at the device during install. | `specs/configuration.md` | P2 | NOT SPECCED | SRC-006, SRC-007 |
 
@@ -183,7 +183,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| AGT-1 | The management agent is installed as part of the build, so the device finishes as a managed endpoint. | `specs/agent-handoff.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-AGT-001 to 006; OPEN: 003, 004) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-009, DEC-0011, DEC-0018 |
+| AGT-1 | The management agent is installed as part of the build, so the device finishes as a managed endpoint. | `specs/agent-handoff.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-AGT-001 to 006; OPEN: 003, 004). REQ-AGT-007 AUDITED (project decision 0024, no secret in enrolment configuration) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-009, DEC-0011, DEC-0018, DEC-0024 |
 | AGT-2 | Patches, applications, and policies are applied as part of, or immediately after, the build. | `specs/agent-handoff.md` | P2 | NOT SPECCED | SRC-001, SRC-002, SRC-010 |
 
 ### TGT — Target identification and selection
@@ -425,7 +425,9 @@ decide.
     OPEN-WINPE-2 to 4, which stay open; AUDITED 2026-10-29).
 12. Offline driver injection (DISM driver servicing; INF/CAB packaging).
     For DRV-1, DRV-2. **Summarised: `specs/standards/offline-drivers.md`**
-    (M4, AUDITED 2026-10-29; OPEN-DRVS-1 to 3).
+    (M4, AUDITED 2026-10-29; OPEN-DRVS-1 to 3). §7 (recursive add,
+    driver listing fields, English option, log location) and
+    OPEN-DRVS-4 to 6 AUDITED (M4 build run, SR-1, 2026-10-29).
 13. Offline domain join provisioning (Microsoft Learn `djoin` documentation).
     For DOM-1, DOM-3, RELAY-4. The summary must state what provisioning
     data the open mechanism places on the device.

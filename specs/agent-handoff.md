@@ -2,7 +2,9 @@
 
 Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
 items remain OPEN). REQ
-range in use: `REQ-AGT-001` to `REQ-AGT-006`. AGT-2 (patches,
+range in use: `REQ-AGT-001` to `REQ-AGT-007`. REQ-AGT-007, OPEN-AGT-4
+and the project notes on REQ-AGT-003/004 are AUDITED 2026-10-29 (decision 0024).
+AGT-2 (patches,
 applications, policies) is not specced.
 
 ## Purpose
@@ -74,6 +76,10 @@ installs the agent.
 - Status: OPEN (D-9: no public source says how the installer and its
   configuration reach the product or the device, whether they are part
   of each package or set once, or whether the product updates them.)
+- Project note (AUDITED, decision 0024): whatever the supply route, the
+  enrolment configuration holds no secret (REQ-AGT-007), and the product
+  supports Windows 11 only, so one agent installer for Windows 11 is
+  enough.
 
 ### REQ-AGT-004: Enrolment configuration treated as a secret
 
@@ -89,6 +95,31 @@ over an authenticated, encrypted channel, never shown or logged.
   security review no secret may reach a device session authorised only by
   an operator code or approval (DEC-0018 item 1; POAM-38), so delivery
   is blocked until a stronger device authorisation is decided.)
+- Project note (AUDITED, decision 0024): this project's enrolment
+  configuration carries no secret (REQ-AGT-007), so in this project
+  nothing in it falls under this requirement. The requirement stays as
+  the rule for any secret that a later decision adds.
+
+### REQ-AGT-007: Enrolment configuration without secrets [project decision 0024]
+
+The agent installer and its enrolment configuration are supplied in a
+package signed by an operator. The enrolment configuration contains no
+secret: nothing in it alone lets a device join management. Instead, the
+management side approves each enrolment. No enrolment secret reaches a
+device session. The configuration can therefore be stored and delivered as
+ordinary, integrity-checked
+content. The package carries no password or other credential for the
+agent (see also REQ-CFG-013).
+
+- Priority: MUST
+- Source: none (project choice)
+- Basis: project decision 0024
+- Standards: none
+- Status: AUDITED. How the management side identifies and approves the
+  device, and how the operator signature is checked, are clean-side
+  design questions (OPEN-AGT-4). This narrows
+  REQ-AGT-003 (what is supplied) and makes OPEN-AGT-3 moot for this
+  project.
 
 ### REQ-AGT-005: Agent install failure
 
@@ -146,5 +177,9 @@ enrolment configuration; nothing is inferred.
 - **OPEN-AGT-2**: what registration with the management system consists
   of, and how the product confirms it happened.
 - **OPEN-AGT-3** (D-9, POAM-38): which parts of the enrolment
-  configuration are secret, and how they reach the device.
+  configuration are secret, and how they reach the device. Moot for
+  this project under decision 0024 (REQ-AGT-007).
+- **OPEN-AGT-4** (decision 0024): the approval mechanism on the
+  management side, and how the signature on the operator-signed package
+  is checked. Project design.
 - REQ-AGT-003, 004: see Status lines.

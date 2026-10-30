@@ -6,7 +6,8 @@ approved; CR-511 applied in finalisation). REQ-OS-004 and REQ-OS-005
 REQ-OS-011 (CR-516) AUDITED 2026-10-27 after the diff check, text
 unchanged. OPEN: REQ-OS-003, 006, 010 (in part). REQ range in use:
 `REQ-OS-001` to `REQ-OS-013`. Spec run M4 (2026-10-29) added
-REQ-OS-012 (OPEN) and 013 (AUDITED 2026-10-29) for the install and refresh part.
+REQ-OS-012 (vendor text OPEN; project note AUDITED 2026-10-29, decision 0024:
+Windows 11 only) and 013 (AUDITED 2026-10-29) for the install and refresh part.
 
 ## Purpose
 
@@ -237,6 +238,13 @@ bare metal, and refreshes devices running them.
   still refuse Windows 10 images. Whether M4 accepts Windows 10, which
   Microsoft no longer supports except LTSC and Extended Security Updates
   (SRC-065), needs an owner decision.)
+- Project note [project decision 0024] (AUDITED, owner 2026-10-30): the
+  owner has decided. DEC-0009 stands: usg-provision installs and
+  refreshes Windows 11 Enterprise x64 only, and Windows 10 images are
+  still refused (REQ-OS-001, REQ-OS-007). The M4 lab exit covers
+  Windows 11 only. The paragraph above remains the record of the
+  product's public capability. For this project, only the Windows 11
+  part applies.
 
 ### REQ-OS-013: One package, both install paths
 

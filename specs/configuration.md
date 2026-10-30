@@ -2,7 +2,9 @@
 
 Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
 items remain OPEN). REQ
-range in use: `REQ-CFG-001` to `REQ-CFG-012`. CFG-3 (name templates and
+range in use: `REQ-CFG-001` to `REQ-CFG-013`. REQ-CFG-013, OPEN-CFG-7 and
+the project note on REQ-CFG-008 are AUDITED 2026-10-29 (decision 0024, M4 build
+run). CFG-3 (name templates and
 names entered at the device) and CFG-4 (prompts answered at the device)
 are not specced.
 
@@ -136,6 +138,39 @@ bare-metal installs and on refreshes.
 - Standards: `specs/standards/unattend.md` §3.3, §4
 - Status: AUDITED. How it is protected is OPEN-CFG-4 (see "Security
   expectations"). Refresh is RFR-1 (not specced).
+- Project note (AUDITED, decision 0024): the paragraph above records the
+  product's public behaviour and stays as evidence. This project does
+  **not** carry the password in the package; it meets the same user
+  outcome (a set local administrator password on every install path,
+  surviving clones) through REQ-CFG-013. Implement REQ-CFG-013, not the
+  "package holds a password" wording.
+
+### REQ-CFG-013: Device-generated, escrowed administrator password
+
+[project decision 0024]
+
+A step that runs on the device after Windows setup creates the local
+administrator password. The operator does not enter it, and neither the
+package nor any answer file holds it. The step sets the password on the
+account and escrows it to the server, encrypted to a public key whose
+private key only the server holds, so an authorised operator can
+retrieve it later. Because the package
+holds no password, cloning a package copies none, and a cloned package
+deploys the same way. The same applies on bare-metal installs and on
+refreshes (REQ-CFG-012). The password is never shown in progress,
+logs or audit records (REQ-CFG-011), and no copy is left in clear or
+merely encoded on the installed disk (REQ-CFG-010).
+
+- Priority: MUST
+- Source: none (project choice). It replaces the package-held password
+  of REQ-CFG-008 (SRC-004) while keeping that requirement's outcome.
+- Basis: project decision 0024; DEC-0011 (secrets baseline)
+- Standards: `specs/standards/unattend.md` §3.3, §4
+- Status: AUDITED. Open within the decision's scope: who may retrieve an
+  escrowed password and how that is audited; rotation after retrieval;
+  password strength rules; how the server key is managed; and how the
+  escrow upload is authorised under POAM-38. These are clean-side design
+  questions (OPEN-CFG-7).
 
 ### REQ-CFG-009: Descriptive tags
 
@@ -228,6 +263,9 @@ install time the configuration is *resolved* for one device
   (DEC-0018 item 1 with the review finding the request cites as
   POAM-38). So the administrator password cannot reach a device in M4
   until a stronger device authorisation is decided: OPEN-CFG-4.
+- Project decision 0024 (AUDITED): the password is generated on the device
+  and escrowed, so no password travels from the control plane to the
+  device (REQ-CFG-013).
 - Windows itself only "hides" local account passwords by encoding, with
   no security benefit, and keeps a cached answer file on disk
   (`unattend.md` §4).
@@ -248,4 +286,9 @@ install time the configuration is *resolved* for one device
   disk, given that M3 device sessions may not receive secrets.
 - **OPEN-CFG-5**: how tags are represented on the managed endpoint.
 - **OPEN-CFG-6**: size limits on the answer file and on values.
+- **OPEN-CFG-7** (decision 0024): escrow access rules, audit of
+  retrieval, rotation, strength, and authorisation of the escrow upload
+  (REQ-CFG-013). Project design, not product research. OPEN-CFG-4 is
+  narrowed: the package no longer holds the password, so only the
+  on-device handling and escrow path remain.
 - REQ-CFG-002, 004, 010: see their Status lines.

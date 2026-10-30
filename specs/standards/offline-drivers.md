@@ -1,7 +1,8 @@
 # Offline driver injection (standards topic 12)
 
 Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
-items remain OPEN).
+items remain OPEN). §7 and OPEN-DRVS-4 to 6 AUDITED 2026-10-29 (M4 build run,
+SR-1).
 
 Summary of Microsoft's public documentation of Windows driver packages
 and adding them to an offline Windows image, in the researcher's own
@@ -11,7 +12,8 @@ copied.
 Sources: SRC-178 (adding and removing driver packages offline), SRC-179
 (DISM driver servicing options), SRC-180 (components of a driver
 package), SRC-181 (device driver packages and deployment), SRC-171
-(configuration passes), SRC-182 (DISM unattended servicing).
+(configuration passes), SRC-182 (DISM unattended servicing), SRC-187
+(DISM global options), SRC-188 (taking inventory with DISM).
 **[reading]** marks the researcher's inference.
 
 ## 1. What a driver package is (SRC-180)
@@ -103,11 +105,104 @@ match.
 The format of the driver store and the steps DISM takes to stage a
 package are not described in any public source read (OPEN-DRVS-1).
 
-## 7. Open items
+## 7. Adding a folder recursively and listing drivers (SR-1)
+
+Status: AUDITED (M4 build run, 2026-10-29). Sources: SRC-179 (driver
+servicing options), SRC-187 (DISM global options), SRC-188 (taking
+inventory of an image). Option names and listing labels are Microsoft's
+and are given only so the clean side can run and read the tool.
+
+### 7.1 Adding drivers with recursion (SRC-179)
+
+- The add-driver option works on an **offline** image only. The listing
+  option works offline or on a running system.
+- The driver argument is either one INF file or a folder. With a folder
+  and the recurse option, every subfolder is searched for packages too.
+- The driver argument can be repeated; packages are added in the order
+  given (see §3).
+- Invalid INFs in a searched folder: see §3 (console note, log warning,
+  no error).
+- The force-unsigned option exists for testing only (see §2).
+
+### 7.2 Exit status (OPEN)
+
+None of the pages read (SRC-179, SRC-187, SRC-188) gives DISM's process
+exit codes, what value means success, or what is returned when some
+packages in a folder are added and others fail. Only the skipped-INF case
+in §3 is described, and only as no error on the console. See
+OPEN-DRVS-2.
+
+**[reading]** Until this is answered, a caller cannot treat a zero exit
+alone as proof that every package was added; it would have to confirm
+the result another way, for example by listing the drivers afterwards
+(§7.3).
+
+### 7.3 The driver listing (SRC-179, SRC-188)
+
+- By default only third-party packages are listed; an "all" argument
+  adds the inbox ones.
+- Output can be asked for as a **table** or a **list** (a format option,
+  also a global option, SRC-187).
+- On an image, the listing shows which packages are present and whether
+  each is installed or only staged (SRC-179).
+- SRC-188 names these fields for each listed package:
+  - **Published Name**: the store name given on adding (the
+    `oem<number>.inf` form, §3);
+  - **Original File Name**: the INF's own file name;
+  - **Inbox**: yes for an inbox driver, no for third-party;
+  - **Class Name**: the device class's friendly name;
+  - **Provider Name**: the provider or signer of the package;
+  - **Date**: the INF's driver date, **formatted for the locale**;
+  - **Version**: the version from the INF's driver-version entry.
+- The installed-or-staged state named in SRC-179 is not one of the
+  fields SRC-188 lists; where it appears in the output is not described
+  (OPEN-DRVS-5).
+- No page gives the exact text layout of either format (separators,
+  headers, ordering). **[reading]** A parser should key on the field
+  labels and tolerate extra fields and spacing.
+
+### 7.4 English output (SRC-187)
+
+A global option makes DISM's console output English. Microsoft notes
+that **some resources cannot be shown in English** even with it, and
+that the option is not supported with the help command. **[reading]**
+Because of that note, and because the date field is locale-formatted
+(§7.3), the English option alone does not guarantee fixed field labels
+or a fixed date format (OPEN-DRVS-4).
+
+### 7.5 Log file (SRC-187)
+
+- The log path option sets the full path and name of the log. Without
+  it, the log goes to `%WINDIR%\Logs\Dism\dism.log`. **[reading]** This
+  is the Windows directory of the system running DISM (in Windows PE,
+  Windows PE's own), not of the image being serviced.
+- **In Windows PE the default location is on the RAM-disk scratch
+  space, which can be as small as 32 MB.** **[reading]** A long or
+  verbose run in Windows PE should set the log path to real storage.
+- When the log is archived, a `.bak` copy is kept and overwritten at
+  each archive, and a new log is started. When archiving happens is
+  not stated.
+- The log level option takes 1 (errors) to 4 (errors, warnings,
+  information and debug); the default is 3.
+- A quiet option suppresses everything except errors on the console;
+  Microsoft says not to use it with the listing commands, which would
+  then show nothing.
+- The log's format is not described (OPEN-DRVS-6).
+
+## 8. Open items
 
 - **OPEN-DRVS-1**: no public description of the driver store or of
   staging a package without Microsoft's servicing tools.
-- **OPEN-DRVS-2**: DISM's exit status when some INFs in a folder fail to
-  add, other than invalid INFs being skipped with a warning.
+- **OPEN-DRVS-2**: DISM's process exit codes are not published on the
+  pages read: neither the success value nor the result when some
+  packages in a folder or recursive add fail while others succeed
+  (§7.2). Only skipped invalid INFs are described (warning, no error).
 - **OPEN-DRVS-3**: whether DISM checks a package's architecture against
   the image and refuses a mismatch; the pages read do not say.
+- **OPEN-DRVS-4**: whether the English option fixes the
+  listing's field labels and date format; Microsoft says some resources
+  cannot be shown in English, and does not say which.
+- **OPEN-DRVS-5**: where the installed-or-staged state appears
+  in the listing, and the exact layout of the table and list formats.
+- **OPEN-DRVS-6**: the log file's format and when it is
+  archived.

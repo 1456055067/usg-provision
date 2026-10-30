@@ -153,6 +153,76 @@ pub struct DeviceConfig {
     pub code_max_ttl: Duration,
     /// Job timings.
     pub jobs: JobSettings,
+    /// M4 settings: nine-step timeouts and resume (M4 plan section 3.6).
+    pub m4: M4Settings,
+}
+
+/// M4 device settings (M4 plan section 3.6; CM-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct M4Settings {
+    /// `steps.timeout_s.*` for steps 1 to 9 of a v2 plan (OPEN-SEQ-1
+    /// defaults: 21600, 1800, 21600, 7200, 1800, 3600, 14400, 10800,
+    /// 1800).
+    pub step_timeouts_s: [u32; 9],
+    /// `resume.token_ttl_s` (86400): a resume token's lifetime, capped by
+    /// the job's end.
+    pub resume_token_ttl: Duration,
+    /// `resume.max_per_job` (10).
+    pub resume_max_per_job: u64,
+    /// Resume challenges per source per minute (10; our choice, the plan
+    /// names "rate limited per IP").
+    pub resume_challenges_per_ip_per_min: u32,
+}
+
+impl Default for M4Settings {
+    fn default() -> Self {
+        Self {
+            step_timeouts_s: [21_600, 1800, 21_600, 7200, 1800, 3600, 14_400, 10_800, 1800],
+            resume_token_ttl: Duration::from_secs(86_400),
+            resume_max_per_job: 10,
+            resume_challenges_per_ip_per_min: 10,
+        }
+    }
+}
+
+impl M4Settings {
+    /// Checks every value against its allowed range.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`] naming the first bad setting.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let checks: [(bool, &'static str, &'static str); 4] = [
+            (
+                self.step_timeouts_s
+                    .iter()
+                    .all(|s| (1..=MAX_STEP_TIMEOUT_S).contains(s)),
+                "steps.timeout_s",
+                "every step timeout 1 to 604800",
+            ),
+            (
+                (60..=86_400).contains(&self.resume_token_ttl.as_secs()),
+                "resume.token_ttl_s",
+                "60 to 86400",
+            ),
+            (
+                (1..=100).contains(&self.resume_max_per_job),
+                "resume.max_per_job",
+                "1 to 100",
+            ),
+            (
+                (1..=1000).contains(&self.resume_challenges_per_ip_per_min),
+                "resume.challenges_per_ip_per_min",
+                "1 to 1000",
+            ),
+        ];
+        for (ok, setting, range) in checks {
+            if !ok {
+                return Err(ConfigError { setting, range });
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for DeviceConfig {
@@ -186,6 +256,7 @@ impl Default for DeviceConfig {
             code_default_ttl: Duration::from_secs(900),
             code_max_ttl: Duration::from_secs(3600),
             jobs: JobSettings::default(),
+            m4: M4Settings::default(),
         }
     }
 }
@@ -363,7 +434,7 @@ impl DeviceConfig {
                 return Err(ConfigError { setting, range });
             }
         }
-        Ok(())
+        self.m4.validate()
     }
 }
 

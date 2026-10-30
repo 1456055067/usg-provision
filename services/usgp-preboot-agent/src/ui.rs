@@ -25,9 +25,9 @@ use std::io::{self, BufRead};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
-use usgp_deploy::{JobFailure, JobView, ViewEvent};
+use usgp_deploy::{JobFailure, JobFailureV2, JobView, ViewEvent};
 use usgp_proto::device::{DevicePackageV1, MacAddress};
-use usgp_proto::progress::{FailureCategory, Step};
+use usgp_proto::progress::{FailureCategory, Step, StepV2};
 use usgp_proto::{DisplayCode, JobId};
 use zeroize::Zeroizing;
 
@@ -350,6 +350,46 @@ fn step_name(s: Step) -> &'static str {
     }
 }
 
+/// The name of a v2 step (M4 plan §1.1; REQ-SEQ-002).
+fn step_name_v2(s: StepV2) -> &'static str {
+    match s.get() {
+        1 => "Download and verify the content",
+        2 => "Partition and format the disk",
+        3 => "Apply the image",
+        4 => "Add the drivers",
+        5 => "Place the configuration",
+        6 => "Make the disk bootable and restart",
+        7 => "Windows setup (after the restart)",
+        8 => "Install the management agent",
+        _ => "Report ready",
+    }
+}
+
+/// The lines that describe a v2 failure (as [`failure_lines`]).
+#[must_use]
+pub fn failure_lines_v2(f: &JobFailureV2) -> Vec<String> {
+    let mut v = vec![
+        format!("Failed step: {} - {}", f.step.get(), step_name_v2(f.step)),
+        format!("Cause:       {}", category_text(f.category)),
+        format!("Reason:      {} ({})", f.message, f.code.as_str()),
+    ];
+    if !f.files.is_empty() || f.count > 0 {
+        v.push(format!("Files that failed: {}", f.count));
+        for i in &f.files {
+            v.push(format!("  - {} ({})", i.name.as_str(), i.role.as_str()));
+        }
+    }
+    if f.attempts > 1 {
+        v.push(format!("Attempts:    {}", f.attempts));
+    }
+    v.push(if f.disk_written {
+        "The disk was changed; it will not start Windows until it is installed again.".to_owned()
+    } else {
+        "Nothing was written to any disk.".to_owned()
+    });
+    v
+}
+
 fn category_text(c: FailureCategory) -> &'static str {
     match c {
         FailureCategory::Network => "a network problem",
@@ -400,11 +440,15 @@ pub struct JobScreen {
     job: Option<JobId>,
     package: String,
     edition: String,
-    marks: [Mark; 5],
+    /// The job's steps: number and name (5 for a v1 job, 9 for v2).
+    steps: Vec<(u8, &'static str)>,
+    marks: Vec<Mark>,
     bytes: Option<(u64, u64)>,
     item: Option<String>,
     failure: Option<Vec<String>>,
     succeeded: bool,
+    /// A v2 job finished steps 1 to 6; the device restarts into Windows.
+    restarting: bool,
 }
 
 impl Default for JobScreen {
@@ -413,18 +457,24 @@ impl Default for JobScreen {
             job: None,
             package: String::new(),
             edition: String::new(),
-            marks: [Mark::Pending; 5],
+            steps: Step::ALL.iter().map(|s| (s.get(), step_name(*s))).collect(),
+            marks: vec![Mark::Pending; Step::ALL.len()],
             bytes: None,
             item: None,
             failure: None,
             succeeded: false,
+            restarting: false,
         }
     }
 }
 
 impl JobScreen {
     fn mark(&mut self, s: Step, m: Mark) {
-        if let Some(x) = usize::from(s.get())
+        self.mark_n(s.get(), m);
+    }
+
+    fn mark_n(&mut self, n: u8, m: Mark) {
+        if let Some(x) = usize::from(n)
             .checked_sub(1)
             .and_then(|i| self.marks.get_mut(i))
         {
@@ -445,12 +495,35 @@ impl JobScreen {
                 self.package = (*package).to_owned();
                 self.edition = (*edition).to_owned();
             }
+            ViewEvent::StartedV2 {
+                job_id,
+                package,
+                edition,
+                steps,
+            } => {
+                self.job = Some(*job_id);
+                self.package = (*package).to_owned();
+                self.edition = (*edition).to_owned();
+                self.steps = steps.iter().map(|s| (s.get(), step_name_v2(*s))).collect();
+                self.marks = vec![Mark::Pending; steps.len()];
+            }
             ViewEvent::StepStarted(s) => {
                 self.mark(*s, Mark::Running);
                 self.bytes = None;
                 self.item = None;
             }
-            ViewEvent::Progress {
+            ViewEvent::StepStartedV2(s) => {
+                self.mark_n(s.get(), Mark::Running);
+                self.bytes = None;
+                self.item = None;
+            }
+            ViewEvent::ProgressV2 {
+                bytes_done,
+                bytes_total,
+                item,
+                ..
+            }
+            | ViewEvent::Progress {
                 bytes_done,
                 bytes_total,
                 item,
@@ -464,16 +537,33 @@ impl JobScreen {
                 self.bytes = None;
                 self.item = None;
             }
+            ViewEvent::StepCompletedV2(s) => {
+                self.mark_n(s.get(), Mark::Done);
+                self.bytes = None;
+                self.item = None;
+            }
             ViewEvent::Failed(f) => {
                 self.mark(f.step, Mark::Failed);
                 self.failure = Some(failure_lines(f));
+            }
+            ViewEvent::FailedV2(f) => {
+                self.mark_n(f.step.get(), Mark::Failed);
+                self.failure = Some(failure_lines_v2(f));
+            }
+            // Steps 1 to 6 done and step 6 acknowledged: the rest runs in
+            // the installed Windows after the restart.
+            ViewEvent::Restarting if self.failure.is_none() => {
+                self.restarting = true;
+                for n in 1..=StepV2::MAKE_BOOTABLE_RESTART.get() {
+                    self.mark_n(n, Mark::Done);
+                }
             }
             // The engine sends this only after every step succeeded and the
             // server acknowledged the report (step 5 has no separate
             // completion event).
             ViewEvent::Succeeded if self.failure.is_none() => {
                 self.succeeded = true;
-                self.marks = [Mark::Done; 5];
+                self.marks.iter_mut().for_each(|m| *m = Mark::Done);
             }
             _ => {}
         }
@@ -487,6 +577,8 @@ impl JobScreen {
             "INSTALL FAILED"
         } else if self.succeeded && self.marks.iter().all(|m| *m == Mark::Done) {
             "Install complete"
+        } else if self.restarting {
+            "Restarting into Windows"
         } else {
             "Installing"
         };
@@ -496,14 +588,21 @@ impl JobScreen {
         }
         let _ = writeln!(s, "Package: {}", self.package);
         let _ = writeln!(s, "Edition: {}\n", self.edition);
-        for (i, step) in Step::ALL.iter().enumerate() {
+        for (i, (n, name)) in self.steps.iter().enumerate() {
             let m = match self.marks.get(i) {
                 Some(Mark::Done) => "[done]   ",
                 Some(Mark::Running) => "[running]",
                 Some(Mark::Failed) => "[FAILED] ",
                 _ => "[ ]      ",
             };
-            let _ = writeln!(s, "  {m} {}. {}", step.get(), step_name(*step));
+            let _ = writeln!(s, "  {m} {n}. {name}");
+        }
+        if self.restarting {
+            let _ = writeln!(
+                s,
+                "\n  The device restarts now. Windows finishes setup, then the remaining\n  \
+                 steps run and report to the server; no one needs to be here."
+            );
         }
         if let Some((done, total)) = self.bytes {
             let pct = done

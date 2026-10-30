@@ -96,7 +96,7 @@ impl DeviceApi for Wire {
     fn choose_disk(&mut self, d: &DiskDescriptorV1) -> Result<(), ApiFailure> {
         self.inner.choose_disk(d)
     }
-    fn confirm(&mut self, c: &ConfirmV1) -> Result<ConfirmedV1, ApiFailure> {
+    fn confirm(&mut self, c: &ConfirmV2) -> Result<ConfirmedV2, ApiFailure> {
         let ok = self.inner.confirm(c)?;
         let path: &[&str] = match self.tamper {
             Tamper::PlanPayload => &["plan", "payload_b64"],
@@ -105,7 +105,7 @@ impl DeviceApi for Wire {
         };
         let mut v = serde_json::to_value(&ok).unwrap();
         flip_b64(&mut v, path);
-        Ok(ConfirmedV1::from_json(&serde_json::to_vec(&v).unwrap()).unwrap())
+        Ok(ConfirmedV2::from_json(&serde_json::to_vec(&v).unwrap()).unwrap())
     }
     fn cancel(&mut self) -> Result<(), ApiFailure> {
         self.inner.cancel()
@@ -124,6 +124,13 @@ impl DeviceApi for Wire {
     }
     fn report(&mut self, j: JobId, r: &ProgressV1) -> Result<ProgressAckV1, ApiFailure> {
         self.inner.report(j, r)
+    }
+    fn report_v2(
+        &mut self,
+        j: JobId,
+        r: &usgp_proto::progress::ProgressV2,
+    ) -> Result<ProgressAckV1, ApiFailure> {
+        DeviceApi::report_v2(&mut self.inner, j, r)
     }
     fn bound_waits(&mut self, r: Duration, i: Duration) {
         self.inner.bound_waits(r, i);
@@ -210,6 +217,7 @@ fn run_scoped(
                 host,
                 console: &mut con,
                 keys: &cfg.keys,
+                handoff: &usgp_preboot_agent::session::Handoff::from_config(cfg).unwrap(),
                 crypto: usgp_crypto::provider(),
                 clock: &clock,
             }

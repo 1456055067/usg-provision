@@ -2,7 +2,10 @@
 //!
 //! 1. **Route match** against [`super::routes::DEVICE_ROUTES`]: 404 / 405,
 //!    audited under the per-source cap.
-//! 2. **Bearer session** on every route but open ([`super::auth`]): 401
+//! 2. **Credentials** ([`super::auth`]): none on open, the resume
+//!    challenge and resume (which proves the job key itself); a job-scoped
+//!    resume token on the M4 escrow routes, and on progress once the
+//!    session token is unknown; the session's bearer token elsewhere: 401
 //!    `invalid_token` with `WWW-Authenticate: Bearer` and
 //!    `Connection: close`, audited under the per-source cap, for a
 //!    missing, malformed or unknown token and for a token sent from
@@ -44,11 +47,13 @@ use usgp_proto::api::JSON_MEDIA_TYPE;
 use usgp_proto::codes;
 
 use super::auth::{
-    DEVICE_WWW_AUTHENTICATE, DeviceCtx, bearer_session, invalid_token, lapsed_error,
-    same_source_network,
+    BearerFailure, DEVICE_WWW_AUTHENTICATE, DeviceCtx, bearer_session, invalid_token, lapsed_error,
+    resume_bearer, same_source_network,
 };
-use super::routes::{DeviceMatch, DeviceRouteId, device_allowed_methods, match_device_route};
-use super::{confirm, handlers, job};
+use super::routes::{
+    DeviceAuth, DeviceMatch, DeviceRouteId, device_allowed_methods, match_device_route,
+};
+use super::{confirm, escrow, handlers, job, resume};
 use crate::body::ApiBody;
 use crate::context::{Api, COMPONENT};
 use crate::error::ApiError;
@@ -159,8 +164,17 @@ pub async fn handle_device<S: Store + 'static>(
         }
     };
 
-    // 2. Bearer session.
-    let session = if route.bearer {
+    // 2. Credentials: the session's bearer token, or (M4) a job-scoped
+    // resume token, as the route requires.
+    let path_job = usgp_proto::JobId::parse(params.get(0)).ok();
+    let try_session = matches!(
+        route.auth,
+        DeviceAuth::Session | DeviceAuth::SessionOrResume
+    );
+    let mut session = None;
+    let mut resume = None;
+    let mut need_resume = route.auth == DeviceAuth::Resume;
+    if try_session {
         match bearer_session(&api, req.headers()).await {
             // Decision 0023 item 1: the token is good only from the
             // session's source network.
@@ -178,9 +192,13 @@ pub async fn handle_device<S: Store + 'static>(
                 return Ok(device_error(&e));
             }
             Ok(Ok(s)) => match api.expire_if_due(s).await {
-                Ok(s) => Some(s),
+                Ok(s) => session = Some(s),
                 Err(e) => return Ok(device_error(&e)),
             },
+            // Not a session token: on progress, it may be a resume token.
+            Ok(Err(BearerFailure::Unknown)) if route.auth == DeviceAuth::SessionOrResume => {
+                need_resume = true;
+            }
             Ok(Err(f)) => {
                 let d = anonymous("auth.unauthenticated", f.reason());
                 let e = api.capped_refusal(ip, f.reason(), d, invalid_token()).await;
@@ -192,15 +210,32 @@ pub async fn handle_device<S: Store + 'static>(
                 return Ok(device_error(&e));
             }
         }
-    } else {
-        None
-    };
+    }
+    if need_resume {
+        match resume_bearer(&api, req.headers(), path_job).await {
+            Ok(Ok(r)) => resume = Some(r),
+            Ok(Err(f)) => {
+                let mut d = anonymous("auth.unauthenticated", f.reason());
+                if let Some(j) = path_job {
+                    d = d.target("job", &j.to_string());
+                }
+                let e = api.capped_refusal(ip, f.reason(), d, invalid_token()).await;
+                return Ok(device_error(&e));
+            }
+            Err(e) => {
+                let d = anonymous("api.request.failed", codes::INTERNAL.as_str());
+                usgp_audit::mirror::emit_unpersisted(COMPONENT, api.chain(), &d);
+                return Ok(device_error(&e));
+            }
+        }
+    }
     let ctx = DeviceCtx {
         source,
         ip,
         route,
         params,
         session,
+        resume,
     };
 
     // A confirmed session whose token lapsed with its job (decision 0023
@@ -261,6 +296,10 @@ async fn dispatch<S: Store + 'static>(
         DeviceRouteId::End => handlers::end(api, ctx, req).await,
         DeviceRouteId::Chunk => job::chunk(api, ctx).await,
         DeviceRouteId::Progress => job::progress(api, ctx, req).await,
+        DeviceRouteId::ResumeChallenge => resume::challenge(api, ctx, req).await,
+        DeviceRouteId::Resume => resume::resume(api, ctx, req).await,
+        DeviceRouteId::Escrow => escrow::submit(api, ctx, req).await,
+        DeviceRouteId::EscrowConfirm => escrow::confirm(api, ctx, req).await,
     }
 }
 

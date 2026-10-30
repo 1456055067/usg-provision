@@ -70,7 +70,7 @@ pub use device::serve_device;
 pub use error::{ApiError, ApiInitError};
 pub use handlers::boot_services::assignment_etag;
 pub use handlers::content_view_etag;
-pub use keys::ProvisioningKeys;
+pub use keys::{EscrowKeys, MAX_RETIRED_ESCROW_KEYS, ProvisioningKeys};
 pub use limits::{ApiConfig, ApiLimits, ConfigError, ContentConfig, DeviceConfig};
 pub use manifest::ContentKeys;
 pub use rbac::Permission;

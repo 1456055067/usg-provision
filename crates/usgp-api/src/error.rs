@@ -313,6 +313,9 @@ pub enum ApiInitError {
     /// policy); each purpose needs its own key.
     #[error("a signing key is configured for more than one purpose")]
     KeyReuse,
+    /// More retired escrow keys than the limit (M4 plan section 3.6).
+    #[error("too many retired escrow keys; at most 8 are allowed")]
+    TooManyRetiredKeys,
     /// A database or audit step failed during recovery.
     #[error("start-up recovery failed: {0}")]
     Recovery(String),

@@ -1,9 +1,9 @@
 //! The device route table (M3 plan section 3.1): every route but open
-//! needs a bearer token; no route answers without one; unknown routes and
+//! and the M4 resume challenge and resume needs a bearer token; no route answers without one; unknown routes and
 //! methods are refused; the operator routes are not on the device
 //! listener and the device routes are not on the operator listener.
 
-use usgp_api::device::routes::{DEVICE_ROUTES, DeviceRouteId};
+use usgp_api::device::routes::{DEVICE_ROUTES, DeviceAuth};
 
 use crate::common::{Harness, Who};
 
@@ -19,7 +19,7 @@ async fn every_bearer_route_refuses_without_token() {
     let h = Harness::m3().await;
     h.loopback_service("routes").await;
     let mut n = 0;
-    for r in DEVICE_ROUTES.iter().filter(|r| r.id != DeviceRouteId::Open) {
+    for r in DEVICE_ROUTES.iter().filter(|r| r.auth != DeviceAuth::None) {
         let body = r.json_body.then(|| b"{}".to_vec());
         let resp = h
             .dev_raw(
@@ -33,7 +33,9 @@ async fn every_bearer_route_refuses_without_token() {
         assert_eq!(resp.code(), "invalid_token");
         n += 1;
     }
-    assert_eq!(n, DEVICE_ROUTES.len() - 1);
+    // Open, the resume challenge and resume take no token (M4 plan
+    // section 3.1).
+    assert_eq!(n, DEVICE_ROUTES.len() - 3);
     assert_eq!(h.events("auth.unauthenticated").len(), n);
 }
 

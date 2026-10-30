@@ -450,7 +450,8 @@ mod tests {
             in_list("support_status", SupportState::ALL, SupportState::as_str),
             in_list("state", UploadState::ALL, UploadState::as_str),
             in_list("status", PackageStatus::ALL, PackageStatus::as_str),
-            in_list("role", OperatorRole::ALL, OperatorRole::as_str),
+            // 0001 knew one role; 0005 widens the check (follow-up U-2).
+            in_list("role", &[OperatorRole::Administrator], OperatorRole::as_str),
             in_list("status", OperatorStatus::ALL, OperatorStatus::as_str),
         ];
         for e in expect {
@@ -632,8 +633,8 @@ mod tests {
             ),
             in_list("account", EscrowAccount::ALL, EscrowAccount::as_str),
             in_list("state", EscrowState::ALL, EscrowState::as_str),
-            // WU-6 follow-up U-2 (the Rust variant comes with WU-8).
-            "role IN ('administrator', 'escrow_officer')".to_owned(),
+            // WU-6 follow-up U-2: the check equals the Rust value set.
+            in_list("role", OperatorRole::ALL, OperatorRole::as_str),
             format!(
                 "length(answer_template) BETWEEN 1 AND {}",
                 usgp_proto::limits::MAX_ANSWER_FILE_BYTES

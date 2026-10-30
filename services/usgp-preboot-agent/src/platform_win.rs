@@ -36,6 +36,14 @@
 //!   and backup for the apply step (and security or create-symbolic-link
 //!   per call); the firmware privilege is enabled per firmware call.
 //!
+//! - **M4 steps 4 and 5** (M4 plan WU-10, §1.4; decision 0024 item 4):
+//!   driver staging below `W:\$usgp-stage\` only, DISM from Windows PE's
+//!   own system directory with the argument vectors of `wintools`
+//!   (`/ForceUnsigned` never), its logs on Windows PE's drive
+//!   (`X:\usgp\`), and the step 5 files create-new with `job.key`
+//!   protected (SYSTEM only) before its bytes are written
+//!   ([`crate::targetfs`]).
+//!
 //! Every external tool and every wait is bounded by [`WaitBudget`], which
 //! the session sizes below the job plan's limits (WU-8 POAM).
 
@@ -71,8 +79,9 @@ use std::time::Duration;
 
 use usgp_crypto::CryptoProvider;
 use usgp_deploy::platform::{
-    BootFiles, FirmwareVars as FirmwareVarsTrait, FormattedVolume, FwError, OpenedTarget, Platform,
-    PlatformError, PlatformErrorKind, VolumeOps, VolumeSpec,
+    BootFiles, FileWriter, FirmwareVars as FirmwareVarsTrait, FormattedVolume, FwError,
+    OpenedTarget, Platform, PlatformError, PlatformErrorKind, StagePath, StagedArchive, StagedFile,
+    TargetPath, ToolOutcome, VolumeOps, VolumeSpec,
 };
 use usgp_disk::layout::{PartRole, WindowsUefiLayout};
 use usgp_disk::uefi::BootVarName;
@@ -94,13 +103,31 @@ use usgp_winapi::vars::{
 };
 use usgp_winapi::volume::{self, LockedVolume, VolumeBacking};
 use usgp_winapi::{net, system};
+use usgp_wincfg::archive::ExtractSink;
 
 use crate::disks::{Discriminator, DiskEntry, FoundDisk, TableIdentity};
 use crate::host::{Host, HostError, HostFacts, PowerAction, WaitBudget};
-use crate::wintools;
+use crate::postsetup_win::protect_system_only;
+use crate::targetfs::TargetFs;
+use crate::wintools::{self, RunError};
 
 /// Most time `wpeutil` may take to accept a restart or shutdown.
 const POWER_LIMIT: Duration = Duration::from_secs(60);
+
+/// Largest agent binary copied to the post-setup folder (design bound).
+const MAX_AGENT_BINARY: u64 = 256 * 1024 * 1024;
+
+fn io_perr(what: &'static str) -> impl Fn(io::Error) -> PlatformError {
+    move |e| perr(PlatformErrorKind::Io(e.kind()), what)
+}
+
+fn run_err(what: &'static str) -> impl Fn(RunError) -> PlatformError {
+    move |e| match e {
+        RunError::Timeout => perr(PlatformErrorKind::Timeout, what),
+        RunError::Start(k) => perr(PlatformErrorKind::Io(k), what),
+        RunError::Lost => perr(PlatformErrorKind::Refused, what),
+    }
+}
 
 fn host_err(what: &str, e: &WinApiError) -> HostError {
     HostError(format!("{what}: {e}"))
@@ -567,6 +594,142 @@ impl Platform for WinPlatform<'_> {
 
     fn firmware(&mut self) -> &mut dyn FirmwareVarsTrait {
         &mut self.firmware
+    }
+
+    fn stage_sink(&mut self, dir: &StagePath) -> Result<Box<dyn ExtractSink + '_>, PlatformError> {
+        let sink = self
+            .target_fs()?
+            .stage_sink(dir)
+            .map_err(io_perr("create a driver staging folder"))?;
+        Ok(Box::new(sink))
+    }
+
+    fn dism_add_driver(&mut self, dir: &StagePath) -> Result<ToolOutcome, PlatformError> {
+        const WHAT: &str = "DISM add-driver";
+        let windows = self.windows_letter()?;
+        let log = self.log_path(&wintools::dism_log_name(Some(dir.index())))?;
+        let mut cmd = Command::new(self.dism());
+        cmd.args(wintools::dism_add_args(windows, &dir.relative(), &log));
+        let out = wintools::run_captured(cmd, self.volumes.budget.tool, wintools::MAX_TOOL_OUTPUT)
+            .map_err(run_err(WHAT))?;
+        Ok(ToolOutcome {
+            // No code (never on Windows): not a success.
+            exit_code: out.exit_code.unwrap_or(-1),
+            log_tail: wintools::log_tail(&log),
+        })
+    }
+
+    fn dism_list_drivers(&mut self) -> Result<String, PlatformError> {
+        const WHAT: &str = "DISM driver listing";
+        let windows = self.windows_letter()?;
+        let log = self.log_path(&wintools::dism_log_name(None))?;
+        let mut cmd = Command::new(self.dism());
+        cmd.args(wintools::dism_list_args(windows, &log));
+        let out = wintools::run_captured(cmd, self.volumes.budget.tool, wintools::MAX_TOOL_OUTPUT)
+            .map_err(run_err(WHAT))?;
+        if out.exit_code != Some(0) || out.truncated {
+            return Err(perr(PlatformErrorKind::Refused, WHAT));
+        }
+        // [project rule] Non-UTF-8 bytes (a console code page) become
+        // replacement characters; the parser keys on the field labels and
+        // matching uses the INF names only (`offline-drivers.md` §7.3,
+        // §7.4).
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn remove_staging(&mut self) -> Result<(), PlatformError> {
+        self.target_fs()?
+            .remove_staging()
+            .map_err(io_perr("remove the staging folder"))
+    }
+
+    fn staging_exists(&mut self) -> Result<bool, PlatformError> {
+        self.target_fs()?
+            .staging_exists()
+            .map_err(io_perr("check the staging folder"))
+    }
+
+    fn write_protected_file(&mut self, p: &TargetPath, bytes: &[u8]) -> Result<(), PlatformError> {
+        self.target_fs()?
+            .write_new(p, bytes)
+            .map_err(io_perr("write a configuration file"))
+    }
+
+    fn stage_archive_file(
+        &mut self,
+        at: &StagedArchive,
+    ) -> Result<Box<dyn StagedFile>, PlatformError> {
+        let f = self
+            .target_fs()?
+            .stage_archive_file(at)
+            .map_err(io_perr("create a staged archive"))?;
+        Ok(Box::new(f))
+    }
+
+    fn create_target_file(
+        &mut self,
+        p: &TargetPath,
+    ) -> Result<Box<dyn FileWriter + '_>, PlatformError> {
+        let f = self
+            .target_fs()?
+            .create_new(p)
+            .map_err(io_perr("create a configuration file"))?;
+        Ok(Box::new(f))
+    }
+
+    fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError> {
+        use std::io::Read;
+        const WHAT: &str = "read the agent binary";
+        let exe = std::env::current_exe().map_err(io_perr(WHAT))?;
+        let f = std::fs::File::open(exe).map_err(io_perr(WHAT))?;
+        if f.metadata().map_err(io_perr(WHAT))?.len() > MAX_AGENT_BINARY {
+            return Err(perr(PlatformErrorKind::Refused, WHAT));
+        }
+        let mut out = Vec::new();
+        f.take(MAX_AGENT_BINARY)
+            .read_to_end(&mut out)
+            .map_err(io_perr(WHAT))?;
+        Ok(out)
+    }
+}
+
+impl WinPlatform<'_> {
+    /// The Windows volume's letter, reserved in step 1 and assigned at
+    /// step 2 (the same `W:` the apply used).
+    fn windows_drive(&self) -> Result<DriveLetter, PlatformError> {
+        self.shared
+            .borrow()
+            .windows_letter
+            .ok_or(perr(PlatformErrorKind::NotFound, "Windows volume letter"))
+    }
+
+    fn windows_letter(&self) -> Result<char, PlatformError> {
+        self.windows_drive().map(|l| l.letter())
+    }
+
+    /// File operations below the Windows volume root.
+    fn target_fs(&self) -> Result<TargetFs, PlatformError> {
+        let root = self.windows_drive()?.root();
+        Ok(TargetFs::new(Path::new(&root), protect_system_only))
+    }
+
+    /// DISM from Windows PE's own system directory (M3 trust model,
+    /// decision 0020: the operator's Windows PE).
+    fn dism(&self) -> PathBuf {
+        self.system_dir.join("dism.exe")
+    }
+
+    /// `name` in `X:\usgp\` on Windows PE's own drive (M4 plan §1.4;
+    /// `offline-drivers.md` §7.5), creating the folder.
+    fn log_path(&self, name: &str) -> Result<PathBuf, PlatformError> {
+        let drive = self
+            .system_dir
+            .ancestors()
+            .last()
+            .ok_or(perr(PlatformErrorKind::NotFound, "Windows PE drive"))?;
+        let dir = drive.join(wintools::LOG_DIR);
+        std::fs::create_dir_all(&dir).map_err(io_perr("create the DISM log folder"))?;
+        Ok(dir.join(name))
     }
 }
 

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "server_url": "https://prov.example:8443",
+  "server_name": "prov.example",
+  "trust_anchors_pem": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+  "plan_key_pem": "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n",
+  "plan": {
+    "payload_type": "application/vnd.usgp.job-plan.v2+json",
+    "payload_b64": "e30=",
+    "signatures": [
+      {
+        "key_id": "0303030303030303030303030303030303030303030303030303030303030303",
+        "alg": "ecdsa-p384-sha384",
+        "sig_b64": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMA=="
+      }
+    ]
+  },
+  "job_id": "6b2c3d4e-5f60-4b7c-9d8e-0f1a2b3c4d5e",
+  "agent_sha256": "0909090909090909090909090909090909090909090909090909090909090909",
+  "agent_package_file": "agent.zip",
+  "job_key_file": "job.key"
+}

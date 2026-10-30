@@ -282,25 +282,59 @@ impl ContentStore {
         manifest: &ContentManifestV1,
         index: u64,
     ) -> Result<Vec<u8>, VerifyError> {
-        let len = usgp_proto::content_manifest::chunk_len(manifest.size, index)
+        self.read_chunk_of(
+            &manifest.sha256,
+            manifest.size,
+            &manifest.chunk_sha256,
+            index,
+        )
+    }
+
+    /// As [`Self::read_chunk`] for a driver archive or agent package (M4;
+    /// a verified `ContentManifestV2`).
+    ///
+    /// # Errors
+    ///
+    /// [`VerifyError`].
+    pub fn read_chunk_v2(
+        &self,
+        manifest: &usgp_proto::ContentManifestV2,
+        index: u64,
+    ) -> Result<Vec<u8>, VerifyError> {
+        self.read_chunk_of(
+            &manifest.sha256,
+            manifest.size,
+            &manifest.chunk_sha256,
+            index,
+        )
+    }
+
+    fn read_chunk_of(
+        &self,
+        sha256: &Sha256Digest,
+        size: u64,
+        chunk_sha256: &[Sha256Digest],
+        index: u64,
+    ) -> Result<Vec<u8>, VerifyError> {
+        let len = usgp_proto::content_manifest::chunk_len(size, index)
             .ok_or(VerifyError::ChunkMismatch { index })?;
         let want = usize::try_from(index)
             .ok()
-            .and_then(|i| manifest.chunk_sha256.get(i))
+            .and_then(|i| chunk_sha256.get(i))
             .copied()
             .ok_or(VerifyError::ChunkMismatch { index })?;
         let offset = index
             .checked_mul(usgp_proto::limits::CHUNK_SIZE)
             .ok_or(VerifyError::ChunkMismatch { index })?;
         let n = usize::try_from(len).map_err(|_| VerifyError::ChunkMismatch { index })?;
-        let mut file = self.open_object(manifest)?;
+        let mut file = self.open_sized(sha256, size)?;
         file.seek(SeekFrom::Start(offset))
             .map_err(VerifyError::Io)?;
         let mut buf = vec![0u8; n];
         file.read_exact(&mut buf).map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 VerifyError::SizeMismatch {
-                    expected: manifest.size,
+                    expected: size,
                     found: 0,
                 }
             } else {
@@ -316,7 +350,12 @@ impl ContentStore {
     /// Opens an object for reading: never through a symbolic link, a
     /// regular file of the signed size.
     fn open_object(&self, manifest: &ContentManifestV1) -> Result<File, VerifyError> {
-        let path = self.object_path(&manifest.sha256);
+        self.open_sized(&manifest.sha256, manifest.size)
+    }
+
+    /// As [`Self::open_object`], by digest and signed size.
+    fn open_sized(&self, sha256: &Sha256Digest, size: u64) -> Result<File, VerifyError> {
+        let path = self.object_path(sha256);
         // Never follow a symlink planted in the store: the link itself is
         // refused, and the opened handle must be a regular file.
         let link = fs::symlink_metadata(&path).map_err(VerifyError::Io)?;
@@ -327,9 +366,9 @@ impl ContentStore {
         }
         let file = File::open(&path).map_err(VerifyError::Io)?;
         let meta = file.metadata().map_err(VerifyError::Io)?;
-        if !meta.is_file() || meta.len() != manifest.size {
+        if !meta.is_file() || meta.len() != size {
             return Err(VerifyError::SizeMismatch {
-                expected: manifest.size,
+                expected: size,
                 found: meta.len(),
             });
         }

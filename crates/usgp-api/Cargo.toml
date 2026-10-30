@@ -15,11 +15,15 @@ usgp-crypto.workspace = true
 usgp-audit.workspace = true
 usgp-db.workspace = true
 usgp-proto.workspace = true
+# M4 (plan WU-8): answer-file template parse, lint and render.
+usgp-wincfg.workspace = true
 # M2 (plan WU-0, section 4)
 hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
 serde_json.workspace = true
+# M4: strict request bodies of the new operator routes.
+serde.workspace = true
 # M3 (plan WU-9): session tokens and code bytes are wiped after use.
 zeroize.workspace = true
 

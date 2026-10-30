@@ -57,16 +57,20 @@ pub mod config;
 pub mod disks;
 pub mod host;
 pub mod http;
+pub mod installed;
 pub mod link;
+pub mod postsetup;
 pub mod selftest;
 pub mod session;
 pub mod ui;
 
 #[cfg(windows)]
 pub mod platform_win;
+#[cfg(windows)]
+pub mod postsetup_win;
 #[cfg(any(not(windows), feature = "sim"))]
 pub mod sim;
-#[cfg(any(windows, test))]
+pub mod targetfs;
 pub mod wintools;
 
 /// The agent's version, sent in the session hello.

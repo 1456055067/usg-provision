@@ -102,10 +102,16 @@ pub struct Endpoint {
 pub struct AgentConfig {
     /// The server.
     pub endpoint: Endpoint,
+    /// The server URL as configured (`https://host[:port][/]`), copied into
+    /// the post-setup `job.json` (M4 plan §1.2).
+    pub server_url: String,
     /// Trust anchors for the server certificate, PEM.
     pub trust_anchors_pem: Vec<u8>,
     /// The pinned plan and content keys.
     pub keys: PlanKeys,
+    /// The plan key's PEM text, copied into `job.json` so the post-setup
+    /// runner can verify the plan again (M4 plan §1.2).
+    pub plan_key_pem: String,
     /// How long to wait for a DHCP address (REQ-PE-014).
     pub network_wait: Duration,
     /// TCP connect timeout.
@@ -170,6 +176,9 @@ pub fn from_parts(
     if trust_anchors_pem.is_empty() {
         return Err(invalid("trust_anchors", "the file is empty"));
     }
+    let plan_key_text = std::str::from_utf8(plan_key_pem)
+        .map_err(|_| invalid("plan_key_pub", "not a P-384 public key in PEM"))?
+        .to_owned();
     let plan = VerifyingKey::from_spki_pem(plan_key_pem)
         .map_err(|_| invalid("plan_key_pub", "not a P-384 public key in PEM"))?;
     let content = VerifyingKey::from_spki_pem(content_key_pem)
@@ -192,8 +201,10 @@ pub fn from_parts(
             port: settings.port,
             server_name: settings.server_name,
         },
+        server_url: server_url.to_owned(),
         trust_anchors_pem,
         keys,
+        plan_key_pem: plan_key_text,
         network_wait: Duration::from_secs(settings.network_wait_s),
         connect_timeout: Duration::from_secs(settings.connect_timeout_s),
     })

@@ -227,6 +227,64 @@ impl Platform for SimPlatform {
     fn firmware(&mut self) -> &mut dyn FirmwareVars {
         &mut self.firmware
     }
+    // The M4 steps 4 and 5 are not simulated here (M4 WU-10 follow-up for
+    // WU-13): a v2 job on this platform fails closed at step 4.
+    fn stage_sink(
+        &mut self,
+        _dir: &crate::platform::StagePath,
+    ) -> Result<Box<dyn usgp_wincfg::archive::ExtractSink + '_>, PlatformError> {
+        Err(unsupported("driver staging"))
+    }
+
+    fn dism_add_driver(
+        &mut self,
+        _dir: &crate::platform::StagePath,
+    ) -> Result<crate::platform::ToolOutcome, PlatformError> {
+        Err(unsupported("driver add"))
+    }
+
+    fn dism_list_drivers(&mut self) -> Result<String, PlatformError> {
+        Err(unsupported("driver listing"))
+    }
+
+    fn remove_staging(&mut self) -> Result<(), PlatformError> {
+        Err(unsupported("staging removal"))
+    }
+
+    fn staging_exists(&mut self) -> Result<bool, PlatformError> {
+        Err(unsupported("staging check"))
+    }
+
+    fn write_protected_file(
+        &mut self,
+        _p: &crate::platform::TargetPath,
+        _bytes: &[u8],
+    ) -> Result<(), PlatformError> {
+        Err(unsupported("target file write"))
+    }
+
+    fn stage_archive_file(
+        &mut self,
+        _at: &crate::platform::StagedArchive,
+    ) -> Result<Box<dyn crate::platform::StagedFile>, PlatformError> {
+        Err(unsupported("archive staging"))
+    }
+
+    fn create_target_file(
+        &mut self,
+        _p: &crate::platform::TargetPath,
+    ) -> Result<Box<dyn crate::platform::FileWriter + '_>, PlatformError> {
+        Err(unsupported("target file create"))
+    }
+
+    fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError> {
+        Err(unsupported("agent binary read"))
+    }
+}
+
+/// A platform error for an M4 method this platform does not provide.
+fn unsupported(what: &'static str) -> PlatformError {
+    PlatformError::new(PlatformErrorKind::Unsupported, what)
 }
 
 impl VolumeOps for SimVolumes {

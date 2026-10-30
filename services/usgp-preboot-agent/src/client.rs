@@ -24,12 +24,15 @@ use std::time::Duration;
 use usgp_common::Sha256Digest;
 use usgp_proto::api::ErrorBody;
 use usgp_proto::device::{
-    CancelV1, ChooseDiskV1, ChoosePackageV1, CodeSubmitV1, ConfirmV1, ConfirmedV1, DeviceHelloV1,
+    CancelV1, ChooseDiskV1, ChoosePackageV1, CodeSubmitV1, ConfirmV2, ConfirmedV2, DeviceHelloV1,
     DevicePackageListV1, EndSessionV1, SessionOpenedV1, SessionStatusV1,
 };
-use usgp_proto::limits::{CHUNK_SIZE, MAX_DEVICE_JSON_BYTES};
-use usgp_proto::progress::{ProgressAckV1, ProgressV1};
-use usgp_proto::{AuthCode, DiskDescriptorV1, ErrorCode, JobId, SessionToken};
+use usgp_proto::limits::{CHUNK_SIZE, MAX_CONFIRM_V2_RESPONSE_BYTES, MAX_DEVICE_JSON_BYTES};
+use usgp_proto::progress::{ProgressAckV1, ProgressV1, ProgressV2};
+use usgp_proto::{
+    AuthCode, DiskDescriptorV1, ErrorCode, EscrowConfirmV1, EscrowSubmitV1, JobId,
+    ResumeChallengeV1, ResumeRequestV1, ResumedV1, SessionToken,
+};
 use zeroize::Zeroizing;
 
 use crate::http::{HttpClient, HttpError, HttpLimits, Method, Request};
@@ -179,13 +182,15 @@ pub trait DeviceApi {
     /// [`ApiFailure`].
     fn choose_disk(&mut self, d: &DiskDescriptorV1) -> Result<(), ApiFailure>;
 
-    /// `POST /v1/device/session/confirm`.
+    /// `POST /v1/device/session/confirm` with the job key's public half
+    /// (M4 plan §3.1); the answer carries the signed v2 plan and every
+    /// content manifest it names.
     ///
     /// # Errors
     ///
     /// [`ApiFailure`]; 503 `audit_unavailable` when the wipe record could
-    /// not be written.
-    fn confirm(&mut self, c: &ConfirmV1) -> Result<ConfirmedV1, ApiFailure>;
+    /// not be written; 409 `unresolved_value` or `package_not_ready`.
+    fn confirm(&mut self, c: &ConfirmV2) -> Result<ConfirmedV2, ApiFailure>;
 
     /// `POST /v1/device/session/cancel`.
     ///
@@ -220,6 +225,14 @@ pub trait DeviceApi {
     ///
     /// [`ApiFailure`].
     fn report(&mut self, job: JobId, r: &ProgressV1) -> Result<ProgressAckV1, ApiFailure>;
+
+    /// `POST /v1/device/jobs/{job}/progress` with a schema 2 body (M4 plan
+    /// §3.1).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiFailure`].
+    fn report_v2(&mut self, job: JobId, r: &ProgressV2) -> Result<ProgressAckV1, ApiFailure>;
 
     /// Bounds every later request by `request` (and each read or write by
     /// at most `io`), so a call never blocks past the engine's limits.
@@ -404,16 +417,16 @@ impl DeviceApi for DeviceClient {
         self.post_ok("/v1/device/session/disk", &body)
     }
 
-    fn confirm(&mut self, c: &ConfirmV1) -> Result<ConfirmedV1, ApiFailure> {
+    fn confirm(&mut self, c: &ConfirmV2) -> Result<ConfirmedV2, ApiFailure> {
         let body = to_json(c)?;
         let b = self.call(
             Method::Post,
             "/v1/device/session/confirm",
             Some(&body),
             true,
-            usgp_proto::limits::MAX_CONFIRM_RESPONSE_BYTES,
+            MAX_CONFIRM_V2_RESPONSE_BYTES,
         )?;
-        ConfirmedV1::from_json(&b)
+        ConfirmedV2::from_json(&b)
             .map_err(|_| ApiFailure::BadResponse("unexpected confirm response"))
     }
 
@@ -462,6 +475,12 @@ impl DeviceApi for DeviceClient {
         self.json(Method::Post, &path, Some(&body), MAX_DEVICE_JSON_BYTES)
     }
 
+    fn report_v2(&mut self, job: JobId, r: &ProgressV2) -> Result<ProgressAckV1, ApiFailure> {
+        let path = format!("/v1/device/jobs/{job}/progress");
+        let body = to_json(r)?;
+        self.json(Method::Post, &path, Some(&body), MAX_DEVICE_JSON_BYTES)
+    }
+
     fn bound_waits(&mut self, request: Duration, io: Duration) {
         let l = self.http.limits();
         self.http.set_limits(HttpLimits {
@@ -470,6 +489,121 @@ impl DeviceApi for DeviceClient {
             connect_timeout: l.connect_timeout.min(io),
             resolve_timeout: l.resolve_timeout.min(io),
         });
+    }
+}
+
+/// The routes the post-setup runner uses in the installed Windows (M4 plan
+/// §3.1). The resume token the server gives is kept in the client, in a
+/// zeroizing buffer, and sent only as the bearer of later calls inside
+/// TLS; it is never returned to the caller.
+pub trait PostSetupApi {
+    /// `POST /v1/device/jobs/{job}/resume/challenge` (no bearer).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiFailure`].
+    fn challenge(&mut self, job: JobId) -> Result<ResumeChallengeV1, ApiFailure>;
+
+    /// `POST /v1/device/jobs/{job}/resume` (no bearer; the body is the
+    /// job-key signature). Keeps the token; returns `ack_seq`.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiFailure`].
+    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<u64, ApiFailure>;
+
+    /// `POST /v1/device/jobs/{job}/escrow` (resume token); success is 201.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiFailure`]; 409 for a second escrow.
+    fn submit_escrow(&mut self, job: JobId, body: &EscrowSubmitV1) -> Result<(), ApiFailure>;
+
+    /// `POST /v1/device/jobs/{job}/escrow/confirm` (resume token).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiFailure`].
+    fn confirm_escrow(&mut self, job: JobId, body: &EscrowConfirmV1) -> Result<(), ApiFailure>;
+
+    /// `POST /v1/device/jobs/{job}/progress` with a schema 2 body (resume
+    /// token).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiFailure`].
+    fn report_v2(&mut self, job: JobId, r: &ProgressV2) -> Result<ProgressAckV1, ApiFailure>;
+}
+
+impl DeviceClient {
+    /// A request whose success is exactly `ok`; the body of the answer is
+    /// read (bounded) and not used.
+    fn post_expect(&mut self, path: &str, body: &[u8], ok: u16) -> Result<(), ApiFailure> {
+        let token = self.bearer()?;
+        let req = Request {
+            method: Method::Post,
+            path,
+            bearer: Some(token.as_str()),
+            body: Some((JSON, body)),
+            accept: JSON,
+        };
+        let resp = self.http.send(&req, MAX_DEVICE_JSON_BYTES)?;
+        if !(200..300).contains(&resp.status) {
+            return Err(error_from(resp.status, &resp.body));
+        }
+        if resp.status != ok {
+            return Err(ApiFailure::BadResponse("unexpected status"));
+        }
+        Ok(())
+    }
+}
+
+impl PostSetupApi for DeviceClient {
+    fn challenge(&mut self, job: JobId) -> Result<ResumeChallengeV1, ApiFailure> {
+        let path = format!("/v1/device/jobs/{job}/resume/challenge");
+        let b = self.call(
+            Method::Post,
+            &path,
+            Some(b"{}"),
+            false,
+            MAX_DEVICE_JSON_BYTES,
+        )?;
+        serde_json::from_slice(&b).map_err(|_| ApiFailure::BadResponse("unexpected JSON"))
+    }
+
+    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<u64, ApiFailure> {
+        let path = format!("/v1/device/jobs/{job}/resume");
+        let body = to_json(req)?;
+        let b = self.call(
+            Method::Post,
+            &path,
+            Some(&body),
+            false,
+            MAX_DEVICE_JSON_BYTES,
+        )?;
+        let r: ResumedV1 =
+            serde_json::from_slice(&b).map_err(|_| ApiFailure::BadResponse("unexpected JSON"))?;
+        self.token = Some(
+            SessionToken::parse(r.token.expose())
+                .map_err(|_| ApiFailure::BadResponse("bad resume token"))?,
+        );
+        Ok(r.ack_seq)
+    }
+
+    fn submit_escrow(&mut self, job: JobId, body: &EscrowSubmitV1) -> Result<(), ApiFailure> {
+        let path = format!("/v1/device/jobs/{job}/escrow");
+        let body = to_json(body)?;
+        self.post_expect(&path, &body, 201)
+    }
+
+    fn confirm_escrow(&mut self, job: JobId, body: &EscrowConfirmV1) -> Result<(), ApiFailure> {
+        let path = format!("/v1/device/jobs/{job}/escrow/confirm");
+        let body = to_json(body)?;
+        self.post_expect(&path, &body, 200)
+    }
+
+    fn report_v2(&mut self, job: JobId, r: &ProgressV2) -> Result<ProgressAckV1, ApiFailure> {
+        DeviceApi::report_v2(self, job, r)
     }
 }
 

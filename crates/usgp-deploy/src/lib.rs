@@ -78,7 +78,7 @@ pub use content::{ChunkError, ChunkErrorKind, StreamError, VerifiedChunks};
 pub use engine::{Engine, EngineConfig, JobView, PrebootDone, SignedJob, Succeeded, ViewEvent};
 pub use error::{JobFailure, JobFailureV2};
 pub use link::{LinkError, ProgressLinkV2, ServerLink, ServerLinkV2};
-pub use plan::{PinnedKey, PlanKeys, verify_plan};
+pub use plan::{PinnedKey, PlanKeys, verify_plan, verify_plan_v2};
 pub use platform::{
     BootFiles, FileWriter, FirmwareVars, FormattedVolume, FwError, OpenedTarget, Platform,
     PlatformError, PlatformErrorKind, StagedArchive, StagedFile, VolumeOps, VolumeSpec,

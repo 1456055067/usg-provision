@@ -36,7 +36,7 @@ use crate::client::{ApiFailure, DeviceClient};
 use crate::config::AgentConfig;
 use crate::host::{Host, PowerAction};
 use crate::http::{HttpClient, HttpLimits};
-use crate::session::{Agent, Ending, Outcome};
+use crate::session::{Agent, Ending, Handoff, Outcome};
 use crate::ui::{self, Console};
 
 /// How often the network wait looks again.
@@ -110,12 +110,21 @@ pub fn run(
             Outcome::Unreachable(why),
         );
     }
+    let Some(handoff) = Handoff::from_config(config) else {
+        return stop_early(
+            console,
+            "Cannot start",
+            "The trust anchors in the agent configuration could not be used.",
+            Outcome::StartupFailed("bad trust anchors".to_owned()),
+        );
+    };
     let clock = SystemClock::new();
     let mut agent = Agent {
         api: &mut client,
         host,
         console,
         keys: &config.keys,
+        handoff: &handoff,
         crypto,
         clock: &clock,
     };

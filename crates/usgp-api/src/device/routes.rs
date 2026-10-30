@@ -3,8 +3,12 @@
 //! bearer token, and its audit events.
 //!
 //! The device router refuses a request unless its route is here. Every
-//! route except open needs a bearer token bound to a session; a test
-//! proves it, and that every route names its events.
+//! route needs a bearer token bound to a session, except open, and the M4
+//! re-contact routes (M4 plan section 3.1): the resume challenge (none:
+//! job id plus rate limit), resume (a job-key signature), and the escrow
+//! routes, which take the job-scoped resume token. Progress takes the
+//! session token for steps 1 to 6 and the resume token for 7 to 9. A
+//! test proves it, and that every route names its events.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: AC-3 (Access Enforcement) - bearer session on every
@@ -41,6 +45,29 @@ pub enum DeviceRouteId {
     Chunk,
     /// `POST /v1/device/jobs/{job}/progress`
     Progress,
+    /// `POST /v1/device/jobs/{job}/resume/challenge` (M4)
+    ResumeChallenge,
+    /// `POST /v1/device/jobs/{job}/resume` (M4)
+    Resume,
+    /// `POST /v1/device/jobs/{job}/escrow` (M4)
+    Escrow,
+    /// `POST /v1/device/jobs/{job}/escrow/confirm` (M4)
+    EscrowConfirm,
+}
+
+/// What a device route needs to be called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAuth {
+    /// Nothing (open; the resume challenge; resume, which carries its own
+    /// job-key signature).
+    None,
+    /// The session's bearer token.
+    Session,
+    /// A job-scoped resume token (M4).
+    Resume,
+    /// The session's token or, once the session is closed at step 6, a
+    /// resume token of the job named in the path (progress, M4).
+    SessionOrResume,
 }
 
 /// One device route.
@@ -52,8 +79,8 @@ pub struct DeviceRoute {
     pub method: &'static str,
     /// Path pattern; `{name}` matches one segment.
     pub pattern: &'static str,
-    /// True if the request must carry the session's bearer token.
-    pub bearer: bool,
+    /// The credential the request must carry.
+    pub auth: DeviceAuth,
     /// True if the request carries a JSON body.
     pub json_body: bool,
     /// Audit events written on success (empty for reads that change
@@ -72,7 +99,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Open,
         method: "POST",
         pattern: "/v1/device/sessions",
-        bearer: false,
+        auth: DeviceAuth::None,
         json_body: true,
         events: &["device.session.opened"],
         refused_event: "device.session.open_refused",
@@ -82,7 +109,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Status,
         method: "GET",
         pattern: "/v1/device/session",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: false,
         events: &[],
         refused_event: "device.session.status_refused",
@@ -92,7 +119,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Code,
         method: "POST",
         pattern: "/v1/device/session/code",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: true,
         events: &["auth_code.used", "device.session.authorised"],
         refused_event: "device.session.code_refused",
@@ -102,7 +129,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Packages,
         method: "GET",
         pattern: "/v1/device/session/packages",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: false,
         events: &[
             "device.session.packages.read",
@@ -116,7 +143,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::ChoosePackage,
         method: "POST",
         pattern: "/v1/device/session/package",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: true,
         events: &["device.session.package_chosen"],
         refused_event: "device.session.package_refused",
@@ -126,7 +153,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::ChooseDisk,
         method: "POST",
         pattern: "/v1/device/session/disk",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: true,
         events: &["device.session.disk_chosen"],
         refused_event: "device.session.disk_refused",
@@ -136,9 +163,15 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Confirm,
         method: "POST",
         pattern: "/v1/device/session/confirm",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: true,
-        events: &["job.created", "disk.wipe.authorised", "job.plan.issued"],
+        events: &[
+            "job.created",
+            "disk.wipe.authorised",
+            "job.plan.issued",
+            "job.config.resolved",
+            "job.config.unresolved",
+        ],
         refused_event: "device.session.confirm_refused",
         capped_refusals: false,
     },
@@ -146,7 +179,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Cancel,
         method: "POST",
         pattern: "/v1/device/session/cancel",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: true,
         events: &["device.session.cancelled"],
         refused_event: "device.session.cancel_refused",
@@ -156,7 +189,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::End,
         method: "POST",
         pattern: "/v1/device/session/end",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: true,
         events: &["device.session.ended"],
         refused_event: "device.session.end_refused",
@@ -166,7 +199,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Chunk,
         method: "GET",
         pattern: "/v1/device/jobs/{job}/content/{sha256}/chunks/{n}",
-        bearer: true,
+        auth: DeviceAuth::Session,
         json_body: false,
         events: &[
             "job.content.read",
@@ -180,7 +213,7 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
         id: DeviceRouteId::Progress,
         method: "POST",
         pattern: "/v1/device/jobs/{job}/progress",
-        bearer: true,
+        auth: DeviceAuth::SessionOrResume,
         json_body: true,
         events: &[
             "job.step.started",
@@ -189,9 +222,52 @@ pub const DEVICE_ROUTES: &[DeviceRoute] = &[
             "job.succeeded",
             "job.resumed",
             "boot_stop.added",
+            "device.session.closed",
         ],
         refused_event: "job.progress.refused",
         capped_refusals: true,
+    },
+    // M4 plan section 3.1.
+    DeviceRoute {
+        id: DeviceRouteId::ResumeChallenge,
+        method: "POST",
+        pattern: "/v1/device/jobs/{job}/resume/challenge",
+        auth: DeviceAuth::None,
+        json_body: true,
+        // Not audited when issued (no state change, M4 plan section 3.1).
+        events: &[],
+        refused_event: "job.resume.refused",
+        capped_refusals: true,
+    },
+    DeviceRoute {
+        id: DeviceRouteId::Resume,
+        method: "POST",
+        pattern: "/v1/device/jobs/{job}/resume",
+        auth: DeviceAuth::None,
+        json_body: true,
+        events: &["job.resumed"],
+        refused_event: "job.resume.refused",
+        capped_refusals: true,
+    },
+    DeviceRoute {
+        id: DeviceRouteId::Escrow,
+        method: "POST",
+        pattern: "/v1/device/jobs/{job}/escrow",
+        auth: DeviceAuth::Resume,
+        json_body: true,
+        events: &["escrow.received"],
+        refused_event: "escrow.refused",
+        capped_refusals: false,
+    },
+    DeviceRoute {
+        id: DeviceRouteId::EscrowConfirm,
+        method: "POST",
+        pattern: "/v1/device/jobs/{job}/escrow/confirm",
+        auth: DeviceAuth::Resume,
+        json_body: true,
+        events: &["escrow.applied", "escrow.not_applied"],
+        refused_event: "escrow.confirm_refused",
+        capped_refusals: false,
     },
 ];
 
@@ -246,12 +322,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_open_is_without_bearer_and_patterns_unique() {
+    fn only_open_and_resume_are_without_bearer_and_patterns_unique() {
         let mut seen = std::collections::HashSet::new();
         for r in DEVICE_ROUTES {
             assert!(seen.insert((r.method, r.pattern)), "{r:?}");
-            assert_eq!(r.bearer, r.id != DeviceRouteId::Open, "{r:?}");
+            let open = matches!(
+                r.id,
+                DeviceRouteId::Open | DeviceRouteId::ResumeChallenge | DeviceRouteId::Resume
+            );
+            assert_eq!(r.auth == DeviceAuth::None, open, "{r:?}");
             assert!(!r.refused_event.is_empty());
+        }
+        // Only the post-restart routes take a resume token.
+        for r in DEVICE_ROUTES {
+            let resume = matches!(r.auth, DeviceAuth::Resume | DeviceAuth::SessionOrResume);
+            assert_eq!(
+                resume,
+                matches!(
+                    r.id,
+                    DeviceRouteId::Progress | DeviceRouteId::Escrow | DeviceRouteId::EscrowConfirm
+                ),
+                "{r:?}"
+            );
         }
         let sha = "a".repeat(64);
         let path =

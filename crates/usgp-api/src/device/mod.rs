@@ -35,10 +35,14 @@
 pub mod admission;
 pub mod auth;
 mod confirm;
+mod confirm_v2;
+mod escrow;
 mod handlers;
 pub(crate) mod job;
+pub(crate) mod job_v2;
 pub mod limits;
 mod offer;
+mod resume;
 pub mod router;
 pub mod routes;
 pub mod server;
@@ -51,7 +55,7 @@ use usgp_proto::{BootServiceId, JobId};
 use crate::context::AlarmGate;
 use limits::{DeviceConfig, GlobalRate, PerServiceRate, PerSourceRate};
 
-pub use limits::JobSettings;
+pub use limits::{JobSettings, M4Settings};
 pub use server::serve_device;
 
 /// Most job/pass pairs remembered for "one `job.content.read` per pass".
@@ -75,6 +79,8 @@ pub(crate) struct DeviceState {
     pub(crate) connections: admission::ServiceConnections,
     /// Code attempts per source.
     pub(crate) code_attempts: PerSourceRate,
+    /// Resume challenges per source (M4 plan section 3.1).
+    pub(crate) resume_challenges: PerSourceRate,
     /// Chunk requests in progress per job.
     chunk_slots: Mutex<HashMap<JobId, usize>>,
     /// (job, step) pairs whose `job.content.read` record exists.
@@ -92,6 +98,7 @@ impl DeviceState {
             served: admission::ServedSubnets::default(),
             connections: admission::ServiceConnections::default(),
             code_attempts: PerSourceRate::new(c.code_attempts_per_ip_per_min),
+            resume_challenges: PerSourceRate::new(c.m4.resume_challenges_per_ip_per_min),
             chunk_slots: Mutex::new(HashMap::new()),
             content_reads: Mutex::new(HashSet::new()),
             policy_reads: Mutex::new(HashMap::new()),

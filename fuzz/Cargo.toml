@@ -40,6 +40,14 @@ usgp-preboot-agent = { path = "../services/usgp-preboot-agent" }
 # SEC-004: usgp-winapi's OS-neutral `parse` checks with the synthetic
 # layouts of `parse-testkit` (test and fuzz only; never in a release build).
 usgp-winapi = { path = "../crates/usgp-winapi", features = ["parse-testkit"] }
+# M4 (plan WU-12): answer-file templates, driver archives (ZIP, CAB,
+# DEFLATE), INF scan and the driver listing. `testkit` (our own test ZIP
+# and cabinet writers) is test-only; the fuzz workspace is never shipped
+# (decision 0002). `inf_version` wraps its input in a ZIP built with it.
+usgp-wincfg = { path = "../crates/usgp-wincfg", features = ["testkit"] }
+# `inflate_diff` only: the reference inflater for the differential check
+# (pure Rust; the same version usgp-wincfg's tests use, plan section 4).
+miniz_oxide = "0.8"
 
 [[bin]]
 name = "dhcp_packet"
@@ -284,3 +292,8 @@ path = "examples/gen_seeds.rs"
 [[example]]
 name = "gen_seeds_m3"
 path = "examples/gen_seeds_m3.rs"
+
+# M4 seed generator (plan WU-12), same rules as `gen_seeds`.
+[[example]]
+name = "gen_seeds_m4"
+path = "examples/gen_seeds_m4.rs"

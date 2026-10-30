@@ -1,0 +1,10 @@
+; Synthetic INF written for fuzz seeds.
+[Version]
+Signature = "$Windows NT$"
+Class = Net
+Provider = %Mfg%
+CatalogFile = x.cat
+DriverVer = 01/02/2026,1.2.3.4
+
+[Strings]
+Mfg = "Example"

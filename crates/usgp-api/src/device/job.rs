@@ -174,6 +174,11 @@ pub(crate) async fn chunk<S: Store + 'static>(
     let n: u64 = n_text.parse().map_err(|_| ApiError::not_found("chunk"))?;
 
     let mut tx = api.store().begin().await?;
+    // M4: a nine-step job has its own reader.
+    if tx.job_plan_schema(job_id).await? == Some(2) {
+        tx.rollback().await;
+        return super::job_v2::chunk(api, ctx, job_id, sha, n).await;
+    }
     let mut job = own_job(&mut tx, ctx, job_id, true).await?;
     match job.state {
         JobState::Running => tx.rollback().await,
@@ -422,11 +427,22 @@ pub(crate) async fn progress<S: Store + 'static>(
     ctx: &DeviceCtx,
     req: Request<Incoming>,
 ) -> Result<Response<ApiBody>, ApiError> {
-    let s = ctx.session()?;
-    require(s, &[SessionState::Confirmed])?;
     let job_id = job_param(ctx)?;
     let max = api.config().device.max_json_bytes;
+    // M4: a resume token is good only for a v2 job's steps 7 to 9.
+    if ctx.resume.is_some() {
+        let body = read_body(req, max).await?;
+        return super::job_v2::progress(api, ctx, job_id, &body).await;
+    }
+    let s = ctx.session()?;
+    require(s, &[SessionState::Confirmed])?;
     let body = read_body(req, max).await?;
+    let mut tx = api.store().begin().await?;
+    let schema = tx.job_plan_schema(job_id).await;
+    tx.rollback().await;
+    if schema? == Some(2) {
+        return super::job_v2::progress(api, ctx, job_id, &body).await;
+    }
     let p = parse_device_json!(ProgressV1, &body, max)?;
     let at = api.now()?;
     let mut tx = api.store().begin().await?;

@@ -1190,7 +1190,9 @@ impl RepoTx for MemoryTx {
             .boot_services
             .iter()
             .any(|b| b.id == s.boot_service_id)
-            || !self.work.jobs.iter().any(|j| j.id == s.job_id)
+            // `REFERENCES job (id)`: a job of either schema (M4 stops are
+            // added at step 6 of a v2 job).
+            || !self.job_exists(s.job_id)
         {
             return Err(self.abort(DbError::Constraint {
                 what: "insert boot_stop",

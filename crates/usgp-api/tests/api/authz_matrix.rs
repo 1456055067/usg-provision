@@ -91,8 +91,49 @@ pub(crate) fn requests(
         ("GET", "/v1/boot-stops".into(), None),
         ("POST", format!("/v1/boot-stops/{NOWHERE}/clear"), None),
         ("GET", "/v1/relay/boot-policy?have=0".into(), None),
+        // M4 (plan section 3.2); ids name nothing.
+        (
+            "POST",
+            "/v1/agent-signers".into(),
+            Some(serde_json::json!({"name": "S", "spki_b64": "AA=="})),
+        ),
+        ("GET", "/v1/agent-signers".into(), None),
+        ("DELETE", format!("/v1/agent-signers/{NOWHERE}"), None),
+        (
+            "PUT",
+            format!("/v1/packages/{pkg}/config"),
+            Some(serde_json::json!({
+                "answer_template_b64": "AA==", "agent_package_id": NOWHERE,
+                "admin_password": "none"
+            })),
+        ),
+        (
+            "PUT",
+            format!("/v1/packages/{pkg}/drivers"),
+            Some(serde_json::json!({"archive_ids": []})),
+        ),
+        (
+            "PUT",
+            format!("/v1/device-values/{MAC}"),
+            Some(serde_json::json!({"values": {"computer_name": "PC1"}})),
+        ),
+        ("GET", format!("/v1/device-values/{MAC}"), None),
+        ("DELETE", format!("/v1/device-values/{MAC}"), None),
+        ("GET", format!("/v1/jobs/{NOWHERE}/admin-password"), None),
+        (
+            "POST",
+            format!("/v1/jobs/{NOWHERE}/admin-password/reveal"),
+            Some(serde_json::json!({"reason": "ticket 1"})),
+        ),
     ]
 }
+
+/// A MAC that no device values name.
+pub(crate) const MAC: &str = "02:00:5e:00:53:01";
+
+/// The one route the administrator may not call (separation of duties,
+/// M4 plan section 1.3).
+pub(crate) const REVEAL_SUFFIX: &str = "/admin-password/reveal";
 
 /// The one route no operator may call (a boot service's own).
 pub(crate) const RELAY_ROUTE: &str = "/v1/relay/boot-policy";
@@ -156,8 +197,9 @@ async fn no_role_403_nothing_changes_audited_no_existence_leak() {
     }
 }
 
-/// The administrator role reaches every operator route (no 401/403); the
-/// relay's route refuses every operator (403, M3 plan section 3.5).
+/// The administrator role reaches every operator route (no 401/403) but
+/// the escrow reveal (M4, separation of duties); the relay's route refuses
+/// every operator (403, M3 plan section 3.5).
 #[tokio::test]
 async fn administrator_can_do_every_route() {
     let h = Harness::start().await;
@@ -176,7 +218,7 @@ async fn administrator_can_do_every_route() {
                 body.map(|b| serde_json::to_vec(&b).unwrap()),
             )
             .await;
-        if path.starts_with(RELAY_ROUTE) {
+        if path.starts_with(RELAY_ROUTE) || path.ends_with(REVEAL_SUFFIX) {
             assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
             assert_eq!(r.code(), "forbidden");
             continue;

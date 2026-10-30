@@ -40,7 +40,7 @@ use crate::authn::{Principal, UnauthLimiter};
 use crate::checker::ContentChecker;
 use crate::device::DeviceState;
 use crate::error::{ApiError, ApiInitError};
-use crate::keys::ProvisioningKeys;
+use crate::keys::{EscrowKeys, ProvisioningKeys};
 use crate::limits::ApiConfig;
 use crate::manifest::ContentKeys;
 use crate::routes::{Params, RouteSpec};
@@ -87,6 +87,10 @@ pub(crate) struct Inner<S> {
     pub(crate) sweep_alarms: Mutex<HashMap<&'static str, AlarmGate>>,
     pub(crate) provisioning: Option<ProvisioningKeys>,
     pub(crate) device: DeviceState,
+    /// The M4 escrow keys, if configured.
+    pub(crate) escrow: Option<EscrowKeys>,
+    /// Escrow reveals per operator in the current hour (M4).
+    pub(crate) reveals: crate::handlers::escrow::RevealLimiter,
 }
 
 /// How often at most a failed checkpoint is reported on the mirror.
@@ -152,6 +156,7 @@ pub struct ApiBuilder<S: Store> {
     checkpointer: Option<Checkpointer>,
     checker: Option<Arc<dyn ContentChecker>>,
     provisioning: Option<ProvisioningKeys>,
+    escrow: Option<EscrowKeys>,
 }
 
 impl<S: Store> std::fmt::Debug for ApiBuilder<S> {
@@ -184,6 +189,15 @@ impl<S: Store + 'static> ApiBuilder<S> {
         self
     }
 
+    /// The M4 escrow keys (M4 plan section 1.3). Without them a package
+    /// whose `admin_password` is `generate_and_escrow` cannot be confirmed
+    /// and the reveal route answers 503 (fail closed).
+    #[must_use]
+    pub fn escrow_keys(mut self, keys: EscrowKeys) -> Self {
+        self.escrow = Some(keys);
+        self
+    }
+
     /// Validates the configuration and opens the content store.
     ///
     /// # Errors
@@ -212,6 +226,8 @@ impl<S: Store + 'static> ApiBuilder<S> {
         let slots = self.config.content.check_concurrency;
         let unauth = UnauthLimiter::new(self.config.unauth_caps());
         let device = DeviceState::new(&self.config.device);
+        let reveals =
+            crate::handlers::escrow::RevealLimiter::new(self.config.escrow_reveal_per_hour);
         Ok(Api {
             inner: Arc::new(Inner {
                 store: self.store,
@@ -227,6 +243,8 @@ impl<S: Store + 'static> ApiBuilder<S> {
                 sweep_alarms: Mutex::new(HashMap::new()),
                 provisioning: self.provisioning,
                 device,
+                escrow: self.escrow,
+                reveals,
             }),
         })
     }
@@ -284,6 +302,7 @@ impl<S: Store + 'static> Api<S> {
             checkpointer: None,
             checker: None,
             provisioning: None,
+            escrow: None,
         }
     }
 
@@ -315,6 +334,12 @@ impl<S: Store + 'static> Api<S> {
     #[must_use]
     pub fn provisioning_keys(&self) -> Option<&ProvisioningKeys> {
         self.inner.provisioning.as_ref()
+    }
+
+    /// The M4 escrow keys, if configured.
+    #[must_use]
+    pub fn escrow_keys(&self) -> Option<&EscrowKeys> {
+        self.inner.escrow.as_ref()
     }
 
     /// The audit chain.

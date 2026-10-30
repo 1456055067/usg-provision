@@ -1288,6 +1288,9 @@ jobs:
           targets="$targets agent_http_head"
           # M3 fix round 1 (SEC-004).
           targets="$targets winapi_sd winapi_reparse"
+          # M4 plan WU-12.
+          targets="$targets unattend_template zip_archive cab_archive inflate_diff inf_version"
+          targets="$targets dism_driver_table postsetup_msgs agent_package_manifest content_manifest_v2"
           for f in fuzz_targets/*.rs; do
             t="$(basename "$f" .rs)"
             case " $targets " in
@@ -1399,6 +1402,35 @@ jobs:
             secs: 60
           - target: winapi_reparse
             max_len: 4096
+            secs: 60
+          # M4 plan WU-12 (impl-notes-wu12): 600 s for the archive and
+          # inflate parsers and the answer-file template, 60 s for the rest.
+          - target: unattend_template
+            max_len: 65536
+            secs: 600
+          - target: zip_archive
+            max_len: 65536
+            secs: 600
+          - target: cab_archive
+            max_len: 65536
+            secs: 600
+          - target: inflate_diff
+            max_len: 70000
+            secs: 600
+          - target: inf_version
+            max_len: 16384
+            secs: 600
+          - target: dism_driver_table
+            max_len: 65536
+            secs: 60
+          - target: postsetup_msgs
+            max_len: 16384
+            secs: 60
+          - target: agent_package_manifest
+            max_len: 16384
+            secs: 60
+          - target: content_manifest_v2
+            max_len: 65536
             secs: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -52,6 +52,17 @@ const PLAN: &[(&str, &str)] = &[
     ("GET", "/v1/boot-stops"),
     ("POST", "/v1/boot-stops/{id}/clear"),
     ("GET", "/v1/relay/boot-policy"),
+    // M4 plan section 3.2.
+    ("POST", "/v1/agent-signers"),
+    ("GET", "/v1/agent-signers"),
+    ("DELETE", "/v1/agent-signers/{id}"),
+    ("PUT", "/v1/packages/{id}/config"),
+    ("PUT", "/v1/packages/{id}/drivers"),
+    ("PUT", "/v1/device-values/{mac}"),
+    ("GET", "/v1/device-values/{mac}"),
+    ("DELETE", "/v1/device-values/{mac}"),
+    ("GET", "/v1/jobs/{id}/admin-password"),
+    ("POST", "/v1/jobs/{id}/admin-password/reveal"),
 ];
 
 #[test]

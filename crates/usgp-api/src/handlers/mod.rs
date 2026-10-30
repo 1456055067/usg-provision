@@ -13,15 +13,19 @@
 //   specs/os-support.md#REQ-OS-009
 // - RFC 9110 §8.8.3 (ETag), §13.1.1 (If-Match)
 
+pub(crate) mod agent_signers;
 pub(crate) mod auth_codes;
 pub(crate) mod boot_policy;
 pub(crate) mod boot_services;
 pub(crate) mod boot_stops;
 pub(crate) mod content;
 pub(crate) mod declarations;
+pub(crate) mod device_values;
+pub(crate) mod escrow;
 pub(crate) mod images;
 pub(crate) mod jobs;
 pub(crate) mod limits;
+pub(crate) mod package_config;
 pub(crate) mod packages;
 pub(crate) mod pe;
 pub(crate) mod sessions;
@@ -118,6 +122,16 @@ pub(crate) async fn dispatch<S: Store + 'static>(
         // Reached only through the boot-service branch of the router; an
         // operator never gets here (403 before dispatch).
         RouteId::RelayBootPolicy => Err(ApiError::forbidden()),
+        RouteId::AgentSignerAdd => agent_signers::add(api, ctx, req).await,
+        RouteId::AgentSignerList => agent_signers::list(api, ctx).await,
+        RouteId::AgentSignerRevoke => agent_signers::revoke(api, ctx).await,
+        RouteId::PackageConfigSet => package_config::set_config(api, ctx, req).await,
+        RouteId::PackageDriversSet => package_config::set_drivers(api, ctx, req).await,
+        RouteId::DeviceValueSet => device_values::set(api, ctx, req).await,
+        RouteId::DeviceValueGet => device_values::get(api, ctx).await,
+        RouteId::DeviceValueDelete => device_values::delete(api, ctx).await,
+        RouteId::EscrowMetadata => escrow::metadata(api, ctx).await,
+        RouteId::EscrowReveal => escrow::reveal(api, ctx, req).await,
     }
 }
 

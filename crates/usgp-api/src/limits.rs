@@ -153,6 +153,9 @@ pub struct ApiConfig {
     pub wim_limits: WimLimits,
     /// The device listener, operator codes and jobs (plan M3 section 3.9).
     pub device: DeviceConfig,
+    /// `escrow.reveal_rate_per_hour` (10): reveals per operator per hour
+    /// (M4 plan section 3.6, AC-7 style).
+    pub escrow_reveal_per_hour: u32,
 }
 
 /// Audit writers besides connections and content checks: the maintenance
@@ -196,6 +199,7 @@ impl ApiConfig {
             known_bad_kit_versions: Vec::new(),
             wim_limits: WimLimits::DEFAULT,
             device: DeviceConfig::default(),
+            escrow_reveal_per_hour: 10,
         }
     }
 
@@ -329,6 +333,12 @@ impl ApiConfig {
             }
         }
         self.device.validate()?;
+        if !(1..=1000).contains(&self.escrow_reveal_per_hour) {
+            return Err(ConfigError {
+                setting: "escrow.reveal_rate_per_hour",
+                range: "1 to 1000",
+            });
+        }
         if !c.root.is_absolute() {
             return Err(ConfigError {
                 setting: "content.root",

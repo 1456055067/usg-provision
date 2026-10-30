@@ -94,6 +94,26 @@ pub enum RouteId {
     BootStopClear,
     /// `GET /v1/relay/boot-policy?have=<generation>`
     RelayBootPolicy,
+    /// `POST /v1/agent-signers` (M4)
+    AgentSignerAdd,
+    /// `GET /v1/agent-signers` (M4)
+    AgentSignerList,
+    /// `DELETE /v1/agent-signers/{id}` (M4)
+    AgentSignerRevoke,
+    /// `PUT /v1/packages/{id}/config` (M4)
+    PackageConfigSet,
+    /// `PUT /v1/packages/{id}/drivers` (M4)
+    PackageDriversSet,
+    /// `PUT /v1/device-values/{mac}` (M4)
+    DeviceValueSet,
+    /// `GET /v1/device-values/{mac}` (M4)
+    DeviceValueGet,
+    /// `DELETE /v1/device-values/{mac}` (M4)
+    DeviceValueDelete,
+    /// `GET /v1/jobs/{id}/admin-password` (M4)
+    EscrowMetadata,
+    /// `POST /v1/jobs/{id}/admin-password/reveal` (M4)
+    EscrowReveal,
 }
 
 /// The permission a route needs.
@@ -556,6 +576,111 @@ pub const ROUTES: &[RouteSpec] = &[
         refused_event: "boot_policy.refused",
         target_kind: "boot_service",
         json_body: false,
+    },
+    // M4 plan section 3.2.
+    RouteSpec {
+        id: RouteId::AgentSignerAdd,
+        method: "POST",
+        pattern: "/v1/agent-signers",
+        access: Access::One(Permission::AgentSignerManage),
+        events: &["agent_signer.added"],
+        refused_event: "agent_signer.refused",
+        target_kind: "agent_signer",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::AgentSignerList,
+        method: "GET",
+        pattern: "/v1/agent-signers",
+        access: Access::One(Permission::AgentSignerManage),
+        events: &["agent_signer.list.read"],
+        refused_event: "agent_signer.list.read",
+        target_kind: "agent_signer",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::AgentSignerRevoke,
+        method: "DELETE",
+        pattern: "/v1/agent-signers/{id}",
+        access: Access::One(Permission::AgentSignerManage),
+        events: &[
+            "agent_signer.revoked",
+            "agent_package.refused",
+            "package.status.changed",
+        ],
+        refused_event: "agent_signer.revoke_refused",
+        target_kind: "agent_signer",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::PackageConfigSet,
+        method: "PUT",
+        pattern: "/v1/packages/{id}/config",
+        access: Access::One(Permission::PackageEdit),
+        events: &["package.config.set", "agent_package.attached"],
+        refused_event: "package.config.refused",
+        target_kind: "package",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::PackageDriversSet,
+        method: "PUT",
+        pattern: "/v1/packages/{id}/drivers",
+        access: Access::One(Permission::PackageEdit),
+        events: &["package.drivers.set"],
+        refused_event: "package.drivers.refused",
+        target_kind: "package",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::DeviceValueSet,
+        method: "PUT",
+        pattern: "/v1/device-values/{mac}",
+        access: Access::One(Permission::DeviceValueManage),
+        events: &["device_value.set"],
+        refused_event: "device_value.refused",
+        target_kind: "device_value",
+        json_body: true,
+    },
+    RouteSpec {
+        id: RouteId::DeviceValueGet,
+        method: "GET",
+        pattern: "/v1/device-values/{mac}",
+        access: Access::One(Permission::DeviceValueView),
+        events: &["device_value.read"],
+        refused_event: "device_value.read",
+        target_kind: "device_value",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::DeviceValueDelete,
+        method: "DELETE",
+        pattern: "/v1/device-values/{mac}",
+        access: Access::One(Permission::DeviceValueManage),
+        events: &["device_value.deleted"],
+        refused_event: "device_value.refused",
+        target_kind: "device_value",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::EscrowMetadata,
+        method: "GET",
+        pattern: "/v1/jobs/{id}/admin-password",
+        access: Access::One(Permission::JobView),
+        events: &["escrow.metadata.read"],
+        refused_event: "escrow.metadata.read",
+        target_kind: "job",
+        json_body: false,
+    },
+    RouteSpec {
+        id: RouteId::EscrowReveal,
+        method: "POST",
+        pattern: "/v1/jobs/{id}/admin-password/reveal",
+        access: Access::One(Permission::EscrowReveal),
+        events: &["escrow.revealed"],
+        refused_event: "escrow.reveal_refused",
+        target_kind: "job",
+        json_body: true,
     },
 ];
 

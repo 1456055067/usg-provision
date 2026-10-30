@@ -894,6 +894,58 @@ impl Platform for TestPlatform {
     fn firmware(&mut self) -> &mut dyn FirmwareVars {
         &mut self.fw
     }
+    // The M3 engine tests never reach steps 4 and 5.
+    fn stage_sink(
+        &mut self,
+        _dir: &usgp_deploy::platform::StagePath,
+    ) -> Result<Box<dyn usgp_wincfg::archive::ExtractSink + '_>, PlatformError> {
+        Err(unsupported("driver staging"))
+    }
+
+    fn dism_add_driver(
+        &mut self,
+        _dir: &usgp_deploy::platform::StagePath,
+    ) -> Result<usgp_deploy::platform::ToolOutcome, PlatformError> {
+        Err(unsupported("driver add"))
+    }
+
+    fn dism_list_drivers(&mut self) -> Result<String, PlatformError> {
+        Err(unsupported("driver listing"))
+    }
+
+    fn remove_staging(&mut self) -> Result<(), PlatformError> {
+        Err(unsupported("staging removal"))
+    }
+
+    fn staging_exists(&mut self) -> Result<bool, PlatformError> {
+        Err(unsupported("staging check"))
+    }
+
+    fn write_protected_file(
+        &mut self,
+        _p: &usgp_deploy::platform::TargetPath,
+        _bytes: &[u8],
+    ) -> Result<(), PlatformError> {
+        Err(unsupported("target file write"))
+    }
+
+    fn stage_archive_file(
+        &mut self,
+        _at: &usgp_deploy::platform::StagedArchive,
+    ) -> Result<Box<dyn usgp_deploy::platform::StagedFile>, PlatformError> {
+        Err(unsupported("archive staging"))
+    }
+
+    fn create_target_file(
+        &mut self,
+        _p: &usgp_deploy::platform::TargetPath,
+    ) -> Result<Box<dyn usgp_deploy::platform::FileWriter + '_>, PlatformError> {
+        Err(unsupported("target file create"))
+    }
+
+    fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError> {
+        Err(unsupported("agent binary read"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -988,4 +1040,9 @@ pub fn boot_order_of(fw: &MemFirmware) -> Vec<u16> {
         &usgp_disk::uefi::UefiLimits::default(),
     )
     .unwrap()
+}
+
+/// A platform error for an M4 method this platform does not provide.
+fn unsupported(what: &'static str) -> PlatformError {
+    PlatformError::new(usgp_deploy::PlatformErrorKind::Unsupported, what)
 }

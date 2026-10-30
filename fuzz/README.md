@@ -70,6 +70,15 @@ cargo fuzz run <target> /tmp/work/<target> corpus/<target> -- -max_total_time=60
 | `agent_config` | selector; `agent.toml` text or a server URL (`usgp-proto` `AgentConfigFile::from_toml`, `parse_server_url`) | no panic; refusals name a key; accepted file has settings in range with a valid host and round-trips; an accepted URL rebuilt from host and port parses back equal |
 | `relay_boot_policy` | a script over lists the target signs at start-up, flipped and raw envelopes (`usgp-relay` `BootPolicyFeed::apply_bytes`) | no panic; fail closed before a list; every result equals a reference model of the documented check order (envelope, signature, payload, service, rollback, reuse); the gate holds exactly the model's list |
 | `relay_feed_url` | `[server_feed] url` text (`usgp-relay` `FeedUrl::parse`) | no panic; equals a reference model of `https://host[:port][/]`; `authority()` parses back; the agent's `parse_server_url` accepts it with the same host and port |
+| `unattend_template` | answer-file template bytes (`usgp-wincfg` `Template::parse`, `references`, `lint`, `render`) | no panic; `TooLarge` exactly over the limit; tighter limits never accept more; references sorted and unique; unknown references reported by lint; render with no values fails on the first reference; render with valid values never fails its self-check, is deterministic and (without the `{{{{` escape) re-parses with no references left |
+| `zip_archive` | a ZIP file in memory, plain and driver mode, default and tight limits (`usgp-wincfg` `validate_archive_mode`, `extract_archive_mode`) | no panic; listed reason code; validate and extract agree; the sink sees only safe relative paths, parents first, no folded duplicate, exactly the declared bytes, `expanded` in total; INF list sorted, unique, `.inf` only; modes differ only by `no_inf_packages`; tight limits never accept more |
+| `cab_archive` | a cabinet in memory (octets 0 to 3 forced to `MSCF`), as `zip_archive` | as `zip_archive`; accepted input is a cabinet |
+| `inflate_diff` | selector; a raw DEFLATE stream, or a level and content (`usgp-wincfg` `inflate_slice` against `miniz_oxide`) | no panic; we accept exactly when the reference finishes within the 1 MiB budget having consumed all input, with the same output; budget and trailing-data refusals agree with the reference; reference-encoded content round-trips at every level |
+| `inf_version` | one INF's text, placed as `pkg/x.inf` in a test ZIP with two catalogs (the archive INF scan) | no panic; plain mode always accepts; driver mode accepts exactly when the INF is listed; a listed INF decodes and holds `version`, `signature`, `catalogfile` and a known signature; fewer catalogs never list more; UTF-16LE form decides the same |
+| `dism_driver_table` | list-format driver listing, lossy UTF-8 (`usgp-wincfg` `dism::parse_driver_table`) | no panic; `TooLarge` exactly over the cap; rows within limits, trimmed, required fields non-empty, no more than `Published Name` lines; rows written back re-parse equal; CRLF equals LF |
+| `postsetup_msgs` | selector; resume, escrow, v2 progress or failure body, or `job.json` (`usgp-proto` `resume`, `escrow`, `progress`, `postsetup`) | no panic; `body_too_large` exactly over the cap; detail at most 200 chars; bodies round-trip; resumed token never in `Debug`; escrow lengths and point form; confirm code exactly on `set` false; v2 progress rules (schema, seq, bytes, step 9 success, restart flag, failure step); `job.json` validates, round-trips, holds a v2 plan envelope |
+| `agent_package_manifest` | `agent.json` (`usgp-proto` `AgentPackageManifestV1::from_json`) | no panic; `TooLarge` exactly over the cap; accepted manifest within its rules (installer kind, arguments, exit codes, timeout) and round-trips |
+| `content_manifest_v2` | a v2 content manifest payload (`usgp-proto` `ContentManifestV2::from_payload`, `open`) | no panic; `TooLarge` exactly over the cap; chunk count, lengths and kind rules for INF lists; payload canonical and stable; verify before parse (a refusing verifier always refuses the envelope); `open` agrees with `from_payload` and the key-id check |
 
 ## M1 run length
 
@@ -144,3 +153,33 @@ M3 seeds are written by `examples/gen_seeds_m3.rs`
 (`cargo run --example gen_seeds_m3 -- corpus`); `wim_metadata` and
 `wim_apply_plan` also take the `usgp-image` example's seeds (see their
 `SOURCE.md`).
+
+## M4 run length
+
+Milestone M4 (plan WU-12) adds the nine targets above. The archive and
+inflate parsers (`zip_archive`, `cab_archive`, `inflate_diff`,
+`inf_version`) and `unattend_template` run for 600 seconds in the
+`fuzz-smoke` job, the others for 60 seconds, all with no crash, OOM or
+timeout.
+
+```sh
+cd fuzz
+cargo fuzz build
+L='-rss_limit_mb=2048 -timeout=10 -print_final_stats=1'
+for e in unattend_template:65536 zip_archive:65536 cab_archive:65536 \
+  inflate_diff:70000 inf_version:16384 dism_driver_table:65536 \
+  postsetup_msgs:16384 agent_package_manifest:16384 content_manifest_v2:65536; do
+  t="${e%%:*}"; mkdir -p "/tmp/work/$t"
+  cargo fuzz run "$t" "/tmp/work/$t" "corpus/$t" -- -max_total_time=600 -max_len="${e#*:}" $L
+done
+```
+
+`zip_archive` and `cab_archive` share their checks through
+`fuzz_targets/common/archive_checks.rs`. `inf_version` reaches the INF
+scan through the archive reader, which is the scan's only public entry.
+`inflate_diff` uses `miniz_oxide` (pure Rust) as the reference inflater;
+it is a dependency of this workspace only. `content_manifest_v2` uses a
+test-double signature verifier.
+
+M4 seeds are written by `examples/gen_seeds_m4.rs`
+(`cargo run --example gen_seeds_m4 -- corpus`).

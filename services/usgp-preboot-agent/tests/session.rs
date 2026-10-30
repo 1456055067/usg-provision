@@ -17,10 +17,10 @@ use usgp_preboot_agent::host::PowerAction;
 use usgp_preboot_agent::session::{Agent, Outcome, StopReason};
 use usgp_preboot_agent::sim::{SimDiskSpec, SimHost};
 use usgp_proto::device::{
-    ChoosePackageV1, ConfirmV1, ConfirmedV1, DeviceArch, DeviceHelloV1, DevicePackageListV1,
+    ChoosePackageV1, ConfirmV2, ConfirmedV2, DeviceArch, DeviceHelloV1, DevicePackageListV1,
     DiskRefusal, EndReason, EndSessionV1, SessionOpenedV1, SessionState, SessionStatusV1,
 };
-use usgp_proto::progress::{ProgressAckV1, ProgressV1};
+use usgp_proto::progress::{ProgressAckV1, ProgressV1, ProgressV2};
 use usgp_proto::{
     AuthCode, DiskDescriptorV1, DisplayCode, JobId, SessionId, SessionToken, UnixMicros, codes,
 };
@@ -116,9 +116,11 @@ impl DeviceApi for Fake {
         Ok(())
     }
 
-    fn confirm(&mut self, c: &ConfirmV1) -> Result<ConfirmedV1, ApiFailure> {
+    fn confirm(&mut self, c: &ConfirmV2) -> Result<ConfirmedV2, ApiFailure> {
         self.calls.push("confirm".into());
         assert_ne!(c.agent_nonce.as_bytes(), &[0u8; 32]);
+        // The job key's public half (M4): a P-384 SPKI generated here.
+        assert!(usgp_crypto::VerifyingKey::from_spki_der(c.job_key_spki_b64.as_der()).is_ok());
         Err(self
             .confirm_failure
             .clone()
@@ -141,6 +143,10 @@ impl DeviceApi for Fake {
     }
 
     fn report(&mut self, _: JobId, _: &ProgressV1) -> Result<ProgressAckV1, ApiFailure> {
+        panic!("no job runs in these tests");
+    }
+
+    fn report_v2(&mut self, _: JobId, _: &ProgressV2) -> Result<ProgressAckV1, ApiFailure> {
         panic!("no job runs in these tests");
     }
 
@@ -209,11 +215,13 @@ fn run(
         host.facts().unwrap()
     };
     let keys = keys();
+    let handoff = handoff();
     let end = Agent {
         api,
         host,
         console: &mut con,
         keys: &keys,
+        handoff: &handoff,
         crypto: usgp_crypto::provider(),
         clock: &clock,
     }
@@ -222,6 +230,16 @@ fn run(
     drv.drain();
     let echo = echo.lock().unwrap().clone();
     (end, drv.all(), echo)
+}
+
+fn handoff() -> usgp_preboot_agent::session::Handoff {
+    usgp_preboot_agent::session::Handoff {
+        server_url: "https://server.test".to_owned(),
+        server_name: "server.test".to_owned(),
+        trust_anchors_pem: String::new(),
+        plan_key_pem: String::new(),
+        tail: usgp_deploy::TailConfig::default(),
+    }
 }
 
 fn keys() -> usgp_deploy::PlanKeys {
@@ -282,6 +300,7 @@ fn approval_without_any_typing() {
     };
     let (mut con, mut drv, _) = console();
     let keys = keys();
+    let handoff = handoff();
     let clock = usgp_deploy::SystemClock::new();
     let end = std::thread::scope(|sc| {
         let agent = sc.spawn(|| {
@@ -290,6 +309,7 @@ fn approval_without_any_typing() {
                 host: &mut h,
                 console: &mut con,
                 keys: &keys,
+                handoff: &handoff,
                 crypto: usgp_crypto::provider(),
                 clock: &clock,
             }

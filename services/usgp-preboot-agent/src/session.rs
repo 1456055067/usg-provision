@@ -41,15 +41,21 @@
 
 use std::time::Duration;
 
-use usgp_crypto::CryptoProvider;
-use usgp_deploy::{Clock, Engine, PlanKeys, SignedJob, verify_plan};
+use usgp_crypto::{CryptoProvider, SigningKey};
+use usgp_deploy::{
+    Clock, Engine, JobFailureV2, PlanKeys, PostSetupInputs, TailConfig, verify_plan_v2,
+};
 use usgp_proto::device::{
-    ChoosePackageV1, ConfirmV1, DeviceArch, DeviceHelloV1, DevicePackageV1, EndReason,
+    ChoosePackageV1, ConfirmV2, DeviceArch, DeviceHelloV1, DevicePackageV1, EndReason,
     EndSessionV1, FirmwareKind, MacAddress, SCHEMA_V1, SessionOpenedV1, SessionState,
     WipeConfirmation,
 };
-use usgp_proto::job_plan::{JobPlanV1, PlanExpectation};
-use usgp_proto::{AgentNonce, AgentVersion, AuthCode, DiskToken, JobId, MacList, codes};
+use usgp_proto::job_plan::{
+    JobPlanV1, JobPlanV2, PlanContentV2, PlanExpectation, PlanExpectationV2,
+};
+use usgp_proto::progress::{FailureCategory, StepV2};
+use usgp_proto::{AgentNonce, AgentVersion, AuthCode, DiskToken, JobId, MacList, P384Spki, codes};
+use zeroize::Zeroizing;
 
 use crate::client::{ApiFailure, DeviceApi};
 use crate::disks::{DiskEntry, Inventory};
@@ -145,6 +151,68 @@ pub struct Ending {
     pub action: Option<PowerAction>,
 }
 
+/// What the post-setup runner needs that is not in the signed plan (M4
+/// plan §1.2): copied into `job.json` at step 5. Public, non-secret.
+#[derive(Debug, Clone)]
+pub struct Handoff {
+    /// The server URL as configured.
+    pub server_url: String,
+    /// The name the server certificate must carry.
+    pub server_name: String,
+    /// PEM text of the server trust anchors.
+    pub trust_anchors_pem: String,
+    /// PEM text of the plan public key.
+    pub plan_key_pem: String,
+    /// Settings for steps 4 to 6.
+    pub tail: TailConfig,
+}
+
+impl Handoff {
+    /// From the agent configuration. `None` if the trust anchors are not
+    /// text (they cannot then be PEM).
+    #[must_use]
+    pub fn from_config(c: &crate::config::AgentConfig) -> Option<Self> {
+        Some(Self {
+            server_url: c.server_url.clone(),
+            server_name: c.endpoint.server_name.clone(),
+            trust_anchors_pem: String::from_utf8(c.trust_anchors_pem.clone()).ok()?,
+            plan_key_pem: c.plan_key_pem.clone(),
+            tail: TailConfig::default(),
+        })
+    }
+}
+
+/// The job key generated at confirm (M4 plan §0 item 2): its public half
+/// goes to the server; its PKCS#8 form stays in memory, zeroized, until
+/// step 5 writes it (SYSTEM only) for the post-setup runner.
+struct JobKey {
+    spki: P384Spki,
+    id: usgp_common::Sha256Digest,
+    pkcs8: Zeroizing<Vec<u8>>,
+}
+
+impl JobKey {
+    fn generate() -> Option<Self> {
+        let k = SigningKey::generate().ok()?;
+        let spki = P384Spki::from_der(k.verifying_key().spki_der()).ok()?;
+        let pkcs8 = k.to_pkcs8_der().ok()?;
+        Some(Self {
+            spki,
+            id: k.key_id().0,
+            pkcs8,
+        })
+    }
+}
+
+/// What the confirmation produced, for the job.
+#[derive(Clone, Copy)]
+struct Confirmation<'c> {
+    desc: &'c usgp_proto::DiskDescriptorV1,
+    nonce: &'c AgentNonce,
+    job_key: &'c JobKey,
+    confirmed: &'c usgp_proto::device::ConfirmedV2,
+}
+
 /// One device session.
 pub struct Agent<'a> {
     /// The server.
@@ -155,6 +223,8 @@ pub struct Agent<'a> {
     pub console: &'a mut dyn Console,
     /// The pinned plan and content keys.
     pub keys: &'a PlanKeys,
+    /// What the post-setup runner needs (M4).
+    pub handoff: &'a Handoff,
     /// The FIPS provider.
     pub crypto: &'a dyn CryptoProvider,
     /// The engine's clock.
@@ -663,12 +733,23 @@ impl Agent<'_> {
             ));
         }
         let nonce = AgentNonce::from_random_bytes(nb);
-        let req = ConfirmV1 {
+        // COMPLIANCE MAPPING:
+        // - NIST 800-53: IA-3, SC-12 - the job key is generated here, on the
+        //   device; only its public half leaves (M4 plan §0 item 2).
+        // - DECISION: docs/decisions/0024
+        let Some(job_key) = JobKey::generate() else {
+            return Ok(self.agent_error(
+                "Cannot confirm",
+                "The job key could not be generated.".to_owned(),
+            ));
+        };
+        let req = ConfirmV2 {
             package_id: pkg.package_id,
             revision: pkg.revision,
             disk_token: e.token,
             confirm: WipeConfirmation::WipeDisk,
             agent_nonce: nonce,
+            job_key_spki_b64: job_key.spki.clone(),
         };
         let confirmed = match self.api.confirm(&req) {
             Ok(c) => c,
@@ -715,7 +796,13 @@ impl Agent<'_> {
                 ));
             }
         };
-        Ok(self.run_job(opened, pkg, e, &desc, &nonce, &confirmed))
+        let c = Confirmation {
+            desc: &desc,
+            nonce: &nonce,
+            job_key: &job_key,
+            confirmed: &confirmed,
+        };
+        Ok(self.run_job(opened, pkg, e, &c))
     }
 
     fn run_job(
@@ -723,67 +810,89 @@ impl Agent<'_> {
         opened: &SessionOpenedV1,
         pkg: &DevicePackageV1,
         e: &DiskEntry,
-        desc: &usgp_proto::DiskDescriptorV1,
-        nonce: &AgentNonce,
-        confirmed: &usgp_proto::device::ConfirmedV1,
+        c: &Confirmation<'_>,
     ) -> Ending {
-        let expect = PlanExpectation {
-            agent_nonce: nonce,
-            session_id: opened.session_id,
-            job_id: confirmed.job_id,
-            package_id: pkg.package_id,
-            package_revision: pkg.revision,
-            disk: desc,
+        let Confirmation {
+            desc,
+            nonce,
+            job_key,
+            confirmed,
+        } = *c;
+        let expect = PlanExpectationV2 {
+            base: PlanExpectation {
+                agent_nonce: nonce,
+                session_id: opened.session_id,
+                job_id: confirmed.job_id,
+                package_id: pkg.package_id,
+                package_revision: pkg.revision,
+                disk: desc,
+            },
+            job_key_id: job_key.id,
+        };
+        let content = PlanContentV2 {
+            image: &confirmed.content_manifest,
+            drivers: &confirmed.driver_manifests,
+            agent: &confirmed.agent_manifest,
         };
         let engine = Engine::new(self.crypto, self.clock, self.host.engine_config());
-        // Verify first so the waits can be sized from the signed plan; a
-        // plan that does not verify goes through `verify_and_run`, which
-        // shows and reports the integrity failure and touches nothing.
-        let verified = verify_plan(
-            &confirmed.plan,
-            &confirmed.content_manifest,
-            self.keys,
-            &expect,
-            self.crypto,
-        )
-        .ok();
-        let budget = verified.as_ref().map_or_else(WaitBudget::default, |v| {
-            let (request, io, budget) = budgets(v.plan());
-            self.api.bound_waits(request, io);
-            budget
-        });
+        // Verify first, so the waits can be sized from the signed plan and
+        // nothing is opened for a plan that does not verify.
+        let verified = verify_plan_v2(&confirmed.plan, &content, self.keys, &expect, self.crypto);
+        let budget = verified.as_ref().map_or_else(
+            |_| WaitBudget::default(),
+            |v| {
+                let (request, io, budget) = budgets_v2(v.plan());
+                self.api.bound_waits(request, io);
+                budget
+            },
+        );
         let job_id = confirmed.job_id;
+        let trust_anchors_pem = self.handoff.trust_anchors_pem.clone();
+        let inputs = PostSetupInputs {
+            server_url: &self.handoff.server_url,
+            server_name: &self.handoff.server_name,
+            trust_anchors_pem: &trust_anchors_pem,
+            plan_key_pem: &self.handoff.plan_key_pem,
+            plan_envelope: &confirmed.plan,
+            job_key_pkcs8: &job_key.pkcs8,
+        };
+        let tail = self.handoff.tail.clone();
         let mut link = ApiLink::new(&mut *self.api);
-        let result = match self.host.platform(e, budget) {
-            // The engine could not start: it reports its own step-1
-            // failure (local, internal, nothing written) and shows it.
-            Err(err) => {
+        let result = match &verified {
+            // The plan did not verify: shown and reported as a step 1
+            // integrity failure; nothing is opened.
+            Err(pe) => {
                 let mut view = ConsoleView::new(&mut *self.console);
-                Err(engine.fail_before_start(
+                Err(engine.fail_before_start_v2(
+                    before_start(pe.category(), pe.code(), pe.to_string()),
                     job_id,
-                    verified.as_ref(),
-                    &format!("The disk platform could not be prepared: {err}"),
+                    None,
                     &mut link,
                     &mut view,
                 ))
             }
-            Ok(mut platform) => {
-                let mut view = ConsoleView::new(&mut *self.console);
-                match &verified {
-                    Some(v) => engine.run(v, &mut *platform, &mut link, &mut view),
-                    None => engine.verify_and_run(
-                        &SignedJob {
-                            plan: &confirmed.plan,
-                            content: &confirmed.content_manifest,
-                            keys: self.keys,
-                            expect,
-                        },
-                        &mut *platform,
+            Ok(v) => match self.host.platform(e, budget) {
+                // The engine could not start: its own step-1 failure
+                // (local, internal, nothing written), shown and reported.
+                Err(err) => {
+                    let mut view = ConsoleView::new(&mut *self.console);
+                    Err(engine.fail_before_start_v2(
+                        before_start(
+                            FailureCategory::Local,
+                            codes::INTERNAL,
+                            format!("The disk platform could not be prepared: {err}"),
+                        ),
+                        job_id,
+                        Some(&v.plan().retry),
                         &mut link,
                         &mut view,
-                    ),
+                    ))
                 }
-            }
+                Ok(mut platform) => {
+                    let mut view = ConsoleView::new(&mut *self.console);
+                    engine.run_v2(v, &tail, &inputs, &mut *platform, &mut link, &mut view)
+                }
+            },
         };
         let token_refused = link.saw_unauthorised();
         match result {
@@ -806,7 +915,7 @@ impl Agent<'_> {
                      list."
                         .to_owned(),
                 ];
-                lines.extend(ui::failure_lines(&f));
+                lines.extend(ui::failure_lines_v2(&f));
                 lines.push(format!("Code: {SESSION_NOT_ACCEPTED}"));
                 self.stop(
                     "The server no longer accepts this device's session",
@@ -852,11 +961,45 @@ fn hello(f: &HostFacts) -> Result<DeviceHelloV1, &'static str> {
 /// POAM: the engine checks its limits only between calls).
 #[must_use]
 pub fn budgets(p: &JobPlanV1) -> (Duration, Duration, WaitBudget) {
-    let shortest = p
-        .steps
-        .iter()
-        .map(|s| s.timeout_s)
-        .chain(std::iter::once(p.stall_timeout_s))
+    budgets_from(p.steps.iter().map(|s| s.timeout_s), p.stall_timeout_s)
+}
+
+/// [`budgets`] for a v2 plan: the steps that run in Windows PE (1 to 6).
+#[must_use]
+pub fn budgets_v2(p: &JobPlanV2) -> (Duration, Duration, WaitBudget) {
+    budgets_from(
+        p.steps
+            .iter()
+            .filter(|s| s.step.get() <= StepV2::MAKE_BOOTABLE_RESTART.get())
+            .map(|s| s.timeout_s),
+        p.stall_timeout_s,
+    )
+}
+
+/// A v2 failure before the engine started: step 1, nothing written.
+fn before_start(
+    category: FailureCategory,
+    code: usgp_proto::ErrorCode,
+    message: String,
+) -> JobFailureV2 {
+    JobFailureV2 {
+        step: StepV2::VERIFY_CONTENT,
+        category,
+        code,
+        files: Vec::new(),
+        count: 0,
+        attempts: 1,
+        message,
+        disk_written: false,
+    }
+}
+
+fn budgets_from(
+    timeouts: impl Iterator<Item = u32>,
+    stall_timeout_s: u32,
+) -> (Duration, Duration, WaitBudget) {
+    let shortest = timeouts
+        .chain(std::iter::once(stall_timeout_s))
         .min()
         .unwrap_or(1);
     let half = Duration::from_secs(u64::from(shortest) / 2).max(Duration::from_secs(1));

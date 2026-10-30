@@ -94,7 +94,7 @@ use crate::bootentry::{BootEntry, make_windows_first};
 use crate::clock::{Clock, TimeLimit, Watch};
 use crate::content::{ChunkError, FetchHook, VerifiedChunks, chunk_code};
 use crate::error::{JobFailure, JobFailureV2, code, code_of};
-use crate::link::{LinkError, ServerLink, ServerLinkV2};
+use crate::link::{LinkError, ProgressLinkV2, ServerLink, ServerLinkV2};
 use crate::plan::{PlanKeys, verify_plan};
 use crate::platform::{FormattedVolume, Platform, PlatformError, PlatformErrorKind, VolumeSpec};
 use crate::report::Reporter;
@@ -577,6 +577,41 @@ impl<'a> Engine<'a> {
                 Err(f)
             }
         }
+    }
+}
+
+impl Engine<'_> {
+    /// Reports and shows a v2 job's failure before [`Engine::run_v2`] could
+    /// start: the plan did not verify, or the platform could not be
+    /// prepared. Nothing was opened or written. Shown on `view` and
+    /// reported as `failed` (best effort) with `retry`, or with
+    /// [`EngineConfig::unverified_report_retry`] when the plan did not
+    /// verify. `failure` must hold no secret (M4 WU-10; the v2 form of
+    /// [`Engine::fail_before_start`]).
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SI-11 (Error Handling), AU-12 - the server records
+    //   the failed job; the device keeps showing it.
+    // - SPEC: specs/progress.md#REQ-JOB-005
+    pub fn fail_before_start_v2(
+        &self,
+        failure: JobFailureV2,
+        job_id: JobId,
+        retry: Option<&RetryPolicyV1>,
+        link: &mut dyn ProgressLinkV2,
+        view: &mut dyn JobView,
+    ) -> JobFailureV2 {
+        view.show(&ViewEvent::FailedV2(&failure));
+        let retry = retry.unwrap_or(&self.config.unverified_report_retry);
+        let mut rep = ReporterV2::new(job_id, 0);
+        // Best effort: the device shows the failure either way.
+        let _ = rep.deliver(
+            link,
+            self.clock,
+            retry,
+            None,
+            Must::failed(failure.to_wire()),
+        );
+        failure
     }
 }
 

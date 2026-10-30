@@ -36,6 +36,8 @@ mod jobs;
 #[cfg(test)]
 mod limits;
 #[cfg(test)]
+mod m4;
+#[cfg(test)]
 mod packages;
 #[cfg(test)]
 mod qa_m2;

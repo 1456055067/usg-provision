@@ -87,15 +87,23 @@ pub(crate) async fn claims_free<T: RepoTx>(
     let running: Vec<JobId> = tx.running_jobs_for_macs(macs).await?;
     let mut others = Vec::with_capacity(running.len());
     for id in running {
-        let Some(j) = tx.job(id).await? else {
-            continue;
-        };
-        if j.session_id == own {
-            continue;
-        }
-        let steps = tx.job_steps(id).await?;
-        if overdue(&j, &steps, at).is_none() {
-            others.push(id);
+        if let Some(j) = tx.job(id).await? {
+            if j.session_id == own {
+                continue;
+            }
+            let steps = tx.job_steps(id).await?;
+            if overdue(&j, &steps, at).is_none() {
+                others.push(id);
+            }
+        } else if let Some(j) = tx.job_v2(id).await? {
+            // M4: a nine-step job holds its MACs the same way.
+            if j.session_id == own {
+                continue;
+            }
+            let steps = tx.job_steps_v2(id).await?;
+            if super::job_v2::overdue_v2(&j, &steps, at).is_none() {
+                others.push(id);
+            }
         }
     }
     if stops.is_empty() && others.is_empty() {
@@ -134,7 +142,7 @@ pub(crate) async fn claims_free<T: RepoTx>(
     ))
 }
 
-fn mismatch(what: &str) -> ApiError {
+pub(crate) fn mismatch(what: &str) -> ApiError {
     ApiError::conflict(
         codes::WRONG_STATE,
         format!("the confirmation does not match the chosen {what}; choose again"),
@@ -172,6 +180,10 @@ pub(crate) async fn confirm<S: Store + 'static>(
     let keys = api.provisioning_keys().ok_or_else(keys_unavailable)?;
     let c = &api.config().device;
     let body = read_body(req, c.max_json_bytes).await?;
+    // M4: an agent that sends a job key gets a v2 (nine-step) plan.
+    if super::confirm_v2::is_v2(&body) {
+        return super::confirm_v2::confirm(api, ctx, &body).await;
+    }
     let confirm = parse_device_json!(ConfirmV1, &body, c.max_json_bytes)?;
     let at = api.now()?;
     let job_id = JobId::from_random_bytes(random::<16>()?);

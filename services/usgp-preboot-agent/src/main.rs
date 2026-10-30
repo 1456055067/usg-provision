@@ -4,7 +4,14 @@
 //! usgp-preboot-agent [--config <agent.toml>]     run (default: agent.toml next to the program)
 //! usgp-preboot-agent --self-test                 FIPS self-test; exit 0 only in FIPS mode
 //! usgp-preboot-agent --config <f> --sim <sim>    the simulated platform (CI; non-Windows or `sim`)
+//! usgp-agent.exe postsetup                       job steps 7 to 9 in the installed Windows (M4)
 //! ```
+//!
+//! `postsetup` (M4 plan §1.2) is started by our `SetupComplete.cmd` as
+//! SYSTEM from `%ProgramData%\usgp\postsetup\` and must be the only
+//! argument. It needs no console and never restarts the machine; its
+//! outcome is reported to the server and recorded in
+//! `%ProgramData%\usgp\postsetup-error.txt` on failure ([`postsetup`]).
 //!
 //! Start-up refusals come in two kinds:
 //!
@@ -34,23 +41,35 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use usgp_preboot_agent::host::{Host, PowerAction};
+#[cfg(windows)]
+use usgp_preboot_agent::postsetup;
 use usgp_preboot_agent::session::Outcome;
 use usgp_preboot_agent::ui::StdConsole;
 use usgp_preboot_agent::{app, config, selftest};
 
-const USAGE: &str = "usage: usgp-preboot-agent [--config <agent.toml>] [--sim <sim.toml>] | --self-test | --version";
+const USAGE: &str = "usage: usgp-preboot-agent [--config <agent.toml>] [--sim <sim.toml>] | --self-test | --version | postsetup";
 
 #[derive(Debug, Default)]
 struct Args {
     self_test: bool,
     version: bool,
+    postsetup: bool,
     config: Option<PathBuf>,
     sim: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args::default();
-    let mut it = std::env::args_os().skip(1);
+    let mut it = std::env::args_os().skip(1).peekable();
+    // `postsetup` is a mode of its own: the only argument.
+    if it.peek().and_then(|f| f.to_str()) == Some("postsetup") {
+        let _ = it.next();
+        if it.next().is_some() {
+            return Err(USAGE.to_owned());
+        }
+        a.postsetup = true;
+        return Ok(a);
+    }
     while let Some(arg) = it.next() {
         match arg.to_str() {
             Some("--self-test") => a.self_test = true,
@@ -75,8 +94,8 @@ const POWER_GRACE: std::time::Duration = std::time::Duration::from_secs(300);
 #[cfg(windows)]
 const PANIC_HOLD: std::time::Duration = std::time::Duration::from_secs(600);
 
-fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|info| {
+fn install_panic_hook(hold: bool) {
+    std::panic::set_hook(Box::new(move |info| {
         let place = info
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))
@@ -87,9 +106,14 @@ fn install_panic_hook() {
             "\n\nINTERNAL ERROR in usgp-preboot-agent ({place}).\n\
              The install stopped. Report this to the operator, then restart the device."
         );
-        // Windows PE: keep the message readable, bounded.
+        // Windows PE: keep the message readable, bounded. Not in
+        // `postsetup`, where nobody watches and Setup waits for the script.
         #[cfg(windows)]
-        std::thread::sleep(PANIC_HOLD);
+        if hold {
+            std::thread::sleep(PANIC_HOLD);
+        }
+        #[cfg(not(windows))]
+        let _ = hold;
     }));
 }
 
@@ -134,15 +158,67 @@ fn default_config() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("agent.toml"))
 }
 
+/// The `postsetup` mode on the installed Windows.
+#[cfg(windows)]
+fn run_postsetup() -> ExitCode {
+    let mut platform = match usgp_preboot_agent::postsetup_win::open() {
+        Ok(p) => p,
+        Err(e) => {
+            // No folder to record in: the server's deadline sweep fails the
+            // job (M4 plan §1.2).
+            eprintln!("usgp-agent postsetup: cannot start: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let clock = usgp_deploy::SystemClock::new();
+    let out = postsetup::run(
+        &mut platform,
+        usgp_crypto::provider(),
+        &clock,
+        usgp_deploy::RunnerConfig::default(),
+    );
+    report_postsetup(&out);
+    ExitCode::from(out.exit_code())
+}
+
+#[cfg(not(windows))]
+fn run_postsetup() -> ExitCode {
+    eprintln!("usgp-agent postsetup: this mode runs only in the installed Windows");
+    ExitCode::from(3)
+}
+
+/// One summary line on standard output (no secret: job id, flags, code).
+#[cfg(windows)]
+fn report_postsetup(out: &postsetup::PostSetupOutcome) {
+    match out {
+        postsetup::PostSetupOutcome::Ready(r) => println!(
+            "postsetup: job {} ready (password set: {}, restart pending: {})",
+            r.job_id, r.password_set, r.restart_pending
+        ),
+        postsetup::PostSetupOutcome::NotFips => println!("postsetup: FIPS mode is not active"),
+        postsetup::PostSetupOutcome::Failed(f) => {
+            println!(
+                "postsetup: failed at step {} ({})",
+                f.step.get(),
+                f.code.as_str()
+            );
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    install_panic_hook();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
+            install_panic_hook(false);
             eprintln!("{e}");
             return ExitCode::from(1);
         }
     };
+    install_panic_hook(!args.postsetup);
+    if args.postsetup {
+        return run_postsetup();
+    }
     if args.version {
         println!("usgp-preboot-agent {}", usgp_preboot_agent::AGENT_VERSION);
         return ExitCode::SUCCESS;

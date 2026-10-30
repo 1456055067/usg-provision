@@ -1,0 +1,1 @@
+{"installer":"a.exe","args":["/S","/norestart"],"success_exit_codes":[0,3010],"timeout_s":3600,"service_name":"agentsvc"}

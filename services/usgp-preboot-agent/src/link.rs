@@ -16,12 +16,13 @@
 //   not)
 
 use usgp_common::Sha256Digest;
-use usgp_deploy::{LinkError, ServerLink};
-use usgp_proto::JobId;
-use usgp_proto::codes;
-use usgp_proto::progress::{ProgressAckV1, ProgressV1};
+use usgp_deploy::{LinkError, ProgressLinkV2, ResumeLink, ServerLink};
+use usgp_proto::progress::{ProgressAckV1, ProgressV1, ProgressV2};
+use usgp_proto::{
+    EscrowConfirmV1, EscrowSubmitV1, JobId, ResumeChallengeV1, ResumeRequestV1, codes,
+};
 
-use crate::client::{ApiFailure, DeviceApi};
+use crate::client::{ApiFailure, DeviceApi, PostSetupApi};
 
 /// [`ServerLink`] over a [`DeviceApi`].
 pub struct ApiLink<'a> {
@@ -104,6 +105,56 @@ impl ServerLink for ApiLink<'_> {
     }
 }
 
+impl ProgressLinkV2 for ApiLink<'_> {
+    fn report_v2(&mut self, job: JobId, report: &ProgressV2) -> Result<ProgressAckV1, LinkError> {
+        let r = self.api.report_v2(job, report);
+        self.note(r)
+    }
+}
+
+/// The post-setup runner's [`ResumeLink`] over a [`PostSetupApi`] (M4
+/// plan §3.1). The resume token stays inside the API client.
+pub struct ResumeApiLink<'a> {
+    api: &'a mut dyn PostSetupApi,
+}
+
+impl std::fmt::Debug for ResumeApiLink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResumeApiLink").finish_non_exhaustive()
+    }
+}
+
+impl<'a> ResumeApiLink<'a> {
+    /// A link over `api`.
+    pub fn new(api: &'a mut dyn PostSetupApi) -> Self {
+        Self { api }
+    }
+}
+
+impl ProgressLinkV2 for ResumeApiLink<'_> {
+    fn report_v2(&mut self, job: JobId, report: &ProgressV2) -> Result<ProgressAckV1, LinkError> {
+        self.api.report_v2(job, report).map_err(|e| classify(&e))
+    }
+}
+
+impl ResumeLink for ResumeApiLink<'_> {
+    fn challenge(&mut self, job: JobId) -> Result<ResumeChallengeV1, LinkError> {
+        self.api.challenge(job).map_err(|e| classify(&e))
+    }
+
+    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<u64, LinkError> {
+        self.api.resume(job, req).map_err(|e| classify(&e))
+    }
+
+    fn submit_escrow(&mut self, job: JobId, body: &EscrowSubmitV1) -> Result<(), LinkError> {
+        self.api.submit_escrow(job, body).map_err(|e| classify(&e))
+    }
+
+    fn confirm_escrow(&mut self, job: JobId, body: &EscrowConfirmV1) -> Result<(), LinkError> {
+        self.api.confirm_escrow(job, body).map_err(|e| classify(&e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,8 +224,8 @@ mod tests {
         }
         fn confirm(
             &mut self,
-            _: &usgp_proto::device::ConfirmV1,
-        ) -> Result<usgp_proto::device::ConfirmedV1, ApiFailure> {
+            _: &usgp_proto::device::ConfirmV2,
+        ) -> Result<usgp_proto::device::ConfirmedV2, ApiFailure> {
             Err(self.0.clone())
         }
         fn cancel(&mut self) -> Result<(), ApiFailure> {
@@ -192,6 +243,9 @@ mod tests {
             Err(self.0.clone())
         }
         fn report(&mut self, _: JobId, _: &ProgressV1) -> Result<ProgressAckV1, ApiFailure> {
+            Err(self.0.clone())
+        }
+        fn report_v2(&mut self, _: JobId, _: &ProgressV2) -> Result<ProgressAckV1, ApiFailure> {
             Err(self.0.clone())
         }
         fn bound_waits(&mut self, _: std::time::Duration, _: std::time::Duration) {}

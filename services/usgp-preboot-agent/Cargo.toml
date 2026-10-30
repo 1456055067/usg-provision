@@ -23,6 +23,8 @@ usgp-proto.workspace = true
 usgp-deploy.workspace = true
 usgp-disk.workspace = true
 usgp-image.workspace = true
+# M4 WU-10: the bounded archive reader's sink and `ReadAt` traits (pure Rust).
+usgp-wincfg.workspace = true
 # Plan section 4: the blocking HTTP/1.1 client parses responses with
 # httparse only (no tokio networking in the agent, REL-M3-W0-004).
 httparse.workspace = true
@@ -43,6 +45,11 @@ usgp-deploy = { workspace = true, features = ["sim"] }
 [features]
 # The simulated platform on any target (tests only; never in a release build).
 sim = ["usgp-deploy/sim"]
+
+# The archive testkit's ZIP writer for the extraction tests (every target;
+# pure Rust, test only).
+[dev-dependencies]
+usgp-wincfg = { workspace = true, features = ["testkit"] }
 
 # In-process server tests run on the CI hosts only. Kept off the Windows
 # target so the agent's Windows test build never gets tokio networking

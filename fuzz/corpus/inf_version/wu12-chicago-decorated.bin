@@ -1,0 +1,4 @@
+[version]
+signature=$CHICAGO$
+CatalogFile.NTamd64 = y.cat ; comment
+CatalogFile=x.cat

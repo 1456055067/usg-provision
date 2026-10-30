@@ -37,22 +37,26 @@ pub use m4::{
     SealedPassword, SignerRevocation, config_value_ok, device_value_key_ok,
 };
 
-/// Role of an operator (M2 has one built-in role, REQ-RBAC-004).
+/// Role of an operator (M2 has one built-in role, REQ-RBAC-004; M4 adds
+/// `escrow_officer`, M4 plan section 1.3 and follow-up U-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperatorRole {
-    /// Holds every permission.
+    /// Holds every permission but the escrow reveal (`usgp-api::rbac`).
     Administrator,
+    /// Holds the escrow reveal and job view only (M4).
+    EscrowOfficer,
 }
 
 impl OperatorRole {
-    /// Every value (database check constraint).
-    pub const ALL: &'static [Self] = &[Self::Administrator];
+    /// Every value (database check constraint of migration 0005).
+    pub const ALL: &'static [Self] = &[Self::Administrator, Self::EscrowOfficer];
 
     /// Stored text.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Administrator => "administrator",
+            Self::EscrowOfficer => "escrow_officer",
         }
     }
 
@@ -61,6 +65,7 @@ impl OperatorRole {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "administrator" => Some(Self::Administrator),
+            "escrow_officer" => Some(Self::EscrowOfficer),
             _ => None,
         }
     }

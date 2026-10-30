@@ -29,7 +29,10 @@ use std::fmt;
 use usgp_common::Sha256Digest;
 use usgp_crypto::{CryptoProvider, VerifyingKey, verify_signing_input};
 use usgp_proto::envelope::{SignatureAlg, SignatureVerifier, SignedEnvelopeV1};
-use usgp_proto::job_plan::{PlanError, PlanExpectation, VerifiedJobPlan};
+use usgp_proto::job_plan::{
+    PlanContentV2, PlanError, PlanExpectation, PlanExpectationV2, VerifiedJobPlan,
+    VerifiedJobPlanV2,
+};
 
 /// One pinned ECDSA P-384 public key. Verifies only signatures that name
 /// its own key id, with the one algorithm we use.
@@ -101,4 +104,23 @@ pub fn verify_plan(
 ) -> Result<VerifiedJobPlan, PlanError> {
     let sha256 = |b: &[u8]| crypto.sha256(b);
     VerifiedJobPlan::verify(plan, &keys.plan, content, &keys.content, &sha256, expect)
+}
+
+/// The v2 checks (`VerifiedJobPlanV2::verify`: the v1 checks, the job key,
+/// the escrow key id, the answer file and every driver and agent
+/// manifest), in order, stopping at the first failure. Nothing is written
+/// by the caller unless this succeeds (M4 WU-10).
+///
+/// # Errors
+///
+/// [`PlanError`] naming the check that failed.
+pub fn verify_plan_v2(
+    plan: &SignedEnvelopeV1,
+    content: &PlanContentV2<'_>,
+    keys: &PlanKeys,
+    expect: &PlanExpectationV2<'_>,
+    crypto: &dyn CryptoProvider,
+) -> Result<VerifiedJobPlanV2, PlanError> {
+    let sha256 = |b: &[u8]| crypto.sha256(b);
+    VerifiedJobPlanV2::verify(plan, &keys.plan, content, &keys.content, &sha256, expect)
 }

@@ -30,7 +30,7 @@ use usgp_crypto::test_pki::{LeafSpec, TestCert, TestPki};
 use usgp_crypto::tls::{
     ClientTls, DeviceServerTls, DeviceServerTlsSettings, ServerTls, TlsMinVersion,
 };
-use usgp_crypto::{HmacKey, SigningKey, VerifyingKey};
+use usgp_crypto::{EscrowKey, EscrowPublicKey, HmacKey, SigningKey, VerifyingKey};
 use usgp_db::BootService;
 use usgp_db::{MemoryStore, Operator, OperatorRole, OperatorStatus, RepoTx, Store};
 use usgp_image::facts::{FileFact, FileFacts};
@@ -148,6 +148,8 @@ pub enum Who {
     Unknown,
     /// No certificate.
     Anonymous,
+    /// An escrow officer (M4).
+    Officer,
 }
 
 /// A response.
@@ -217,6 +219,10 @@ pub struct Harness {
     pub plan_pub: VerifyingKey,
     /// The boot-policy key's public half (what the relay pins).
     pub policy_pub: VerifyingKey,
+    /// The escrow officer's certificate (M4).
+    pub officer: TestCert,
+    /// The escrow key's public half (what a v2 plan carries, M4).
+    pub escrow_pub: EscrowPublicKey,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     device_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -300,6 +306,10 @@ impl Harness {
             .intermediate
             .issue(&LeafSpec::client("operator two"))
             .unwrap();
+        let officer = pki
+            .intermediate
+            .issue(&LeafSpec::client("operator officer"))
+            .unwrap();
 
         let store = MemoryStore::new();
         let now = std::time::SystemTime::now()
@@ -345,6 +355,13 @@ impl Harness {
                 OperatorStatus::Disabled,
                 3,
             ),
+            operator(
+                &officer,
+                "Escrow Officer",
+                Some(OperatorRole::EscrowOfficer),
+                OperatorStatus::Active,
+                5,
+            ),
         ] {
             tx.insert_operator(&op).await.unwrap();
             let d = AuditDraft::new(
@@ -379,9 +396,12 @@ impl Harness {
             Some(c) => c,
             None => Arc::clone(&fake) as Arc<dyn ContentChecker>,
         };
+        let escrow_key = EscrowKey::generate().unwrap();
+        let escrow_pub = escrow_key.public();
         let api = Api::builder(store.clone(), config, chain, keys)
             .checker(checker)
             .provisioning_keys(provisioning)
+            .escrow_keys(usgp_api::EscrowKeys::new(escrow_key, Vec::new()).unwrap())
             .build()
             .unwrap();
 
@@ -442,6 +462,8 @@ impl Harness {
             device_addr,
             plan_pub,
             policy_pub,
+            officer,
+            escrow_pub,
             shutdown: Some(tx_s),
             device_shutdown: Some(dtx_s),
         }
@@ -455,6 +477,7 @@ impl Harness {
             Who::Disabled => Some(&self.disabled),
             Who::Unknown => Some(&self.unknown),
             Who::Anonymous => None,
+            Who::Officer => Some(&self.officer),
         }
     }
 
@@ -829,6 +852,7 @@ impl Harness {
                 c.device.max_pending_sessions_per_ip = 64;
                 c.device.session_opens_per_ip_per_min = 1000;
                 c.device.code_attempts_per_ip_per_min = 1000;
+                c.device.m4.resume_challenges_per_ip_per_min = 1000;
             }),
             ..Opts::default()
         })

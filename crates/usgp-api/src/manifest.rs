@@ -130,6 +130,20 @@ pub fn open_content(
     ContentManifestV1::open(&env, keys)
 }
 
+/// As [`open_content`] for a driver archive or agent package (M4,
+/// `ContentManifestV2`).
+///
+/// # Errors
+///
+/// [`SignedManifestError`].
+pub fn open_content_v2(
+    keys: &ContentKeys,
+    m: &StoredManifest,
+) -> Result<usgp_proto::ContentManifestV2, SignedManifestError> {
+    let env = envelope(PayloadType::ContentManifestV2, m)?;
+    usgp_proto::ContentManifestV2::open(&env, keys)
+}
+
 /// As [`open_content`] for a package manifest.
 ///
 /// # Errors

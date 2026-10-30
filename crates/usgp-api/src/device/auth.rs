@@ -65,9 +65,9 @@ use std::net::IpAddr;
 use hyper::StatusCode;
 use hyper::header::{self, HeaderMap};
 use usgp_audit::{Actor, AuditDraft, Detail, Interface, Outcome};
-use usgp_db::{DbError, DeviceSession, Job, RepoTx, Store, source_network};
+use usgp_db::{DbError, DeviceSession, Job, JobV2, RepoTx, Store, source_network};
 use usgp_proto::device::SessionState;
-use usgp_proto::{SessionId, SessionToken, UnixMicros, codes};
+use usgp_proto::{JobId, SessionId, SessionToken, UnixMicros, codes};
 
 use super::routes::DeviceRoute;
 use crate::context::{Api, system_draft};
@@ -118,13 +118,38 @@ pub(crate) fn pending_due(s: &DeviceSession, at: UnixMicros, idle: std::time::Du
 ///   read its status, then nothing).
 #[must_use]
 pub fn confirmed_lapse_at(job: &Job, lost_after: std::time::Duration) -> UnixMicros {
-    match job.finished_at {
-        Some(f) if job.state.is_final() => plus(f, lost_after),
+    lapse_at(
+        job.state,
+        job.finished_at,
+        job.last_report_at,
+        job.started_at,
+        lost_after,
+    )
+}
+
+/// As [`confirmed_lapse_at`] for a v2 (nine-step) job (M4).
+#[must_use]
+pub fn confirmed_lapse_at_v2(job: &JobV2, lost_after: std::time::Duration) -> UnixMicros {
+    lapse_at(
+        job.state,
+        job.finished_at,
+        job.last_report_at,
+        job.started_at,
+        lost_after,
+    )
+}
+
+fn lapse_at(
+    state: usgp_proto::JobState,
+    finished_at: Option<UnixMicros>,
+    last_report_at: Option<UnixMicros>,
+    started_at: UnixMicros,
+    lost_after: std::time::Duration,
+) -> UnixMicros {
+    match finished_at {
+        Some(f) if state.is_final() => plus(f, lost_after),
         _ => {
-            let heard = job
-                .last_report_at
-                .unwrap_or(job.started_at)
-                .max(job.started_at);
+            let heard = last_report_at.unwrap_or(started_at).max(started_at);
             plus(plus(heard, lost_after), lost_after)
         }
     }
@@ -135,6 +160,17 @@ pub fn confirmed_lapse_at(job: &Job, lost_after: std::time::Duration) -> UnixMic
 #[must_use]
 pub fn same_source_network(s: &DeviceSession, ip: IpAddr) -> bool {
     source_network(s.source_ip) == source_network(ip)
+}
+
+/// A request authenticated by a job-scoped resume token (M4 plan section
+/// 3.1): the job it is good for and the session that confirmed the job
+/// (the audit actor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeAuth {
+    /// The job the token is scoped to (equal to the path's job).
+    pub job_id: JobId,
+    /// The session that confirmed the job.
+    pub session_id: SessionId,
 }
 
 /// One device request: where from, which route, which session.
@@ -148,8 +184,10 @@ pub struct DeviceCtx {
     pub route: &'static DeviceRoute,
     /// Path parameters.
     pub params: Params,
-    /// The session (every route but open).
+    /// The session (session-token routes).
     pub session: Option<DeviceSession>,
+    /// The resume token's job (resume-token routes, M4).
+    pub resume: Option<ResumeAuth>,
 }
 
 /// The audit actor of a device session (plan M3 section 7: kind
@@ -157,6 +195,15 @@ pub struct DeviceCtx {
 #[must_use]
 pub fn session_actor(s: &DeviceSession) -> Actor {
     opened_actor(s.id, &macs_text(s), s.source_ip)
+}
+
+/// The actor of a request carrying a job's resume token, or proving its
+/// job key (M4): the job's session, marked as the job-key holder.
+pub(crate) fn resume_actor(session: SessionId, job: JobId, source_ip: IpAddr) -> Actor {
+    Actor::device_session(
+        &session.to_string(),
+        &format!("job {job} key holder (after restart); source {source_ip}"),
+    )
 }
 
 /// The actor of a session just opened (its `device.session.opened`
@@ -177,13 +224,15 @@ impl DeviceCtx {
 }
 
 impl DeviceCtx {
-    /// The audit actor: the session, or an unidentified device on open.
+    /// The audit actor: the session; the holder of a job's resume token
+    /// (named by the job's session, M4); or an unidentified device on open.
     #[must_use]
     pub fn actor(&self) -> Actor {
-        self.session.as_ref().map_or_else(
-            || Actor::unauthenticated(Some("device (no session)")),
-            session_actor,
-        )
+        match (&self.session, &self.resume) {
+            (Some(s), _) => session_actor(s),
+            (None, Some(r)) => resume_actor(r.session_id, r.job_id, self.ip),
+            (None, None) => Actor::unauthenticated(Some("device (no session)")),
+        }
     }
 
     /// A draft for this request: the session's actor, interface
@@ -193,9 +242,10 @@ impl DeviceCtx {
     pub fn draft(&self, event: &str, outcome: Outcome) -> AuditDraft {
         let d = AuditDraft::new(event, outcome, self.actor(), Interface::DeviceApi)
             .source(&self.source);
-        match &self.session {
-            Some(s) => d.target("device_session", &s.id.to_string()),
-            None => d,
+        match (&self.session, &self.resume) {
+            (Some(s), _) => d.target("device_session", &s.id.to_string()),
+            (None, Some(r)) => d.target("job", &r.job_id.to_string()),
+            (None, None) => d,
         }
     }
 
@@ -257,6 +307,91 @@ pub(crate) async fn bearer_session<S: Store + 'static>(
     let s = tx.device_session_by_token(&digest).await;
     tx.rollback().await;
     Ok(s?.ok_or(BearerFailure::Unknown))
+}
+
+/// Why a resume token was not accepted (all 401 `invalid_token`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeFailure {
+    /// As [`BearerFailure`].
+    Bearer(BearerFailure),
+    /// Past its expiry or revoked.
+    Lapsed,
+    /// Scoped to another job than the path's.
+    OtherJob,
+    /// Its job has ended or is not a v2 job.
+    JobEnded,
+}
+
+impl ResumeFailure {
+    /// The audit reason.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Bearer(b) => b.reason(),
+            Self::Lapsed => "resume_token_lapsed",
+            Self::OtherJob => "resume_token_other_job",
+            Self::JobEnded => "resume_token_job_ended",
+        }
+    }
+}
+
+/// The SHA-256 of the request's bearer token.
+fn bearer_digest(headers: &HeaderMap) -> Result<usgp_common::Sha256Digest, BearerFailure> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .ok_or(BearerFailure::Missing)?;
+    let token =
+        SessionToken::from_authorization(value.as_bytes()).ok_or(BearerFailure::Malformed)?;
+    Ok(usgp_crypto::sha256(token.expose().as_bytes()))
+}
+
+/// The job a request's resume token is good for (M4 plan section 3.1): a
+/// live token (unrevoked, unexpired), scoped to `path_job`, whose v2 job
+/// has not ended.
+///
+/// # Errors
+///
+/// `Ok(Err(ResumeFailure))` for a 401; `Err` if the lookup failed.
+pub(crate) async fn resume_bearer<S: Store + 'static>(
+    api: &Api<S>,
+    headers: &HeaderMap,
+    path_job: Option<JobId>,
+) -> Result<Result<ResumeAuth, ResumeFailure>, ApiError> {
+    let digest = match bearer_digest(headers) {
+        Ok(d) => d,
+        Err(f) => return Ok(Err(ResumeFailure::Bearer(f))),
+    };
+    let at = api.now()?;
+    let mut tx = api.store().begin().await?;
+    let t = tx.resume_token(&digest).await;
+    let t = match t {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tx.rollback().await;
+            return Ok(Err(ResumeFailure::Bearer(BearerFailure::Unknown)));
+        }
+        Err(e) => {
+            tx.rollback().await;
+            return Err(e.into());
+        }
+    };
+    if !t.live(at) {
+        tx.rollback().await;
+        return Ok(Err(ResumeFailure::Lapsed));
+    }
+    if path_job != Some(t.job_id) {
+        tx.rollback().await;
+        return Ok(Err(ResumeFailure::OtherJob));
+    }
+    let job = tx.job_v2(t.job_id).await;
+    tx.rollback().await;
+    match job? {
+        Some(j) if !j.state.is_final() => Ok(Ok(ResumeAuth {
+            job_id: j.id,
+            session_id: j.session_id,
+        })),
+        _ => Ok(Err(ResumeFailure::JobEnded)),
+    }
 }
 
 /// The 401 for a device request.
@@ -401,11 +536,17 @@ impl<S: Store + 'static> Api<S> {
         let at = self.now()?;
         let mut tx = self.store().begin().await?;
         let job = tx.job_by_session(s.id).await;
-        tx.rollback().await;
-        let Some(job) = job? else {
-            return Ok(None);
+        let job_v2 = match &job {
+            Ok(None) => tx.job_v2_by_session(s.id).await,
+            _ => Ok(None),
         };
-        let lapse = confirmed_lapse_at(&job, self.config().device.jobs.lost_after);
+        tx.rollback().await;
+        let lost_after = self.config().device.jobs.lost_after;
+        let lapse = match (job?, job_v2?) {
+            (Some(j), _) => confirmed_lapse_at(&j, lost_after),
+            (None, Some(j)) => confirmed_lapse_at_v2(&j, lost_after),
+            (None, None) => return Ok(None),
+        };
         Ok((at >= lapse).then_some(lapse))
     }
 }

@@ -466,17 +466,11 @@ pub struct ToolOutcome {
     pub log_tail: String,
 }
 
-/// The platform error every M4 method returns until an implementation
-/// provides it: the engine fails the step closed.
-const fn not_provided(what: &'static str) -> PlatformError {
-    PlatformError::new(PlatformErrorKind::Unsupported, what)
-}
-
 /// Everything platform-specific the engine uses.
 ///
-/// The M4 methods (steps 4 and 5) have default bodies that refuse with
-/// [`PlatformErrorKind::Unsupported`], so an M3 platform keeps compiling
-/// and an M4 step on it fails closed.
+/// Every method is required (M4 WU-10 removed the `Unsupported`
+/// defaults of WU-7a item 11): a platform that cannot do an M4 step says
+/// so itself, with [`PlatformErrorKind::Unsupported`].
 pub trait Platform {
     /// Opens the disk `want` names for writing and reads its facts. The
     /// implementation resolves `want.disk_token` to the device from its
@@ -506,10 +500,7 @@ pub trait Platform {
     /// # Errors
     ///
     /// [`PlatformError`].
-    fn stage_sink(&mut self, dir: &StagePath) -> Result<Box<dyn ExtractSink + '_>, PlatformError> {
-        let _ = dir;
-        Err(not_provided("driver staging"))
-    }
+    fn stage_sink(&mut self, dir: &StagePath) -> Result<Box<dyn ExtractSink + '_>, PlatformError>;
 
     /// Adds the drivers in `dir` to the offline Windows volume:
     /// `dism /English /Image:<W>:\ /Add-Driver /Driver:<W>:\<dir>\
@@ -521,10 +512,7 @@ pub trait Platform {
     ///
     /// [`PlatformError`] if the tool could not be run or timed out; a
     /// non-zero exit is an `Ok` [`ToolOutcome`].
-    fn dism_add_driver(&mut self, dir: &StagePath) -> Result<ToolOutcome, PlatformError> {
-        let _ = dir;
-        Err(not_provided("driver add"))
-    }
+    fn dism_add_driver(&mut self, dir: &StagePath) -> Result<ToolOutcome, PlatformError>;
 
     /// The offline volume's driver listing:
     /// `dism /English /Image:<W>:\ /Get-Drivers /Format:List` output
@@ -533,9 +521,7 @@ pub trait Platform {
     /// # Errors
     ///
     /// [`PlatformError`], also for a non-zero exit.
-    fn dism_list_drivers(&mut self) -> Result<String, PlatformError> {
-        Err(not_provided("driver listing"))
-    }
+    fn dism_list_drivers(&mut self) -> Result<String, PlatformError>;
 
     /// Removes the staging root and everything below it, without
     /// following reparse points (M4 plan §6.2). Succeeds if it is absent.
@@ -543,18 +529,14 @@ pub trait Platform {
     /// # Errors
     ///
     /// [`PlatformError`].
-    fn remove_staging(&mut self) -> Result<(), PlatformError> {
-        Err(not_provided("staging removal"))
-    }
+    fn remove_staging(&mut self) -> Result<(), PlatformError>;
 
     /// `true` if anything exists at the staging root's path.
     ///
     /// # Errors
     ///
     /// [`PlatformError`].
-    fn staging_exists(&mut self) -> Result<bool, PlatformError> {
-        Err(not_provided("staging check"))
-    }
+    fn staging_exists(&mut self) -> Result<bool, PlatformError>;
 
     /// Creates `p` on the Windows volume with `bytes`, creating its
     /// folders, and applies [`TargetPath::protection`]. The file must not
@@ -564,10 +546,7 @@ pub trait Platform {
     /// # Errors
     ///
     /// [`PlatformError`].
-    fn write_protected_file(&mut self, p: &TargetPath, bytes: &[u8]) -> Result<(), PlatformError> {
-        let _ = (p, bytes);
-        Err(not_provided("target file write"))
-    }
+    fn write_protected_file(&mut self, p: &TargetPath, bytes: &[u8]) -> Result<(), PlatformError>;
 
     /// Creates the staged file of one driver archive, `at`, below the
     /// staging root of the Windows volume (create-new; the platform
@@ -581,10 +560,7 @@ pub trait Platform {
     fn stage_archive_file(
         &mut self,
         at: &StagedArchive,
-    ) -> Result<Box<dyn StagedFile>, PlatformError> {
-        let _ = at;
-        Err(not_provided("archive staging"))
-    }
+    ) -> Result<Box<dyn StagedFile>, PlatformError>;
 
     /// Creates `p` on the Windows volume for writing in order, creating
     /// its folders and applying [`TargetPath::protection`] (create-new: an
@@ -598,10 +574,7 @@ pub trait Platform {
     fn create_target_file(
         &mut self,
         p: &TargetPath,
-    ) -> Result<Box<dyn FileWriter + '_>, PlatformError> {
-        let _ = p;
-        Err(not_provided("target file create"))
-    }
+    ) -> Result<Box<dyn FileWriter + '_>, PlatformError>;
 
     /// The bytes of the running agent binary (copied to the post-setup
     /// folder at step 5; M4 plan §1.2).
@@ -609,7 +582,5 @@ pub trait Platform {
     /// # Errors
     ///
     /// [`PlatformError`].
-    fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError> {
-        Err(not_provided("agent binary read"))
-    }
+    fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError>;
 }

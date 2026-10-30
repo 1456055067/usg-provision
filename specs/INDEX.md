@@ -344,7 +344,8 @@ decide.
    For BOOT-2, DISK-1. **Summarised: `specs/standards/gpt.md`** (M3,
    AUDITED 2026-10-28; UEFI 2.10 chapter 5 with §1.9.1, §4.2.1, §13.3; Microsoft's
    layout, types, attributes and sizes; NTFS/FAT32 at summary level only;
-   OPEN-GPT-1 CRC parameters closed in part (CI-GPT-1, AUDITED), OPEN-GPT-2 MSR/ESP size conflict between
+   OPEN-GPT-1 CRC parameters closed in part (CI-GPT-1, AUDITED),
+   OPEN-GPT-2 MSR/ESP size conflict between
    Microsoft pages).
 9. WIM image format and edition indexes (Microsoft Learn WIM/DISM docs and
    the published WIM format documentation). For IMG-2, IMG-4, IMG-5.

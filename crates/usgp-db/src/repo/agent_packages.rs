@@ -20,7 +20,7 @@ use usgp_common::Sha256Digest;
 use usgp_proto::limits::MAX_AGENT_MANIFEST_BYTES;
 use usgp_proto::{
     AgentPackageId, AgentPackageManifestV1, ContentId, ContentKindV2, ContentState, DisplayName,
-    ErrorCode, OperatorId, P384Spki, UnixMicros,
+    ErrorCode, OperatorId, P384Spki, PackageId, UnixMicros,
 };
 
 use super::content::{archive_get, cas_miss};
@@ -31,7 +31,8 @@ use super::conv::{
 use super::packages::ref_from_row;
 use crate::error::DbError;
 use crate::model::{
-    AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId, NewAgentPackage, PackageRef,
+    AGENT_PACKAGE_REFUSED, AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId,
+    NewAgentPackage, PackageRef, SIGNER_REVOKED, SignerRevocation,
 };
 use crate::pool::PgTx;
 
@@ -115,6 +116,13 @@ fn package_from_row(r: &Row) -> Result<AgentPackage, DbError> {
     })
 }
 
+/// The `signer_revoked` refusal code (U-3).
+pub(crate) fn signer_revoked_code() -> Result<ErrorCode, DbError> {
+    ErrorCode::new(SIGNER_REVOKED).map_err(|_| DbError::InvalidArgument {
+        what: "signer_revoked",
+    })
+}
+
 // ------------------------------------------------------------- signers --
 
 pub(crate) async fn insert_signer(tx: &mut PgTx, s: &AgentSigner) -> Result<(), DbError> {
@@ -173,7 +181,7 @@ pub(crate) async fn revoke_signer(
     id: AgentSignerId,
     by: OperatorId,
     at: UnixMicros,
-) -> Result<(), DbError> {
+) -> Result<SignerRevocation, DbError> {
     let uid = to_uuid(id.as_bytes());
     let n = tx
         .execute(
@@ -186,7 +194,46 @@ pub(crate) async fn revoke_signer(
     if n == 0 {
         return Err(cas_miss(tx, "agent signer", &uid).await);
     }
-    Ok(())
+    // U-3: its ready agent packages are refused, and every ready package
+    // whose configuration names one of them leaves ready, in this
+    // transaction. Confirmed jobs continue (their plan pins the content).
+    let refused = tx
+        .query_write(
+            "update agent_package signer revoked",
+            "UPDATE agent_package SET status = 'refused', refusal = $2, updated_at_us = $3 \
+             WHERE signer_id = $1 AND status = 'ready' RETURNING id",
+            &[&uid, &SIGNER_REVOKED, &at.as_micros()],
+        )
+        .await?;
+    let mut refused_agent_packages = refused
+        .iter()
+        .map(|r| col_id(r, "id", AgentPackageId::from_bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    refused_agent_packages.sort();
+    let ids: Vec<uuid::Uuid> = refused_agent_packages
+        .iter()
+        .map(|a| to_uuid(a.as_bytes()))
+        .collect();
+    let packages = tx
+        .query_write(
+            "update package agent refused",
+            "UPDATE package SET status = 'not_usable', status_reason = $2, manifest = NULL, \
+             manifest_sig = NULL, manifest_key_id = NULL, updated_at_us = $3 \
+             WHERE status = 'ready' AND id IN \
+                 (SELECT package_id FROM package_config WHERE agent_package_id = ANY($1)) \
+             RETURNING id",
+            &[&ids, &AGENT_PACKAGE_REFUSED, &at.as_micros()],
+        )
+        .await?;
+    let mut packages_not_ready = packages
+        .iter()
+        .map(|r| col_id(r, "id", PackageId::from_bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    packages_not_ready.sort();
+    Ok(SignerRevocation {
+        refused_agent_packages,
+        packages_not_ready,
+    })
 }
 
 // ------------------------------------------------------------ packages --

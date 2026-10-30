@@ -59,7 +59,8 @@ use crate::model::{
     AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId, ArchiveContent, DeviceValues,
     DriverArchive, DriverArchiveStatus, EscrowRecord, EscrowState, JobStepV2, JobV2,
     NewAgentPackage, NewArchiveContent, NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce,
-    NewResumeToken, PackageConfig, ReadyArchiveContent, ResumeToken, SealedPassword,
+    NewResumeToken, NonceIssue, PackageConfig, ReadyArchiveContent, ResumeToken, SealedPassword,
+    SignerRevocation,
 };
 use crate::model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
@@ -2227,6 +2228,7 @@ impl RepoTx for MemoryTx {
             ready_at: None,
             archive: None,
             manifest: None,
+            superseded_at: None,
         });
         self.work.uploads.push(u.clone());
         Ok(())
@@ -2279,11 +2281,11 @@ impl RepoTx for MemoryTx {
                 what: "insert driver_archive",
             }));
         }
-        let content_ok = self
-            .work
-            .archives
-            .iter()
-            .any(|c| c.id == a.content_id && c.kind == ContentKindV2::DriverArchive);
+        let content_ok = self.work.archives.iter().any(|c| {
+            c.id == a.content_id
+                && c.kind == ContentKindV2::DriverArchive
+                && c.superseded_at.is_none()
+        });
         if !content_ok || !self.operator_exists(a.created_by) {
             return Err(self.abort(DbError::Constraint {
                 what: "insert driver_archive",
@@ -2417,6 +2419,7 @@ impl RepoTx for MemoryTx {
                 what: "driver archive",
             });
         };
+        let cur_content = cur.content_id;
         if !matches!(
             cur.status,
             DriverArchiveStatus::Ready | DriverArchiveStatus::Refused
@@ -2436,11 +2439,11 @@ impl RepoTx for MemoryTx {
                 what: "update driver_archive replaced",
             }));
         }
-        let content_ok = self
-            .work
-            .archives
-            .iter()
-            .any(|c| c.id == content_id && c.kind == ContentKindV2::DriverArchive);
+        let content_ok = self.work.archives.iter().any(|c| {
+            c.id == content_id
+                && c.kind == ContentKindV2::DriverArchive
+                && c.superseded_at.is_none()
+        });
         if !content_ok {
             return Err(self.abort(DbError::Constraint {
                 what: "update driver_archive replaced",
@@ -2455,6 +2458,16 @@ impl RepoTx for MemoryTx {
             a.refusal = None;
             a.updated_at = at;
             a.replaced_at = Some(at);
+        }
+        // U-4: the old file is superseded (still served, never attached).
+        let old = cur_content;
+        if let Some(c) = self
+            .work
+            .archives
+            .iter_mut()
+            .find(|c| c.id == old && c.superseded_at.is_none())
+        {
+            c.superseded_at = Some(at);
         }
         Ok(())
     }
@@ -2602,7 +2615,7 @@ impl RepoTx for MemoryTx {
         id: AgentSignerId,
         by: OperatorId,
         at: UnixMicros,
-    ) -> Result<(), DbError> {
+    ) -> Result<SignerRevocation, DbError> {
         self.write()?;
         let known = self.operator_exists(by);
         let s = self
@@ -2624,7 +2637,39 @@ impl RepoTx for MemoryTx {
             }));
         }
         s.revoked = Some((by, at));
-        Ok(())
+        // U-3, as the PostgreSQL statements.
+        let mut refused_agent_packages = Vec::new();
+        for p in &mut self.work.agent_packages {
+            if p.signer_id == Some(id) && p.status == AgentPackageStatus::Ready {
+                p.status = AgentPackageStatus::Refused;
+                p.refusal = Some(crate::repo::agent_packages::signer_revoked_code()?);
+                p.updated_at = at;
+                refused_agent_packages.push(p.id);
+            }
+        }
+        refused_agent_packages.sort();
+        let users: Vec<PackageId> = self
+            .work
+            .package_configs
+            .iter()
+            .filter(|c| refused_agent_packages.contains(&c.agent_package_id))
+            .map(|c| c.package_id)
+            .collect();
+        let mut packages_not_ready = Vec::new();
+        for p in &mut self.work.packages {
+            if users.contains(&p.id) && p.status == PackageStatus::Ready {
+                p.status = PackageStatus::NotUsable;
+                p.status_reason = Some(crate::model::AGENT_PACKAGE_REFUSED.to_owned());
+                p.manifest = None;
+                p.updated_at = at;
+                packages_not_ready.push(p.id);
+            }
+        }
+        packages_not_ready.sort();
+        Ok(SignerRevocation {
+            refused_agent_packages,
+            packages_not_ready,
+        })
     }
 
     async fn insert_agent_package(&mut self, p: &NewAgentPackage) -> Result<(), DbError> {
@@ -2806,6 +2851,11 @@ impl RepoTx for MemoryTx {
         if !c.values.valid() {
             return Err(DbError::InvalidArgument {
                 what: "config values",
+            });
+        }
+        if !c.answer_ok() {
+            return Err(DbError::InvalidArgument {
+                what: "answer template",
             });
         }
         crate::repo::package_config::tag_params(&c.tags)?;
@@ -3128,11 +3178,7 @@ impl RepoTx for MemoryTx {
         Ok(())
     }
 
-    async fn insert_resume_nonce(
-        &mut self,
-        n: &NewResumeNonce,
-        max_live: u32,
-    ) -> Result<bool, DbError> {
+    async fn insert_resume_nonce(&mut self, n: &NewResumeNonce) -> Result<NonceIssue, DbError> {
         crate::repo::resume::check_window(n.issued_at, n.expires_at, "nonce expiry")?;
         // Bookkeeping, as the PostgreSQL statement (no `write`).
         self.check()?;
@@ -3152,8 +3198,13 @@ impl RepoTx for MemoryTx {
             .iter()
             .filter(|x| x.job_id == n.job_id && x.used_at.is_none() && x.expires_at > n.issued_at)
             .count();
-        if !eligible || u64::try_from(live).unwrap_or(u64::MAX) >= u64::from(max_live) {
-            return Ok(false);
+        if !eligible {
+            return Ok(NonceIssue::NotEligible);
+        }
+        if u64::try_from(live).unwrap_or(u64::MAX)
+            >= u64::from(crate::model::MAX_LIVE_RESUME_NONCES)
+        {
+            return Ok(NonceIssue::OverCap);
         }
         if self
             .work
@@ -3171,7 +3222,7 @@ impl RepoTx for MemoryTx {
             expires_at: n.expires_at,
             used_at: None,
         });
-        Ok(true)
+        Ok(NonceIssue::Issued)
     }
 
     async fn consume_resume_nonce(

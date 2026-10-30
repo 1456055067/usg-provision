@@ -22,7 +22,7 @@ use usgp_proto::{
     DriverArchiveId, ErrorCode, OperatorId, PackageId, RelPath, UnixMicros,
 };
 
-use super::content::{archive_get, cas_miss};
+use super::content::{archive_get, cas_miss, mark_superseded};
 use super::conv::{
     check_text, col, col_enum, col_id, col_micros, col_opt_enum, col_opt_micros, col_opt_u64,
     col_text, to_i64, to_uuid,
@@ -214,6 +214,11 @@ pub(crate) async fn replace(
     content_id: ContentId,
     at: UnixMicros,
 ) -> Result<(), DbError> {
+    let Some(cur) = get(tx, id, true).await? else {
+        return Err(DbError::NotFound {
+            what: "driver archive",
+        });
+    };
     let uid = to_uuid(id.as_bytes());
     let n = tx
         .execute(
@@ -228,7 +233,9 @@ pub(crate) async fn replace(
     if n == 0 {
         return Err(cas_miss(tx, "driver archive", &uid).await);
     }
-    Ok(())
+    // The old file is superseded (U-4): still served to packages that pin
+    // it, never attached again.
+    mark_superseded(tx, cur.content_id, at).await
 }
 
 pub(crate) async fn delete(

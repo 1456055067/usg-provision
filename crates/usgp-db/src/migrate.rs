@@ -632,6 +632,12 @@ mod tests {
             ),
             in_list("account", EscrowAccount::ALL, EscrowAccount::as_str),
             in_list("state", EscrowState::ALL, EscrowState::as_str),
+            // WU-6 follow-up U-2 (the Rust variant comes with WU-8).
+            "role IN ('administrator', 'escrow_officer')".to_owned(),
+            format!(
+                "length(answer_template) BETWEEN 1 AND {}",
+                usgp_proto::limits::MAX_ANSWER_FILE_BYTES
+            ),
         ];
         for e in expect {
             assert!(sql.contains(&e), "0005 lacks `{e}`");
@@ -663,6 +669,8 @@ mod tests {
             usgp_proto::escrow::GCM_NONCE_LEN
         )));
         assert!(sql.contains("ord BETWEEN 1 AND 64"));
+        assert!(sql.contains(&format!("'{}'", crate::model::SIGNER_REVOKED)));
+        assert!(!sql.contains("answer_content_id"));
         assert_eq!(usgp_proto::limits::MAX_PLAN_DRIVERS, 64);
     }
 
@@ -683,8 +691,8 @@ mod tests {
             "GRANT UPDATE (STATE, APPLIED_AT_US, REVEAL_COUNT) ON ADMIN_PASSWORD_ESCROW TO USGP_APP",
             "GRANT EXECUTE ON FUNCTION USGP_TAGS_VALID(TEXT[]), USGP_JOB_STEP_RANGE(), \
              USGP_DRIVER_ARCHIVE_GUARD(), USGP_AGENT_SIGNER_GUARD(), USGP_AGENT_PACKAGE_GUARD(), \
-             USGP_JOB_RESUME_NONCE_GUARD(), USGP_JOB_RESUME_TOKEN_GUARD(), USGP_ESCROW_GUARD() \
-             TO USGP_APP",
+             USGP_JOB_RESUME_NONCE_GUARD(), USGP_JOB_RESUME_TOKEN_GUARD(), USGP_ESCROW_GUARD(), \
+             USGP_CONTENT_SUPERSEDED_GUARD(), USGP_DRIVER_ARCHIVE_CONTENT_LIVE() TO USGP_APP",
         ];
         assert_eq!(grants.len(), expect.len(), "{grants:#?}");
         for e in expect {
@@ -744,6 +752,11 @@ mod tests {
             "CREATE OR REPLACE FUNCTION usgp_job_guard()",
             "CREATE OR REPLACE FUNCTION usgp_device_session_guard()",
             "IF OLD.state = 'confirmed' AND NEW.state = 'ended' THEN",
+            "CREATE TRIGGER content_superseded_guard\n    BEFORE UPDATE ON content",
+            "CREATE TRIGGER driver_archive_content_live\n    BEFORE INSERT OR UPDATE ON driver_archive",
+            "IF OLD.status = 'ready' AND NEW.status = 'refused' AND NEW.refusal = 'signer_revoked'",
+            "RAISE EXCEPTION 'migration 0005: expected 1 operator role check to replace, found %'",
+            "POAM-new-G",
             "FOREIGN KEY (content_id, content_kind) REFERENCES content (id, kind)",
             "FOREIGN KEY (job_id, job_schema) REFERENCES job (id, plan_schema)",
             "RAISE EXCEPTION 'migration 0005: expected 2 content checks to replace, found %'",

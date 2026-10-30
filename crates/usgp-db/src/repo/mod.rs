@@ -68,7 +68,7 @@ use crate::model::{
     AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId, ArchiveContent, DeviceValues,
     DriverArchive, DriverArchiveStatus, EscrowRecord, JobStepV2, JobV2, NewAgentPackage,
     NewArchiveContent, NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce, NewResumeToken,
-    PackageConfig, ReadyArchiveContent, ResumeToken, SealedPassword,
+    NonceIssue, PackageConfig, ReadyArchiveContent, ResumeToken, SealedPassword, SignerRevocation,
 };
 use crate::model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
@@ -889,13 +889,17 @@ pub trait RepoTx: AuditTx + Send + Sized {
         &mut self,
     ) -> impl Future<Output = Result<Vec<AgentSigner>, DbError>> + Send;
 
-    /// Revokes a signer once. [`DbError::Conflict`] if already revoked.
+    /// Revokes a signer once ([`DbError::Conflict`] if already revoked)
+    /// and, in the same transaction (U-3), refuses its ready agent
+    /// packages (`signer_revoked`) and takes every ready package whose
+    /// configuration names one of them out of ready. The caller appends
+    /// `agent_package.refused` for each refused agent package.
     fn revoke_agent_signer(
         &mut self,
         id: AgentSignerId,
         by: OperatorId,
         at: UnixMicros,
-    ) -> impl Future<Output = Result<(), DbError>> + Send;
+    ) -> impl Future<Output = Result<SignerRevocation, DbError>> + Send;
 
     /// Creates an agent package record (status `checking`) for archive
     /// content of kind `agent_package`.
@@ -1065,15 +1069,15 @@ pub trait RepoTx: AuditTx + Send + Sized {
     // ---------------------------------------------------- resume (M4) --
 
     /// Stores a challenge nonce (by SHA-256) for a v2 job that is running
-    /// or lost with step 6 done and fewer than `max_live` unexpired, unused
-    /// nonces. `false` (nothing written) otherwise, so the caller answers
-    /// 404 alike. Not a state change: needs no audit record (the plan does
-    /// not audit challenges; they are rate limited).
+    /// or lost with step 6 done and holds fewer than
+    /// [`crate::MAX_LIVE_RESUME_NONCES`] unexpired, unused nonces. Otherwise
+    /// nothing is written and the result says why: `NotEligible` (404) or
+    /// `OverCap` (429, `job.resume.refused`). Not a state change: needs no
+    /// audit record (the plan does not audit challenges).
     fn insert_resume_nonce(
         &mut self,
         n: &NewResumeNonce,
-        max_live: u32,
-    ) -> impl Future<Output = Result<bool, DbError>> + Send;
+    ) -> impl Future<Output = Result<NonceIssue, DbError>> + Send;
 
     /// Uses a nonce of this job, unexpired at `at`, once. `false` for a
     /// wrong, expired or used nonce alike (nothing changes then).
@@ -1799,7 +1803,7 @@ impl RepoTx for crate::pool::PgTx {
         id: AgentSignerId,
         by: OperatorId,
         at: UnixMicros,
-    ) -> Result<(), DbError> {
+    ) -> Result<SignerRevocation, DbError> {
         agent_packages::revoke_signer(self, id, by, at).await
     }
 
@@ -1935,12 +1939,8 @@ impl RepoTx for crate::pool::PgTx {
         devices::close_confirmed(self, id, reason, at).await
     }
 
-    async fn insert_resume_nonce(
-        &mut self,
-        n: &NewResumeNonce,
-        max_live: u32,
-    ) -> Result<bool, DbError> {
-        resume::insert_nonce(self, n, max_live).await
+    async fn insert_resume_nonce(&mut self, n: &NewResumeNonce) -> Result<NonceIssue, DbError> {
+        resume::insert_nonce(self, n).await
     }
 
     async fn consume_resume_nonce(

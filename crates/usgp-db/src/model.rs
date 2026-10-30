@@ -28,13 +28,13 @@ use usgp_proto::{
 mod m4;
 
 pub use m4::{
-    AdminPasswordMode, AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId,
-    ArchiveContent, ArchiveFacts, DeviceValues, DriverArchive, DriverArchiveStatus, EscrowRecord,
-    EscrowState, JobStepV2, JobTimeoutsV2, JobV2, MAX_CONFIG_VALUE_CHARS,
-    MAX_DEVICE_VALUE_KEY_BYTES, MAX_DEVICE_VALUES, NewAgentPackage, NewArchiveContent,
-    NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce, NewResumeToken, PackageConfig,
-    PackageValues, ReadyArchiveContent, ResumeToken, SealedPassword, config_value_ok,
-    device_value_key_ok,
+    AGENT_PACKAGE_REFUSED, AdminPasswordMode, AgentPackage, AgentPackageStatus, AgentSigner,
+    AgentSignerId, ArchiveContent, ArchiveFacts, DeviceValues, DriverArchive, DriverArchiveStatus,
+    EscrowRecord, EscrowState, JobStepV2, JobTimeoutsV2, JobV2, MAX_CONFIG_VALUE_CHARS,
+    MAX_DEVICE_VALUE_KEY_BYTES, MAX_DEVICE_VALUES, MAX_LIVE_RESUME_NONCES, NewAgentPackage,
+    NewArchiveContent, NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce, NewResumeToken,
+    NonceIssue, PackageConfig, PackageValues, ReadyArchiveContent, ResumeToken, SIGNER_REVOKED,
+    SealedPassword, SignerRevocation, config_value_ok, device_value_key_ok,
 };
 
 /// Role of an operator (M2 has one built-in role, REQ-RBAC-004).

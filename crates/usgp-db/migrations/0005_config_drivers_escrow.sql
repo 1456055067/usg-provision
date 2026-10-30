@@ -79,6 +79,10 @@ ALTER TABLE content
     ADD COLUMN archive_format text NULL,
     ADD COLUMN archive_entries integer NULL,
     ADD COLUMN archive_expanded_bytes bigint NULL,
+    -- A driver archive file replaced by a newer one (REQ-DRV-003). Still
+    -- served to ready packages that pin it (OPEN-DRV-2 default); never
+    -- attached again. POAM-new-G: superseded rows are not purged in M4.
+    ADD COLUMN superseded_at_us bigint NULL,
     ADD CONSTRAINT content_kind_values
         CHECK (kind IN ('image', 'pe', 'driver_archive', 'agent_package')),
     ADD CONSTRAINT content_manifest_schema_values CHECK (manifest_schema IN (1, 2)),
@@ -95,6 +99,8 @@ ALTER TABLE content
                     THEN archive_format IS NULL
                     ELSE num_nulls(compression, image_count, boot_index, usable_index) = 4
                END),
+    ADD CONSTRAINT content_superseded_archive
+        CHECK (superseded_at_us IS NULL OR kind = 'driver_archive'),
     ADD CONSTRAINT content_ready_facts
         CHECK (state <> 'ready'
                OR (num_nulls(manifest, ready_at_us) = 0
@@ -102,6 +108,33 @@ ALTER TABLE content
                             THEN num_nulls(compression, image_count, boot_index) = 0
                             ELSE archive_format IS NOT NULL
                        END));
+
+-- ------------------------------------------------------------ operator --
+
+-- The escrow-officer role (M4 plan section 1.3; WU-6 follow-up U-2). The
+-- 0001 role check is unnamed; it is found by its single column.
+DO $$
+DECLARE
+    c   record;
+    n   integer := 0;
+BEGIN
+    FOR c IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'operator'::regclass AND contype = 'c'
+          AND conkey = ARRAY[(SELECT attnum FROM pg_attribute
+                              WHERE attrelid = 'operator'::regclass AND attname = 'role')]
+    LOOP
+        EXECUTE format('ALTER TABLE operator DROP CONSTRAINT %I', c.conname);
+        n := n + 1;
+    END LOOP;
+    IF n <> 1 THEN
+        RAISE EXCEPTION 'migration 0005: expected 1 operator role check to replace, found %', n;
+    END IF;
+END;
+$$;
+
+ALTER TABLE operator
+    ADD CONSTRAINT operator_role_values CHECK (role IN ('administrator', 'escrow_officer'));
 
 -- --------------------------------------------------------------- tags --
 
@@ -199,11 +232,13 @@ CREATE TABLE agent_package (
 -- ------------------------------------------------ package configuration --
 
 -- One configuration per package (M4 plan section 3.2). Removed with its
--- package. `answer_content_id` has no foreign key: section 3.5 lists no
--- content kind for answer files (see impl notes, open item).
+-- package. The answer-file template is stored inline (WU-6 follow-up
+-- U-1): at most 1 MiB, with its SHA-256 (checked through usgp-crypto by
+-- the repository on write and read).
 CREATE TABLE package_config (
     package_id          uuid    PRIMARY KEY REFERENCES package (id) ON DELETE CASCADE,
-    answer_content_id   uuid    NOT NULL,
+    answer_template     bytea   NOT NULL CHECK (length(answer_template) BETWEEN 1 AND 1048576),
+    answer_sha256       bytea   NOT NULL CHECK (length(answer_sha256) = 32),
     config_values       jsonb   NOT NULL
                                 CHECK (jsonb_typeof(config_values) = 'object'
                                        AND config_values - ARRAY['computer_name', 'time_zone', 'domain', 'machine_ou'] = '{}'::jsonb
@@ -417,6 +452,10 @@ $$;
 
 -- Challenge nonces (60 s, single use) and job-scoped resume tokens, both
 -- stored only as SHA-256 (M4 plan section 3.1). v2 jobs only.
+-- POAM-new-G: expired, used or revoked rows are not purged in M4; they are
+-- inert (every lookup checks expiry, use and revocation) and bounded (16
+-- live nonces, 10 tokens per job). Planned: a scheduled admin purge that
+-- respects AU-11 retention (M5).
 CREATE TABLE job_resume_nonce (
     nonce_hash          bytea    PRIMARY KEY CHECK (length(nonce_hash) = 32),
     job_id              uuid     NOT NULL,
@@ -522,6 +561,14 @@ BEGIN
         RAISE EXCEPTION 'an agent package identity cannot be altered'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
+    -- The one move out of ready: its signer was revoked (WU-6 follow-up
+    -- U-3); only the status, reason and time change.
+    IF OLD.status = 'ready' AND NEW.status = 'refused' AND NEW.refusal = 'signer_revoked'
+       AND (NEW.signer_id, NEW.manifest) IS NOT DISTINCT FROM (OLD.signer_id, OLD.manifest)
+       AND EXISTS (SELECT 1 FROM agent_signer s
+                   WHERE s.id = OLD.signer_id AND s.revoked_at_us IS NOT NULL) THEN
+        RETURN NEW;
+    END IF;
     IF OLD.status IN ('ready', 'refused')
        AND (NEW.status, NEW.signer_id, NEW.manifest, NEW.refusal, NEW.updated_at_us)
            IS DISTINCT FROM
@@ -536,6 +583,41 @@ $$;
 CREATE TRIGGER agent_package_guard
     BEFORE UPDATE ON agent_package
     FOR EACH ROW EXECUTE FUNCTION usgp_agent_package_guard();
+
+-- Superseded content stays superseded (U-4).
+CREATE FUNCTION usgp_content_superseded_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.superseded_at_us IS NOT NULL
+       AND NEW.superseded_at_us IS DISTINCT FROM OLD.superseded_at_us THEN
+        RAISE EXCEPTION 'superseded content stays superseded'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER content_superseded_guard
+    BEFORE UPDATE ON content
+    FOR EACH ROW EXECUTE FUNCTION usgp_content_superseded_guard();
+
+-- A driver archive never (re)attaches superseded content (U-4).
+CREATE FUNCTION usgp_driver_archive_content_live() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF (TG_OP = 'INSERT' OR NEW.content_id IS DISTINCT FROM OLD.content_id)
+       AND EXISTS (SELECT 1 FROM content c
+                   WHERE c.id = NEW.content_id AND c.superseded_at_us IS NOT NULL) THEN
+        RAISE EXCEPTION 'superseded content cannot be attached'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER driver_archive_content_live
+    BEFORE INSERT OR UPDATE ON driver_archive
+    FOR EACH ROW EXECUTE FUNCTION usgp_driver_archive_content_live();
 
 CREATE FUNCTION usgp_job_resume_nonce_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -615,7 +697,8 @@ CREATE TRIGGER admin_password_escrow_guard
 
 REVOKE ALL ON FUNCTION usgp_tags_valid(text[]), usgp_job_step_range(),
     usgp_driver_archive_guard(), usgp_agent_signer_guard(), usgp_agent_package_guard(),
-    usgp_job_resume_nonce_guard(), usgp_job_resume_token_guard(), usgp_escrow_guard()
+    usgp_job_resume_nonce_guard(), usgp_job_resume_token_guard(), usgp_escrow_guard(),
+    usgp_content_superseded_guard(), usgp_driver_archive_content_live()
     FROM PUBLIC;
 REVOKE ALL ON driver_archive, package_driver, agent_signer, agent_package, package_config,
     device_value, job_resume_nonce, job_resume_token, admin_password_escrow FROM PUBLIC;
@@ -632,5 +715,6 @@ GRANT SELECT, INSERT ON admin_password_escrow TO usgp_app;
 GRANT UPDATE (state, applied_at_us, reveal_count) ON admin_password_escrow TO usgp_app;
 GRANT EXECUTE ON FUNCTION usgp_tags_valid(text[]), usgp_job_step_range(),
     usgp_driver_archive_guard(), usgp_agent_signer_guard(), usgp_agent_package_guard(),
-    usgp_job_resume_nonce_guard(), usgp_job_resume_token_guard(), usgp_escrow_guard()
+    usgp_job_resume_nonce_guard(), usgp_job_resume_token_guard(), usgp_escrow_guard(),
+    usgp_content_superseded_guard(), usgp_driver_archive_content_live()
     TO usgp_app;

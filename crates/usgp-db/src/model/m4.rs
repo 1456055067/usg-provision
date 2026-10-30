@@ -22,7 +22,7 @@ use std::fmt;
 use usgp_common::Sha256Digest;
 use usgp_crypto::KeyId;
 use usgp_proto::escrow::{GCM_NONCE_LEN, MIN_ESCROW_CT_BYTES, P384_POINT_LEN};
-use usgp_proto::limits::{MAX_ESCROW_CT_BYTES, MAX_STEP_TIMEOUT_S};
+use usgp_proto::limits::{MAX_ANSWER_FILE_BYTES, MAX_ESCROW_CT_BYTES, MAX_STEP_TIMEOUT_S};
 use usgp_proto::{
     AgentPackageId, AgentPackageManifestV1, ArchiveFormat, BootServiceId, ContentId, ContentKindV2,
     ContentState, DiskDescriptorV1, DisplayName, DriverArchiveId, EditionIndex, ErrorCode,
@@ -234,6 +234,9 @@ pub struct ArchiveContent {
     pub archive: Option<ArchiveFacts>,
     /// The signed v2 content manifest (set at Ready).
     pub manifest: Option<StoredManifest>,
+    /// When a driver-archive replacement superseded this file (it is still
+    /// served to packages that pin it, never attached again; U-4).
+    pub superseded_at: Option<UnixMicros>,
 }
 
 /// What `checking` → `ready` records for archive content: the signed
@@ -421,8 +424,10 @@ impl PackageValues {
 pub struct PackageConfig {
     /// The package.
     pub package_id: PackageId,
-    /// The answer-file template.
-    pub answer_content_id: ContentId,
+    /// The answer-file template (1 byte to 1 MiB, stored inline; U-1).
+    pub answer_template: Vec<u8>,
+    /// SHA-256 of `answer_template`.
+    pub answer_sha256: Sha256Digest,
     /// Literal values.
     pub values: PackageValues,
     /// Tags (at most 64, REQ-CFG-009).
@@ -435,6 +440,16 @@ pub struct PackageConfig {
     pub updated_by: OperatorId,
     /// Last change.
     pub updated_at: UnixMicros,
+}
+
+impl PackageConfig {
+    /// True if the template is 1 byte to 1 MiB and `answer_sha256` is its
+    /// SHA-256 (through `usgp-crypto`).
+    #[must_use]
+    pub fn answer_ok(&self) -> bool {
+        (1..=MAX_ANSWER_FILE_BYTES).contains(&self.answer_template.len())
+            && usgp_crypto::sha256(&self.answer_template) == self.answer_sha256
+    }
 }
 
 /// Per-device values, keyed by MAC.
@@ -741,4 +756,36 @@ pub struct EscrowRecord {
     pub applied_at: Option<UnixMicros>,
     /// How many times it was revealed.
     pub reveal_count: u32,
+}
+
+/// What revoking a signer changed in the same transaction (U-3). The
+/// caller appends one `agent_package.refused` record (reason
+/// `signer_revoked`) per agent package, and a status record per package.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignerRevocation {
+    /// Ready agent packages of the signer, now `refused`.
+    pub refused_agent_packages: Vec<AgentPackageId>,
+    /// Ready packages whose configuration named one of them, now
+    /// `not_usable` (reason [`AGENT_PACKAGE_REFUSED`]).
+    pub packages_not_ready: Vec<PackageId>,
+}
+
+/// The refusal reason of an agent package whose signer was revoked.
+pub const SIGNER_REVOKED: &str = "signer_revoked";
+
+/// The status reason of a package taken out of ready by U-3.
+pub const AGENT_PACKAGE_REFUSED: &str = "agent_package_refused";
+
+/// Most live (unused, unexpired) challenge nonces per job.
+pub const MAX_LIVE_RESUME_NONCES: u32 = 16;
+
+/// The result of a resume challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceIssue {
+    /// Stored.
+    Issued,
+    /// No such v2 job, or it is finished, or step 6 is not done (404).
+    NotEligible,
+    /// The job already holds [`MAX_LIVE_RESUME_NONCES`] live nonces (429).
+    OverCap,
 }

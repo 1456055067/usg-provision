@@ -16,14 +16,21 @@
 // - NIST 800-53: SC-5 (Denial-of-Service Protection) - live nonces per job
 //   bounded in the statement.
 // - SPEC: specs/workflow.md#REQ-SEQ-002
-// - Decision 0025 item 1
+// - Decision 0025 item 1; WU-6 follow-ups (cap 16, 429 above it)
+
+// POAM: POAM-new-G - expired, used or revoked nonces and tokens are not
+// purged in M4. They are inert (every lookup checks expiry, use and
+// revocation) and bounded (16 live nonces, 10 tokens per job); a scheduled
+// admin purge that respects AU-11 retention is planned for M5.
 
 use usgp_common::Sha256Digest;
 use usgp_proto::{JobId, UnixMicros};
 
 use super::conv::{col_id, col_micros, col_opt_micros, col_u64, to_uuid};
 use crate::error::DbError;
-use crate::model::{NewResumeNonce, NewResumeToken, ResumeToken};
+use crate::model::{
+    MAX_LIVE_RESUME_NONCES, NewResumeNonce, NewResumeToken, NonceIssue, ResumeToken,
+};
 use crate::pool::{Bookkeeping, PgTx};
 
 pub(crate) fn check_window(
@@ -37,12 +44,26 @@ pub(crate) fn check_window(
     Ok(())
 }
 
-pub(crate) async fn insert_nonce(
-    tx: &mut PgTx,
-    n: &NewResumeNonce,
-    max_live: u32,
-) -> Result<bool, DbError> {
+pub(crate) async fn insert_nonce(tx: &mut PgTx, n: &NewResumeNonce) -> Result<NonceIssue, DbError> {
     check_window(n.issued_at, n.expires_at, "nonce expiry")?;
+    // Eligibility first (a read), so a refusal says why: 404 or 429.
+    let row = tx
+        .query_opt(
+            "read job resume eligibility",
+            "SELECT (SELECT count(*) FROM job_resume_nonce x \
+                     WHERE x.job_id = j.id AND x.used_at_us IS NULL AND x.expires_at_us > $2) AS n \
+             FROM job j WHERE j.id = $1 AND j.plan_schema = 2 AND j.state IN ('running', 'lost') \
+             AND EXISTS (SELECT 1 FROM job_step s \
+                 WHERE s.job_id = j.id AND s.step = 6 AND s.state = 'done')",
+            &[&to_uuid(n.job_id.as_bytes()), &n.issued_at.as_micros()],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(NonceIssue::NotEligible);
+    };
+    if col_u64(&row, "n")? >= u64::from(MAX_LIVE_RESUME_NONCES) {
+        return Ok(NonceIssue::OverCap);
+    }
     let rows = tx
         .execute_bookkeeping(
             Bookkeeping::ResumeNonce,
@@ -51,11 +72,17 @@ pub(crate) async fn insert_nonce(
                 &to_uuid(n.job_id.as_bytes()),
                 &n.issued_at.as_micros(),
                 &n.expires_at.as_micros(),
-                &i64::from(max_live),
+                &i64::from(MAX_LIVE_RESUME_NONCES),
             ],
         )
         .await?;
-    Ok(rows == 1)
+    // The statement re-checks both rules; a concurrent challenge can fill
+    // the cap between the read and the insert.
+    Ok(if rows == 1 {
+        NonceIssue::Issued
+    } else {
+        NonceIssue::OverCap
+    })
 }
 
 pub(crate) async fn consume_nonce(

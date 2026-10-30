@@ -604,7 +604,7 @@ pub(crate) async fn set_upload_state(
 const ARCHIVE_COLUMNS: &str = "id, kind, display_name, file_name, size, sha256, state, \
      reason_code, reason_text, created_by, initiating_audit_seq, created_at_us, updated_at_us, \
      ready_at_us, manifest_schema, archive_format, archive_entries, archive_expanded_bytes, \
-     manifest, manifest_sig, manifest_key_id";
+     manifest, manifest_sig, manifest_key_id, superseded_at_us";
 
 /// The archive kinds (migration 0005).
 const ARCHIVE_KINDS: &str = "kind IN ('driver_archive', 'agent_package')";
@@ -680,6 +680,7 @@ fn archive_from_row(r: &Row) -> Result<ArchiveContent, DbError> {
         ready_at: col_opt_micros(r, "ready_at_us")?,
         archive,
         manifest: stored_manifest(payload, sig, key)?,
+        superseded_at: col_opt_micros(r, "superseded_at_us")?,
     };
     check_archive(&c)?;
     Ok(c)
@@ -861,5 +862,24 @@ pub(crate) async fn archive_set_ready(
     if n == 0 {
         return Err(cas_miss(tx, "content", &uid).await);
     }
+    Ok(())
+}
+
+/// Marks a driver-archive file superseded by a replacement (U-4). It stays
+/// readable and servable; migration 0005 refuses attaching it again.
+// POAM: POAM-new-G - superseded content rows are not purged in M4 (inert;
+// a scheduled admin purge that respects AU-11 retention is planned for M5).
+pub(crate) async fn mark_superseded(
+    tx: &mut PgTx,
+    id: ContentId,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    tx.execute(
+        "update content superseded",
+        "UPDATE content SET superseded_at_us = $2 \
+         WHERE id = $1 AND kind = 'driver_archive' AND superseded_at_us IS NULL",
+        &[&to_uuid(id.as_bytes()), &at.as_micros()],
+    )
+    .await?;
     Ok(())
 }

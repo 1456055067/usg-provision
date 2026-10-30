@@ -285,4 +285,56 @@ mod t {
         );
         db.finish().await;
     }
+
+    /// U-2: the operator role check takes `escrow_officer` (the Rust
+    /// variant comes with WU-8); U-4: superseded content stays so.
+    #[tokio::test]
+    async fn m4_role_values_and_superseded_guard() {
+        let db = TestDb::migrated().await;
+        let a = init_audit(&db.app).await;
+        let op = enrol(&db.admin, &a, "m4 roles").await;
+        let owner = db.raw_owner().await;
+        let id = uuid::Uuid::from_bytes(*op.id.as_bytes());
+        owner
+            .execute(
+                "UPDATE operator SET role = 'escrow_officer' WHERE id = $1",
+                &[&id],
+            )
+            .await
+            .unwrap();
+        assert_sqlstate(
+            owner
+                .execute("UPDATE operator SET role = 'bogus' WHERE id = $1", &[&id])
+                .await,
+            &SqlState::CHECK_VIOLATION,
+            "unknown role",
+        );
+        let c = m4::ready_archive(
+            &db.app,
+            &a,
+            op.id,
+            usgp_proto::ContentKindV2::DriverArchive,
+            &["a.inf"],
+        )
+        .await;
+        let cid = uuid::Uuid::from_bytes(*c.id.as_bytes());
+        owner
+            .execute(
+                "UPDATE content SET superseded_at_us = 1 WHERE id = $1",
+                &[&cid],
+            )
+            .await
+            .unwrap();
+        assert_sqlstate(
+            owner
+                .execute(
+                    "UPDATE content SET superseded_at_us = NULL WHERE id = $1",
+                    &[&cid],
+                )
+                .await,
+            &SqlState::INTEGRITY_CONSTRAINT_VIOLATION,
+            "un-supersede",
+        );
+        db.finish().await;
+    }
 }

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use usgp_common::Sha256Digest;
 use usgp_crypto::{KeyId, SigningKey};
+use usgp_db::{AGENT_PACKAGE_REFUSED, MAX_LIVE_RESUME_NONCES, NonceIssue, SIGNER_REVOKED};
 use usgp_db::{
     AdminPasswordMode, AgentPackageStatus, AgentSigner, AgentSignerId, ArchiveContent,
     ChosenPackage, DbError, DeviceValues, DriverArchiveStatus, EscrowState, JobTimeoutsV2,
@@ -233,11 +234,15 @@ pub async fn ready_agent_package<S: Store>(
     id
 }
 
+/// A stand-in answer-file template.
+pub const ANSWER: &[u8] = b"<unattend xmlns=\"urn:schemas-microsoft-com:unattend\"/>";
+
 /// A package configuration for `p`.
 pub fn config(p: &Package, agent: AgentPackageId, by: OperatorId) -> PackageConfig {
     PackageConfig {
         package_id: p.id,
-        answer_content_id: ContentId::from_random_bytes(rand_bytes()),
+        answer_template: ANSWER.to_vec(),
+        answer_sha256: usgp_crypto::sha256(ANSWER),
         values: PackageValues {
             computer_name: Some("WS-01".to_owned()),
             time_zone: Some("Pacific Standard Time".to_owned()),
@@ -526,6 +531,32 @@ pub async fn flow_driver_archives<S: Store>(store: &S, a: &Audit) {
     tx.set_driver_archive_ready(id, now()).await.unwrap();
     audited(a, tx, "driver.replaced", "driver_archive", &id.to_string()).await;
 
+    // U-4: the old file is superseded: still readable (served to packages
+    // that pin it), never attached again.
+    let mut tx = store.begin().await.unwrap();
+    let old = tx.archive_content(c1.id).await.unwrap().unwrap();
+    assert!(old.superseded_at.is_some() && old.state == ContentState::Ready);
+    assert!(
+        tx.archive_content(c2.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .superseded_at
+            .is_none()
+    );
+    assert!(matches!(
+        tx.insert_driver_archive(&NewDriverArchive {
+            id: DriverArchiveId::from_random_bytes(rand_bytes()),
+            content_id: c1.id,
+            name: DisplayName::new("reattach").unwrap(),
+            created_by: op.id,
+            created_at: now(),
+        })
+        .await,
+        Err(DbError::Constraint { .. })
+    ));
+    tx.rollback().await;
+
     // A refused archive.
     let c3 = ready_archive(store, a, op.id, ContentKindV2::DriverArchive, &["x.inf"]).await;
     let refused = DriverArchiveId::from_random_bytes(rand_bytes());
@@ -668,11 +699,38 @@ pub async fn flow_agent_packages_and_config<S: Store>(store: &S, a: &Audit) {
     ));
     tx.rollback().await;
 
-    // A revoked signer cannot ready a package; revocation is once.
+    // U-3: revoking the signer refuses its ready agent packages and takes
+    // the packages that use them out of ready, in one transaction.
+    let p0 = ready_package(store, a, &op).await;
     let mut tx = store.begin().await.unwrap();
-    tx.revoke_agent_signer(signer.id, op.id, now())
+    tx.set_package_config(&config(&p0, agent, op.id))
         .await
         .unwrap();
+    audited(a, tx, "package.config.set", "package", &p0.id.to_string()).await;
+    let mut tx = store.begin().await.unwrap();
+    let rev = tx
+        .revoke_agent_signer(signer.id, op.id, now())
+        .await
+        .unwrap();
+    assert_eq!(rev.refused_agent_packages, vec![agent]);
+    assert_eq!(rev.packages_not_ready, vec![p0.id]);
+    let ap = tx.agent_package(agent).await.unwrap().unwrap();
+    assert_eq!(ap.status, AgentPackageStatus::Refused);
+    assert_eq!(
+        ap.refusal.as_ref().map(ErrorCode::as_str),
+        Some(SIGNER_REVOKED)
+    );
+    let pk = tx.package(p0.id).await.unwrap().unwrap();
+    assert_eq!(pk.status, usgp_proto::PackageStatus::NotUsable);
+    assert_eq!(pk.status_reason.as_deref(), Some(AGENT_PACKAGE_REFUSED));
+    append(
+        a,
+        &mut tx,
+        "agent_package.refused",
+        "agent_package",
+        &agent.to_string(),
+    )
+    .await;
     assert!(matches!(
         tx.revoke_agent_signer(signer.id, op.id, now()).await,
         Err(DbError::Conflict { .. })
@@ -739,9 +797,23 @@ pub async fn flow_agent_packages_and_config<S: Store>(store: &S, a: &Audit) {
     cfg2.values = PackageValues::default();
     tx.set_package_config(&cfg2).await.unwrap();
     assert_eq!(tx.package_config(p.id).await.unwrap().unwrap(), cfg2);
+    // `p0` (taken out of ready above) and `p` name it.
     let users = tx.packages_using_agent_package(agent).await.unwrap();
-    assert_eq!(users.len(), 1);
-    // Bounds.
+    assert_eq!(users.len(), 2);
+    // Bounds: the template is 1 B to 1 MiB and its digest must match.
+    for (tpl, sha) in [
+        (Vec::new(), usgp_crypto::sha256(b"")),
+        (vec![b'x'; 1024 * 1024 + 1], usgp_crypto::sha256(b"x")),
+        (ANSWER.to_vec(), digest()),
+    ] {
+        let mut bad = cfg.clone();
+        bad.answer_template = tpl;
+        bad.answer_sha256 = sha;
+        assert!(matches!(
+            tx.set_package_config(&bad).await,
+            Err(DbError::InvalidArgument { .. })
+        ));
+    }
     let mut bad = cfg.clone();
     bad.values.time_zone = Some(String::new());
     assert!(matches!(
@@ -772,12 +844,9 @@ pub async fn flow_agent_packages_and_config<S: Store>(store: &S, a: &Audit) {
     audited(a, tx, "package.deleted", "package", &p.id.to_string()).await;
     let mut tx = store.begin().await.unwrap();
     assert!(tx.package_config(p.id).await.unwrap().is_none());
-    assert!(
-        tx.packages_using_agent_package(agent)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let left = tx.packages_using_agent_package(agent).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left.first().unwrap().id, p0.id);
     tx.commit().await.unwrap();
 }
 
@@ -915,9 +984,10 @@ pub async fn flow_job_v2<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
     };
     let mut tx = store.begin().await.unwrap();
     assert!(
-        !tx.insert_resume_nonce(&nonce(digest(), now()), 4)
+        tx.insert_resume_nonce(&nonce(digest(), now()))
             .await
             .unwrap()
+            == NonceIssue::NotEligible
     );
     tx.commit().await.unwrap();
 
@@ -962,9 +1032,23 @@ pub async fn flow_job_v2<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
     let t0 = now();
     let (h1, h2, h3) = (digest(), digest(), digest());
     let mut tx = store.begin().await.unwrap();
-    assert!(tx.insert_resume_nonce(&nonce(h1, t0), 2).await.unwrap());
-    assert!(tx.insert_resume_nonce(&nonce(h2, t0), 2).await.unwrap());
-    assert!(!tx.insert_resume_nonce(&nonce(h3, t0), 2).await.unwrap());
+    for h in [h1, h2] {
+        assert_eq!(
+            tx.insert_resume_nonce(&nonce(h, t0)).await.unwrap(),
+            NonceIssue::Issued
+        );
+    }
+    for _ in 2..MAX_LIVE_RESUME_NONCES {
+        assert_eq!(
+            tx.insert_resume_nonce(&nonce(digest(), t0)).await.unwrap(),
+            NonceIssue::Issued
+        );
+    }
+    // Above the cap: refused with its own answer (429), nothing written.
+    assert_eq!(
+        tx.insert_resume_nonce(&nonce(h3, t0)).await.unwrap(),
+        NonceIssue::OverCap
+    );
     tx.commit().await.unwrap();
     let mut tx = store.begin().await.unwrap();
     // Expired at use.
@@ -1107,9 +1191,10 @@ pub async fn flow_job_v2<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
     );
     // A finished job takes no further nonce or change.
     assert!(
-        !tx.insert_resume_nonce(&nonce(digest(), now()), 4)
+        tx.insert_resume_nonce(&nonce(digest(), now()))
             .await
             .unwrap()
+            == NonceIssue::NotEligible
     );
     assert!(matches!(
         tx.set_job_restart_pending(job).await,

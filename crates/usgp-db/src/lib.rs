@@ -60,11 +60,12 @@ pub use error::{ConnectFailure, DbError};
 pub use memory::{MemoryStore, MemoryTx};
 pub use migrate::{MigrateReport, MigrationError, SCHEMA_VERSION};
 pub use model::{
-    AdminPasswordMode, AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId,
-    ArchiveContent, ArchiveFacts, DeviceValues, DriverArchive, DriverArchiveStatus, EscrowRecord,
-    EscrowState, JobStepV2, JobTimeoutsV2, JobV2, NewAgentPackage, NewArchiveContent,
-    NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce, NewResumeToken, PackageConfig,
-    PackageValues, ReadyArchiveContent, ResumeToken, SealedPassword,
+    AGENT_PACKAGE_REFUSED, AdminPasswordMode, AgentPackage, AgentPackageStatus, AgentSigner,
+    AgentSignerId, ArchiveContent, ArchiveFacts, DeviceValues, DriverArchive, DriverArchiveStatus,
+    EscrowRecord, EscrowState, JobStepV2, JobTimeoutsV2, JobV2, MAX_LIVE_RESUME_NONCES,
+    NewAgentPackage, NewArchiveContent, NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce,
+    NewResumeToken, NonceIssue, PackageConfig, PackageValues, ReadyArchiveContent, ResumeToken,
+    SIGNER_REVOKED, SealedPassword, SignerRevocation,
 };
 pub use model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,

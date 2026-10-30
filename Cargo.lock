@@ -1503,6 +1503,7 @@ dependencies = [
  "usgp-image",
  "usgp-proto",
  "usgp-wincfg",
+ "zeroize",
 ]
 
 [[package]]

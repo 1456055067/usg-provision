@@ -6,6 +6,7 @@
 //! does not use are not dead code.
 
 pub mod m3;
+pub mod m4;
 #[cfg(feature = "pg-integration")]
 pub mod pg;
 

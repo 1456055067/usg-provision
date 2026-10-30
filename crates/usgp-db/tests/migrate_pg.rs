@@ -34,7 +34,7 @@ mod t {
     async fn migrations_apply_in_order_and_are_idempotent() {
         let db = TestDb::create().await;
         let r = db.owner.migrate().await.unwrap();
-        assert_eq!(r.applied, vec![1, 2, 3, 4]);
+        assert_eq!(r.applied, vec![1, 2, 3, 4, 5]);
         assert_eq!(r.version, SCHEMA_VERSION);
         let again = db.owner.migrate().await.unwrap();
         assert!(again.applied.is_empty());

@@ -304,4 +304,88 @@ mod t {
         // Still usable afterwards.
         enrol(&s, &a, "after").await;
     }
+    // ------------------------------------------------ M4 (migration 0005)
+
+    #[tokio::test]
+    async fn m4_archive_content() {
+        let (s, a) = setup().await;
+        common::m4::flow_archive_content(&s, &a).await;
+        flow_chain_verifies(&s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m4_driver_archives() {
+        let (s, a) = setup().await;
+        common::m4::flow_driver_archives(&s, &a).await;
+        flow_chain_verifies(&s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m4_agent_packages_and_config() {
+        let (s, a) = setup().await;
+        common::m4::flow_agent_packages_and_config(&s, &a).await;
+        flow_chain_verifies(&s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m4_device_values() {
+        let (s, a) = setup().await;
+        common::m4::flow_device_values(&s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m4_job_v2() {
+        let (s, a) = setup().await;
+        common::m4::flow_job_v2(&s, &s, &a).await;
+        flow_chain_verifies(&s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m4_job_v2_failure() {
+        let (s, a) = setup().await;
+        common::m4::flow_job_v2_failure(&s, &s, &a).await;
+    }
+
+    #[tokio::test]
+    async fn m4_job_v2_guards() {
+        let (s, a) = setup().await;
+        common::m4::flow_job_v2_guards(&s, &s, &a).await;
+    }
+
+    /// AU-5 / REQ-AUD-006 on the memory store: an escrow whose
+    /// `escrow.received` record cannot be written is not stored.
+    #[tokio::test]
+    async fn m4_escrow_needs_its_record() {
+        let (s, a) = setup().await;
+        let op = enrol(&s, &a, "m4-au5").await;
+        let bs = m3::enrol_boot_service(&s, &a, "m4-au5-relay").await.id;
+        let p = m3::ready_package(&s, &a, &op).await;
+        let sess = m3::ready_session(&s, &a, &op, bs, &p, m3::macs(1)).await;
+        let job = common::m4::confirm_v2(&s, &a, &sess, bs, &p).await;
+        s.fail_audit_on("escrow.received");
+        let mut tx = s.begin().await.unwrap();
+        tx.insert_escrow(&usgp_db::NewEscrow {
+            job_id: job,
+            account: usgp_proto::EscrowAccount::Administrator,
+            key_id: common::digest(),
+            sealed: common::m4::sealed(40),
+            received_at: common::now(),
+        })
+        .await
+        .unwrap();
+        assert!(
+            a.chain
+                .append(
+                    &mut tx,
+                    &common::draft("escrow.received", "job", &job.to_string())
+                )
+                .await
+                .is_err()
+        );
+        assert!(matches!(tx.commit().await, Err(DbError::TxFailed)));
+        s.clear_audit_faults();
+        let mut tx = s.begin().await.unwrap();
+        assert!(tx.escrow(job).await.unwrap().is_none());
+        tx.rollback().await;
+    }
 }

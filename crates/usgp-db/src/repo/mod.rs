@@ -32,15 +32,21 @@
 //   specs/os-images.md#REQ-IMG-020
 // - Decision 0015
 
+pub(crate) mod agent_packages;
 pub(crate) mod audit;
 pub(crate) mod boot_services;
 pub(crate) mod codes;
 pub(crate) mod content;
 pub(crate) mod conv;
+pub(crate) mod device_values;
 pub(crate) mod devices;
+pub(crate) mod drivers;
+pub(crate) mod escrow;
 pub(crate) mod jobs;
 pub(crate) mod operators;
+pub(crate) mod package_config;
 pub(crate) mod packages;
+pub(crate) mod resume;
 
 use std::future::Future;
 
@@ -50,12 +56,20 @@ use usgp_crypto::HmacTag;
 use usgp_proto::device::SessionState;
 use usgp_proto::ops::BootServiceStatus;
 use usgp_proto::{
-    AuthCodeId, BootServiceId, BootStopId, ContentId, ContentKind, ContentState, DiskDescriptorV1,
-    ErrorCode, FailureV1, JobId, JobState, LayoutReportV1, MacList, OperatorId, PackageId,
-    PackageStatus, SessionId, Step, StepState, SupportState, UnixMicros, UploadId, UploadState,
+    AgentPackageId, AgentPackageManifestV1, AuthCodeId, BootServiceId, BootStopId, ContentId,
+    ContentKind, ContentKindV2, ContentState, DiskDescriptorV1, DriverArchiveId, ErrorCode,
+    FailureV1, FailureV2, JobId, JobState, LayoutReportV1, MacAddress, MacList, OperatorId,
+    PackageId, PackageStatus, SessionId, Step, StepState, StepV2, SupportState, UnixMicros,
+    UploadId, UploadState,
 };
 
 use crate::error::DbError;
+use crate::model::{
+    AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId, ArchiveContent, DeviceValues,
+    DriverArchive, DriverArchiveStatus, EscrowRecord, JobStepV2, JobV2, NewAgentPackage,
+    NewArchiveContent, NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce, NewResumeToken,
+    PackageConfig, ReadyArchiveContent, ResumeToken, SealedPassword,
+};
 use crate::model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
     DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
@@ -708,6 +722,436 @@ pub trait RepoTx: AuditTx + Send + Sized {
         silent_before: UnixMicros,
     ) -> impl Future<Output = Result<Vec<JobId>, DbError>> + Send;
 
+    // ------------------------------------------- archive content (M4) --
+
+    /// The driver-archive or agent-package content item with this id
+    /// (images and PEs are read with [`RepoTx::content`], which does not
+    /// return archive kinds). Its stored v2 manifest is re-checked against
+    /// the row.
+    fn archive_content(
+        &mut self,
+        id: ContentId,
+    ) -> impl Future<Output = Result<Option<ArchiveContent>, DbError>> + Send;
+
+    /// As [`RepoTx::archive_content`], locking the row.
+    fn lock_archive_content(
+        &mut self,
+        id: ContentId,
+    ) -> impl Future<Output = Result<Option<ArchiveContent>, DbError>> + Send;
+
+    /// The live archive item with this digest. The live-digest rule spans
+    /// every kind: check [`RepoTx::content_by_sha256`] too before naming a
+    /// duplicate.
+    fn archive_content_by_sha256(
+        &mut self,
+        sha256: &Sha256Digest,
+    ) -> impl Future<Output = Result<Option<ArchiveContent>, DbError>> + Send;
+
+    /// Archive items of `kind` (both if `None`) in `states` (all if
+    /// empty), ordered by creation time.
+    fn list_archive_content(
+        &mut self,
+        kind: Option<ContentKindV2>,
+        states: &[ContentState],
+    ) -> impl Future<Output = Result<Vec<ArchiveContent>, DbError>> + Send;
+
+    /// As [`RepoTx::create_upload`] for a driver archive or agent package.
+    /// State moves (`checking`, `failed`, `deleted`) use
+    /// [`RepoTx::set_content_state`].
+    fn create_archive_upload(
+        &mut self,
+        content: &NewArchiveContent,
+        upload: &Upload,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Moves archive content from `checking` to `ready` with its signed
+    /// `ContentManifestV2`, whose id, kind, size, digest and ready time
+    /// must match ([`DbError::InvalidArgument`] otherwise). The archive
+    /// facts are taken from the manifest.
+    fn set_archive_content_ready(
+        &mut self,
+        id: ContentId,
+        ready: &ReadyArchiveContent,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    // ------------------------------------------- driver archives (M4) --
+
+    /// Creates a driver archive record (status `checking`) for archive
+    /// content of kind `driver_archive` ([`DbError::Constraint`]
+    /// otherwise; [`DbError::Conflict`] if the id or content is taken).
+    fn insert_driver_archive(
+        &mut self,
+        a: &NewDriverArchive,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The driver archive with this id.
+    fn driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> impl Future<Output = Result<Option<DriverArchive>, DbError>> + Send;
+
+    /// As [`RepoTx::driver_archive`], locking the row.
+    fn lock_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> impl Future<Output = Result<Option<DriverArchive>, DbError>> + Send;
+
+    /// Driver archives whose status is in `statuses` (all if empty),
+    /// ordered by creation time.
+    fn list_driver_archives(
+        &mut self,
+        statuses: &[DriverArchiveStatus],
+    ) -> impl Future<Output = Result<Vec<DriverArchive>, DbError>> + Send;
+
+    /// `checking` → `ready`. The archive's content must be Ready with a v2
+    /// manifest of kind `driver_archive` ([`DbError::Conflict`]
+    /// otherwise); format, INF list and expanded size come from that
+    /// manifest.
+    fn set_driver_archive_ready(
+        &mut self,
+        id: DriverArchiveId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// `checking` → `refused` with a reason code.
+    fn refuse_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Replaces the file of a `ready` or `refused` archive, keeping its id
+    /// (REQ-DRV-003): the record returns to `checking` with no facts.
+    /// Packages already Ready keep the content their manifest names until
+    /// they are re-readied (OPEN-DRV-2 default).
+    fn replace_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        content_id: ContentId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Marks an archive `deleted` (final). [`DbError::Conflict`] if a
+    /// package lists it (name them with
+    /// [`RepoTx::packages_using_driver_archive`]) or it is deleted.
+    fn delete_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Packages listing this archive.
+    fn packages_using_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> impl Future<Output = Result<Vec<PackageRef>, DbError>> + Send;
+
+    /// A package's driver archives, in order.
+    fn package_drivers(
+        &mut self,
+        package: PackageId,
+    ) -> impl Future<Output = Result<Vec<DriverArchiveId>, DbError>> + Send;
+
+    /// Replaces a package's driver list (at most 64, distinct, in order).
+    /// [`DbError::NotFound`] for an unknown package;
+    /// [`DbError::Constraint`] for an unknown or deleted archive.
+    fn set_package_drivers(
+        &mut self,
+        package: PackageId,
+        archives: &[DriverArchiveId],
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    // -------------------------------------------- agent packages (M4) --
+
+    /// Registers a signer key. `key_id` must be the SHA-256 of the SPKI
+    /// and `revoked` `None` ([`DbError::InvalidArgument`]);
+    /// [`DbError::Conflict`] if the id, key or key id is registered.
+    fn insert_agent_signer(
+        &mut self,
+        s: &AgentSigner,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The signer with this id.
+    fn agent_signer(
+        &mut self,
+        id: AgentSignerId,
+    ) -> impl Future<Output = Result<Option<AgentSigner>, DbError>> + Send;
+
+    /// The signer with this key id (revoked or not).
+    fn agent_signer_by_key_id(
+        &mut self,
+        key_id: &Sha256Digest,
+    ) -> impl Future<Output = Result<Option<AgentSigner>, DbError>> + Send;
+
+    /// Every signer, ordered by registration time.
+    fn list_agent_signers(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<AgentSigner>, DbError>> + Send;
+
+    /// Revokes a signer once. [`DbError::Conflict`] if already revoked.
+    fn revoke_agent_signer(
+        &mut self,
+        id: AgentSignerId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Creates an agent package record (status `checking`) for archive
+    /// content of kind `agent_package`.
+    fn insert_agent_package(
+        &mut self,
+        p: &NewAgentPackage,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The agent package with this id.
+    fn agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> impl Future<Output = Result<Option<AgentPackage>, DbError>> + Send;
+
+    /// As [`RepoTx::agent_package`], locking the row.
+    fn lock_agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> impl Future<Output = Result<Option<AgentPackage>, DbError>> + Send;
+
+    /// Agent packages whose status is in `statuses` (all if empty),
+    /// ordered by creation time.
+    fn list_agent_packages(
+        &mut self,
+        statuses: &[AgentPackageStatus],
+    ) -> impl Future<Output = Result<Vec<AgentPackage>, DbError>> + Send;
+
+    /// `checking` → `ready` with the signer whose signature the caller
+    /// verified and the validated `agent.json`. The content must be Ready
+    /// (kind `agent_package`) and the signer registered and not revoked
+    /// ([`DbError::Conflict`] otherwise).
+    fn set_agent_package_ready(
+        &mut self,
+        id: AgentPackageId,
+        signer: AgentSignerId,
+        manifest: &AgentPackageManifestV1,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// `checking` → `refused` with a reason code.
+    fn refuse_agent_package(
+        &mut self,
+        id: AgentPackageId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Packages whose configuration names this agent package.
+    fn packages_using_agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> impl Future<Output = Result<Vec<PackageRef>, DbError>> + Send;
+
+    // ------------------------------- package config, device values (M4) --
+
+    /// A package's configuration.
+    fn package_config(
+        &mut self,
+        package: PackageId,
+    ) -> impl Future<Output = Result<Option<PackageConfig>, DbError>> + Send;
+
+    /// Creates or replaces a package's configuration. The package and
+    /// agent package must exist ([`DbError::Constraint`]); values and tags
+    /// must meet the storage bounds ([`DbError::InvalidArgument`]).
+    fn set_package_config(
+        &mut self,
+        c: &PackageConfig,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The values set for one MAC.
+    fn device_values(
+        &mut self,
+        mac: MacAddress,
+    ) -> impl Future<Output = Result<Option<DeviceValues>, DbError>> + Send;
+
+    /// Creates or replaces the values of one MAC.
+    fn set_device_values(
+        &mut self,
+        v: &DeviceValues,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Deletes the values of one MAC ([`DbError::NotFound`] if none).
+    fn delete_device_values(
+        &mut self,
+        mac: MacAddress,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    // --------------------------------------------------- v2 jobs (M4) --
+
+    /// As [`RepoTx::insert_job`] for a nine-step job (step 1 running, 2 to
+    /// 9 pending), with the same wipe guard. `job_key_id` must be the
+    /// SHA-256 of `job_key_spki` ([`DbError::InvalidArgument`]).
+    fn insert_job_v2(&mut self, j: &NewJobV2) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// The v2 job with this id (`None` for a v1 job).
+    fn job_v2(&mut self, id: JobId) -> impl Future<Output = Result<Option<JobV2>, DbError>> + Send;
+
+    /// As [`RepoTx::job_v2`], locking the row.
+    fn lock_job_v2(
+        &mut self,
+        id: JobId,
+    ) -> impl Future<Output = Result<Option<JobV2>, DbError>> + Send;
+
+    /// The v2 job of a session.
+    fn job_v2_by_session(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<Option<JobV2>, DbError>> + Send;
+
+    /// v2 jobs whose state is in `states` (all if empty), by start time.
+    fn list_jobs_v2(
+        &mut self,
+        states: &[JobState],
+    ) -> impl Future<Output = Result<Vec<JobV2>, DbError>> + Send;
+
+    /// The plan schema of a job (1 or 2), or `None` if there is no such
+    /// job. The v1 readers ([`RepoTx::job`], …) return only schema 1 jobs
+    /// and the v2 readers only schema 2.
+    fn job_plan_schema(
+        &mut self,
+        id: JobId,
+    ) -> impl Future<Output = Result<Option<u8>, DbError>> + Send;
+
+    /// The nine steps of a v2 job, in order.
+    fn job_steps_v2(
+        &mut self,
+        id: JobId,
+    ) -> impl Future<Output = Result<Vec<JobStepV2>, DbError>> + Send;
+
+    /// As [`RepoTx::set_job_step`] for a v2 job ([`DbError::NotFound`]
+    /// for a v1 job). [`RepoTx::set_job_state`] to `succeeded` needs step
+    /// 9 done for a v2 job (REQ-SEQ-006).
+    fn set_job_step_v2(
+        &mut self,
+        id: JobId,
+        step: StepV2,
+        to: StepState,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// As [`RepoTx::fail_job`] for a v2 job.
+    fn fail_job_v2(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        failure: &FailureV2,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Records that the agent installer asked for a restart, on an
+    /// unfinished v2 job (never cleared).
+    fn set_job_restart_pending(
+        &mut self,
+        id: JobId,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// `confirmed` → `ended` with `reason` (the WinPE session token is
+    /// revoked at step 6, M4 plan section 3.1). [`DbError::Conflict`] for
+    /// any other state.
+    fn close_confirmed_session(
+        &mut self,
+        id: SessionId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    // ---------------------------------------------------- resume (M4) --
+
+    /// Stores a challenge nonce (by SHA-256) for a v2 job that is running
+    /// or lost with step 6 done and fewer than `max_live` unexpired, unused
+    /// nonces. `false` (nothing written) otherwise, so the caller answers
+    /// 404 alike. Not a state change: needs no audit record (the plan does
+    /// not audit challenges; they are rate limited).
+    fn insert_resume_nonce(
+        &mut self,
+        n: &NewResumeNonce,
+        max_live: u32,
+    ) -> impl Future<Output = Result<bool, DbError>> + Send;
+
+    /// Uses a nonce of this job, unexpired at `at`, once. `false` for a
+    /// wrong, expired or used nonce alike (nothing changes then).
+    fn consume_resume_nonce(
+        &mut self,
+        job: JobId,
+        nonce_hash: &Sha256Digest,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<bool, DbError>> + Send;
+
+    /// Stores a resume token (by SHA-256). [`DbError::Conflict`] if the
+    /// hash exists; [`DbError::Constraint`] unless the job is a v2 job.
+    fn insert_resume_token(
+        &mut self,
+        t: &NewResumeToken,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// How many resume tokens a job was issued (`resume.max_per_job`).
+    fn count_resume_tokens(
+        &mut self,
+        job: JobId,
+    ) -> impl Future<Output = Result<u64, DbError>> + Send;
+
+    /// The resume token with this SHA-256.
+    fn resume_token(
+        &mut self,
+        token_hash: &Sha256Digest,
+    ) -> impl Future<Output = Result<Option<ResumeToken>, DbError>> + Send;
+
+    /// Revokes every unrevoked token of a job (at a terminal state) and
+    /// returns how many.
+    fn revoke_resume_tokens(
+        &mut self,
+        job: JobId,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<u64, DbError>> + Send;
+
+    // ---------------------------------------------------- escrow (M4) --
+
+    /// Stores the sealed password of a v2 job (state `received`).
+    /// [`DbError::Conflict`] if the job already has one (409; a second
+    /// escrow never overwrites the first).
+    fn insert_escrow(&mut self, e: &NewEscrow) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// A job's escrow metadata (no sealed bytes).
+    fn escrow(
+        &mut self,
+        job: JobId,
+    ) -> impl Future<Output = Result<Option<EscrowRecord>, DbError>> + Send;
+
+    /// As [`RepoTx::escrow`], locking the row.
+    fn lock_escrow(
+        &mut self,
+        job: JobId,
+    ) -> impl Future<Output = Result<Option<EscrowRecord>, DbError>> + Send;
+
+    /// The sealed password, for the reveal route only, after its
+    /// `escrow.revealed` record is durable.
+    fn escrow_sealed(
+        &mut self,
+        job: JobId,
+    ) -> impl Future<Output = Result<Option<SealedPassword>, DbError>> + Send;
+
+    /// `received` → `applied` (or `not_applied`) at `at`.
+    /// [`DbError::Conflict`] if the outcome is already recorded.
+    fn set_escrow_outcome(
+        &mut self,
+        job: JobId,
+        applied: bool,
+        at: UnixMicros,
+    ) -> impl Future<Output = Result<(), DbError>> + Send;
+
+    /// Counts one reveal and returns the new count.
+    fn record_escrow_reveal(
+        &mut self,
+        job: JobId,
+    ) -> impl Future<Output = Result<u32, DbError>> + Send;
+
     // ---------------------------------------------------------- lifecycle
 
     /// Commits. Refused with [`DbError::Unaudited`] (and rolled back) if
@@ -1206,6 +1650,354 @@ impl RepoTx for crate::pool::PgTx {
 
     async fn mark_lost_jobs(&mut self, silent_before: UnixMicros) -> Result<Vec<JobId>, DbError> {
         jobs::mark_lost(self, silent_before).await
+    }
+
+    async fn archive_content(&mut self, id: ContentId) -> Result<Option<ArchiveContent>, DbError> {
+        content::archive_get(self, id, false).await
+    }
+
+    async fn lock_archive_content(
+        &mut self,
+        id: ContentId,
+    ) -> Result<Option<ArchiveContent>, DbError> {
+        content::archive_get(self, id, true).await
+    }
+
+    async fn archive_content_by_sha256(
+        &mut self,
+        sha256: &Sha256Digest,
+    ) -> Result<Option<ArchiveContent>, DbError> {
+        content::archive_by_sha256(self, sha256).await
+    }
+
+    async fn list_archive_content(
+        &mut self,
+        kind: Option<ContentKindV2>,
+        states: &[ContentState],
+    ) -> Result<Vec<ArchiveContent>, DbError> {
+        content::archive_list(self, kind, states).await
+    }
+
+    async fn create_archive_upload(
+        &mut self,
+        c: &NewArchiveContent,
+        u: &Upload,
+    ) -> Result<(), DbError> {
+        content::archive_create_upload(self, c, u).await
+    }
+
+    async fn set_archive_content_ready(
+        &mut self,
+        id: ContentId,
+        r: &ReadyArchiveContent,
+    ) -> Result<(), DbError> {
+        content::archive_set_ready(self, id, r).await
+    }
+
+    async fn insert_driver_archive(&mut self, a: &NewDriverArchive) -> Result<(), DbError> {
+        drivers::insert(self, a).await
+    }
+
+    async fn driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> Result<Option<DriverArchive>, DbError> {
+        drivers::get(self, id, false).await
+    }
+
+    async fn lock_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> Result<Option<DriverArchive>, DbError> {
+        drivers::get(self, id, true).await
+    }
+
+    async fn list_driver_archives(
+        &mut self,
+        statuses: &[DriverArchiveStatus],
+    ) -> Result<Vec<DriverArchive>, DbError> {
+        drivers::list(self, statuses).await
+    }
+
+    async fn set_driver_archive_ready(
+        &mut self,
+        id: DriverArchiveId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        drivers::set_ready(self, id, at).await
+    }
+
+    async fn refuse_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        drivers::refuse(self, id, reason, at).await
+    }
+
+    async fn replace_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        content_id: ContentId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        drivers::replace(self, id, content_id, at).await
+    }
+
+    async fn delete_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        drivers::delete(self, id, at).await
+    }
+
+    async fn packages_using_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> Result<Vec<PackageRef>, DbError> {
+        drivers::using_archive(self, id).await
+    }
+
+    async fn package_drivers(
+        &mut self,
+        package: PackageId,
+    ) -> Result<Vec<DriverArchiveId>, DbError> {
+        drivers::package_drivers(self, package).await
+    }
+
+    async fn set_package_drivers(
+        &mut self,
+        package: PackageId,
+        archives: &[DriverArchiveId],
+    ) -> Result<(), DbError> {
+        drivers::set_package_drivers(self, package, archives).await
+    }
+
+    async fn insert_agent_signer(&mut self, s: &AgentSigner) -> Result<(), DbError> {
+        agent_packages::insert_signer(self, s).await
+    }
+
+    async fn agent_signer(&mut self, id: AgentSignerId) -> Result<Option<AgentSigner>, DbError> {
+        agent_packages::signer(self, id).await
+    }
+
+    async fn agent_signer_by_key_id(
+        &mut self,
+        key_id: &Sha256Digest,
+    ) -> Result<Option<AgentSigner>, DbError> {
+        agent_packages::signer_by_key_id(self, key_id).await
+    }
+
+    async fn list_agent_signers(&mut self) -> Result<Vec<AgentSigner>, DbError> {
+        agent_packages::list_signers(self).await
+    }
+
+    async fn revoke_agent_signer(
+        &mut self,
+        id: AgentSignerId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        agent_packages::revoke_signer(self, id, by, at).await
+    }
+
+    async fn insert_agent_package(&mut self, p: &NewAgentPackage) -> Result<(), DbError> {
+        agent_packages::insert_package(self, p).await
+    }
+
+    async fn agent_package(&mut self, id: AgentPackageId) -> Result<Option<AgentPackage>, DbError> {
+        agent_packages::package(self, id, false).await
+    }
+
+    async fn lock_agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> Result<Option<AgentPackage>, DbError> {
+        agent_packages::package(self, id, true).await
+    }
+
+    async fn list_agent_packages(
+        &mut self,
+        statuses: &[AgentPackageStatus],
+    ) -> Result<Vec<AgentPackage>, DbError> {
+        agent_packages::list_packages(self, statuses).await
+    }
+
+    async fn set_agent_package_ready(
+        &mut self,
+        id: AgentPackageId,
+        signer: AgentSignerId,
+        manifest: &AgentPackageManifestV1,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        agent_packages::set_package_ready(self, id, signer, manifest, at).await
+    }
+
+    async fn refuse_agent_package(
+        &mut self,
+        id: AgentPackageId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        agent_packages::refuse_package(self, id, reason, at).await
+    }
+
+    async fn packages_using_agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> Result<Vec<PackageRef>, DbError> {
+        agent_packages::using_package(self, id).await
+    }
+
+    async fn package_config(
+        &mut self,
+        package: PackageId,
+    ) -> Result<Option<PackageConfig>, DbError> {
+        package_config::get(self, package).await
+    }
+
+    async fn set_package_config(&mut self, c: &PackageConfig) -> Result<(), DbError> {
+        package_config::set(self, c).await
+    }
+
+    async fn device_values(&mut self, mac: MacAddress) -> Result<Option<DeviceValues>, DbError> {
+        device_values::get(self, mac).await
+    }
+
+    async fn set_device_values(&mut self, v: &DeviceValues) -> Result<(), DbError> {
+        device_values::set(self, v).await
+    }
+
+    async fn delete_device_values(&mut self, mac: MacAddress) -> Result<(), DbError> {
+        device_values::delete(self, mac).await
+    }
+
+    async fn insert_job_v2(&mut self, j: &NewJobV2) -> Result<(), DbError> {
+        jobs::insert_v2(self, j).await
+    }
+
+    async fn job_v2(&mut self, id: JobId) -> Result<Option<JobV2>, DbError> {
+        jobs::get_v2(self, id, false).await
+    }
+
+    async fn lock_job_v2(&mut self, id: JobId) -> Result<Option<JobV2>, DbError> {
+        jobs::get_v2(self, id, true).await
+    }
+
+    async fn job_v2_by_session(&mut self, session: SessionId) -> Result<Option<JobV2>, DbError> {
+        jobs::by_session_v2(self, session).await
+    }
+
+    async fn list_jobs_v2(&mut self, states: &[JobState]) -> Result<Vec<JobV2>, DbError> {
+        jobs::list_v2(self, states).await
+    }
+
+    async fn job_plan_schema(&mut self, id: JobId) -> Result<Option<u8>, DbError> {
+        jobs::plan_schema(self, id).await
+    }
+
+    async fn job_steps_v2(&mut self, id: JobId) -> Result<Vec<JobStepV2>, DbError> {
+        jobs::steps_v2(self, id).await
+    }
+
+    async fn set_job_step_v2(
+        &mut self,
+        id: JobId,
+        step: StepV2,
+        to: StepState,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::set_step_v2(self, id, step, to, at).await
+    }
+
+    async fn fail_job_v2(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        failure: &FailureV2,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        jobs::fail_v2(self, id, from, failure, at).await
+    }
+
+    async fn set_job_restart_pending(&mut self, id: JobId) -> Result<(), DbError> {
+        jobs::set_restart_pending(self, id).await
+    }
+
+    async fn close_confirmed_session(
+        &mut self,
+        id: SessionId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        devices::close_confirmed(self, id, reason, at).await
+    }
+
+    async fn insert_resume_nonce(
+        &mut self,
+        n: &NewResumeNonce,
+        max_live: u32,
+    ) -> Result<bool, DbError> {
+        resume::insert_nonce(self, n, max_live).await
+    }
+
+    async fn consume_resume_nonce(
+        &mut self,
+        job: JobId,
+        nonce_hash: &Sha256Digest,
+        at: UnixMicros,
+    ) -> Result<bool, DbError> {
+        resume::consume_nonce(self, job, nonce_hash, at).await
+    }
+
+    async fn insert_resume_token(&mut self, t: &NewResumeToken) -> Result<(), DbError> {
+        resume::insert_token(self, t).await
+    }
+
+    async fn count_resume_tokens(&mut self, job: JobId) -> Result<u64, DbError> {
+        resume::count_tokens(self, job).await
+    }
+
+    async fn resume_token(
+        &mut self,
+        token_hash: &Sha256Digest,
+    ) -> Result<Option<ResumeToken>, DbError> {
+        resume::token(self, token_hash).await
+    }
+
+    async fn revoke_resume_tokens(&mut self, job: JobId, at: UnixMicros) -> Result<u64, DbError> {
+        resume::revoke_tokens(self, job, at).await
+    }
+
+    async fn insert_escrow(&mut self, e: &NewEscrow) -> Result<(), DbError> {
+        escrow::insert(self, e).await
+    }
+
+    async fn escrow(&mut self, job: JobId) -> Result<Option<EscrowRecord>, DbError> {
+        escrow::get(self, job, false).await
+    }
+
+    async fn lock_escrow(&mut self, job: JobId) -> Result<Option<EscrowRecord>, DbError> {
+        escrow::get(self, job, true).await
+    }
+
+    async fn escrow_sealed(&mut self, job: JobId) -> Result<Option<SealedPassword>, DbError> {
+        escrow::sealed(self, job).await
+    }
+
+    async fn set_escrow_outcome(
+        &mut self,
+        job: JobId,
+        applied: bool,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        escrow::set_outcome(self, job, applied, at).await
+    }
+
+    async fn record_escrow_reveal(&mut self, job: JobId) -> Result<u32, DbError> {
+        escrow::record_reveal(self, job).await
     }
 
     async fn commit(self) -> Result<(), DbError> {

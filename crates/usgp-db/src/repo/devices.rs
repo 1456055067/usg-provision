@@ -419,3 +419,27 @@ pub(crate) async fn expire(
     ids.sort();
     Ok(ids)
 }
+
+/// `confirmed` → `ended` (M4 plan section 3.1: the WinPE session token is
+/// revoked when the job reports step 6 done). Migration 0005's guard
+/// allows exactly this move after confirmation.
+pub(crate) async fn close_confirmed(
+    tx: &mut PgTx,
+    id: SessionId,
+    reason: &ErrorCode,
+    at: UnixMicros,
+) -> Result<(), DbError> {
+    let uid = to_uuid(id.as_bytes());
+    let n = tx
+        .execute(
+            "update device_session closed",
+            "UPDATE device_session SET state = 'ended', ended_at_us = $2, end_reason = $3 \
+             WHERE id = $1 AND state = 'confirmed'",
+            &[&uid, &at.as_micros(), &reason.as_str()],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "device session", &uid).await);
+    }
+    Ok(())
+}

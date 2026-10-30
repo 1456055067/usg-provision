@@ -65,10 +65,15 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "device_sessions_jobs",
         sql: include_str!("../migrations/0004_device_sessions_jobs.sql"),
     },
+    Migration {
+        version: 5,
+        name: "config_drivers_escrow",
+        sql: include_str!("../migrations/0005_config_drivers_escrow.sql"),
+    },
 ];
 
 /// The schema version this build requires.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Advisory-lock key serialising migration runs ("usgpmigr" as ASCII).
 pub const MIGRATION_LOCK_KEY: i64 = 0x7573_6770_6d69_6772;
@@ -303,17 +308,17 @@ mod tests {
     fn fresh_database_applies_everything_in_order() {
         let p = pending(&[], MIGRATIONS).unwrap();
         let v: Vec<_> = p.iter().map(|m| m.version).collect();
-        assert_eq!(v, [1, 2, 3, 4]);
+        assert_eq!(v, [1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn up_to_date_has_nothing_pending() {
-        assert!(pending(&applied(4), MIGRATIONS).unwrap().is_empty());
-        let p = pending(&applied(3), MIGRATIONS).unwrap();
+        assert!(pending(&applied(5), MIGRATIONS).unwrap().is_empty());
+        let p = pending(&applied(4), MIGRATIONS).unwrap();
         assert_eq!(p.len(), 1);
-        assert_eq!(p.first().unwrap().version, 4);
+        assert_eq!(p.first().unwrap().version, 5);
         let p = pending(&applied(1), MIGRATIONS).unwrap();
-        assert_eq!(p.len(), 3);
+        assert_eq!(p.len(), 4);
     }
 
     #[test]
@@ -328,11 +333,11 @@ mod tests {
 
     #[test]
     fn unknown_and_gap_refused() {
-        let mut a = applied(4);
-        a.push((5, Sha256Digest([0; 32])));
+        let mut a = applied(5);
+        a.push((6, Sha256Digest([0; 32])));
         assert!(matches!(
             pending(&a, MIGRATIONS),
-            Err(MigrationError::UnknownApplied { version: 5 })
+            Err(MigrationError::UnknownApplied { version: 6 })
         ));
         // An altered 0004 is refused like any other.
         let mut a = applied(4);
@@ -584,6 +589,180 @@ mod tests {
             "AND r.event = 'disk.wipe.authorised'",
         ] {
             assert!(sql.contains(t), "0004 lacks `{t}`");
+        }
+    }
+    #[test]
+    fn check_constraints_0005_match_value_sets() {
+        use crate::model::{
+            AdminPasswordMode, AgentPackageStatus, DriverArchiveStatus, EscrowState,
+        };
+        use usgp_proto::{ArchiveFormat, ContentKindV2, EscrowAccount};
+        let sql = mig(4).sql;
+        let kinds: Vec<&str> = ContentKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .chain(ContentKindV2::ALL.iter().map(|k| k.as_str()))
+            .collect();
+        let all_kinds = format!(
+            "kind IN ({})",
+            kinds
+                .iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let expect = [
+            all_kinds,
+            in_list("archive_format", ArchiveFormat::ALL, ArchiveFormat::as_str),
+            in_list("kind", ArchiveFormat::ALL, ArchiveFormat::as_str),
+            in_list(
+                "status",
+                DriverArchiveStatus::ALL,
+                DriverArchiveStatus::as_str,
+            ),
+            in_list(
+                "status",
+                AgentPackageStatus::ALL,
+                AgentPackageStatus::as_str,
+            ),
+            in_list(
+                "admin_password_mode",
+                AdminPasswordMode::ALL,
+                AdminPasswordMode::as_str,
+            ),
+            in_list("account", EscrowAccount::ALL, EscrowAccount::as_str),
+            in_list("state", EscrowState::ALL, EscrowState::as_str),
+        ];
+        for e in expect {
+            assert!(sql.contains(&e), "0005 lacks `{e}`");
+        }
+        // The INF and tag bounds equal the wire limits.
+        assert!(sql.contains(&format!(
+            "jsonb_array_length(inf_list) <= {}",
+            usgp_proto::limits::MAX_ARCHIVE_INFS
+        )));
+        assert!(sql.contains(&format!(
+            "cardinality(t) <= {}",
+            usgp_proto::limits::MAX_TAGS
+        )));
+        assert!(sql.contains(&format!(
+            "char_length(tag) NOT BETWEEN 1 AND {}",
+            usgp_proto::limits::MAX_TAG_CHARS
+        )));
+        assert!(sql.contains(&format!(
+            "length(ciphertext) BETWEEN {} AND {}",
+            usgp_proto::escrow::MIN_ESCROW_CT_BYTES,
+            usgp_proto::limits::MAX_ESCROW_CT_BYTES
+        )));
+        assert!(sql.contains(&format!(
+            "length(eph_pub) = {}",
+            usgp_proto::escrow::P384_POINT_LEN
+        )));
+        assert!(sql.contains(&format!(
+            "length(nonce) = {}",
+            usgp_proto::escrow::GCM_NONCE_LEN
+        )));
+        assert!(sql.contains("ord BETWEEN 1 AND 64"));
+        assert_eq!(usgp_proto::limits::MAX_PLAN_DRIVERS, 64);
+    }
+
+    /// M4 plan section 3.5: least privilege for the new tables; the escrow
+    /// gets INSERT, SELECT and a three-column UPDATE only; nothing for the
+    /// administrative role; no role DDL; no DELETE except package drivers
+    /// and device values.
+    #[test]
+    fn migration_0005_grants_are_least_privilege() {
+        let st = statements(mig(4));
+        let grants: Vec<&String> = st.iter().filter(|s| s.starts_with("GRANT")).collect();
+        let expect = [
+            "GRANT SELECT, INSERT, UPDATE ON DRIVER_ARCHIVE, AGENT_SIGNER, AGENT_PACKAGE, \
+             PACKAGE_CONFIG, JOB_RESUME_NONCE, JOB_RESUME_TOKEN TO USGP_APP",
+            "GRANT SELECT, INSERT, DELETE ON PACKAGE_DRIVER TO USGP_APP",
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON DEVICE_VALUE TO USGP_APP",
+            "GRANT SELECT, INSERT ON ADMIN_PASSWORD_ESCROW TO USGP_APP",
+            "GRANT UPDATE (STATE, APPLIED_AT_US, REVEAL_COUNT) ON ADMIN_PASSWORD_ESCROW TO USGP_APP",
+            "GRANT EXECUTE ON FUNCTION USGP_TAGS_VALID(TEXT[]), USGP_JOB_STEP_RANGE(), \
+             USGP_DRIVER_ARCHIVE_GUARD(), USGP_AGENT_SIGNER_GUARD(), USGP_AGENT_PACKAGE_GUARD(), \
+             USGP_JOB_RESUME_NONCE_GUARD(), USGP_JOB_RESUME_TOKEN_GUARD(), USGP_ESCROW_GUARD() \
+             TO USGP_APP",
+        ];
+        assert_eq!(grants.len(), expect.len(), "{grants:#?}");
+        for e in expect {
+            assert!(grants.iter().any(|g| g.as_str() == e), "missing `{e}`");
+        }
+        for s in &st {
+            for word in [
+                "CREATE ROLE",
+                "ALTER ROLE",
+                "CREATE USER",
+                "WITH PASSWORD",
+                "PASSWORD '",
+                "TRUNCATE",
+                "DROP TABLE",
+                "DROP COLUMN",
+                "USGP_ADMIN",
+            ] {
+                assert!(!s.contains(word), "0005 contains {word}: {s}");
+            }
+            assert!(!s.starts_with("ALTER DEFAULT PRIVILEGES"), "{s}");
+        }
+        // SC-28: the escrow has no plaintext column.
+        let create = st
+            .iter()
+            .find(|s| s.starts_with("CREATE TABLE ADMIN_PASSWORD_ESCROW"))
+            .unwrap();
+        for col in ["PASSWORD ", "PLAINTEXT", "SECRET"] {
+            assert!(!create.contains(col), "{col} in {create}");
+        }
+        assert!(create.contains("CIPHERTEXT BYTEA NOT NULL"));
+        // Tokens and nonces only as digests.
+        for t in ["JOB_RESUME_NONCE", "JOB_RESUME_TOKEN"] {
+            let create = st
+                .iter()
+                .find(|s| s.starts_with(&format!("CREATE TABLE {t} ")))
+                .unwrap();
+            assert!(
+                create.contains("_HASH BYTEA PRIMARY KEY CHECK (LENGTH("),
+                "{create}"
+            );
+        }
+    }
+
+    /// The guards the plan requires exist and are attached.
+    #[test]
+    fn migration_0005_guards_present() {
+        let sql = mig(4).sql;
+        for t in [
+            "CREATE TRIGGER admin_password_escrow_guard\n    BEFORE INSERT OR UPDATE ON admin_password_escrow",
+            "RAISE EXCEPTION 'an escrowed password cannot be altered'",
+            "CREATE TRIGGER job_resume_nonce_guard\n    BEFORE UPDATE ON job_resume_nonce",
+            "CREATE TRIGGER job_resume_token_guard\n    BEFORE UPDATE ON job_resume_token",
+            "CREATE TRIGGER driver_archive_guard\n    BEFORE UPDATE ON driver_archive",
+            "CREATE TRIGGER agent_signer_guard\n    BEFORE UPDATE ON agent_signer",
+            "CREATE TRIGGER agent_package_guard\n    BEFORE UPDATE ON agent_package",
+            "CREATE TRIGGER job_step_range\n    BEFORE INSERT ON job_step",
+            "CREATE OR REPLACE FUNCTION usgp_job_guard()",
+            "CREATE OR REPLACE FUNCTION usgp_device_session_guard()",
+            "IF OLD.state = 'confirmed' AND NEW.state = 'ended' THEN",
+            "FOREIGN KEY (content_id, content_kind) REFERENCES content (id, kind)",
+            "FOREIGN KEY (job_id, job_schema) REFERENCES job (id, plan_schema)",
+            "RAISE EXCEPTION 'migration 0005: expected 2 content checks to replace, found %'",
+            "RAISE EXCEPTION 'migration 0005: expected 4 step checks to replace, found %'",
+        ] {
+            assert!(sql.contains(t), "0005 lacks `{t}`");
+        }
+        // The replaced 0004 guards keep every 0004 rule.
+        let old = mig(3).sql;
+        for rule in [
+            "RAISE EXCEPTION 'a finished job cannot change'",
+            "RAISE EXCEPTION 'job state transition not allowed'",
+            "RAISE EXCEPTION 'job progress cannot go backwards'",
+            "RAISE EXCEPTION 'an acknowledgement cannot be altered'",
+            "RAISE EXCEPTION 'a session identity cannot be altered'",
+            "RAISE EXCEPTION 'a final session cannot change state'",
+            "RAISE EXCEPTION 'a final session cannot change'",
+        ] {
+            assert!(old.contains(rule) && sql.contains(rule), "{rule}");
         }
     }
 }

@@ -1,8 +1,11 @@
-//! Content, edition and upload rows (PostgreSQL).
+//! Content, edition and upload rows (PostgreSQL). Images and PEs carry
+//! v1 manifests; driver archives and agent packages (M4, migration 0005)
+//! carry v2 manifests and are read through the `archive_*` functions.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-7 - content becomes Ready only with its signed
-//   manifest (constraint in 0001).
+//   manifest (constraint in 0001; archive kinds: 0005, and the v2 manifest
+//   must describe the row it is stored with, checked on write and read).
 // - NIST 800-53: SI-10 - compare-and-set state transitions; values
 //   re-validated on read.
 // - SPEC: specs/os-images.md#REQ-IMG-020, #REQ-IMG-040, #REQ-IMG-043;
@@ -12,9 +15,9 @@
 use tokio_postgres::Row;
 use usgp_common::Sha256Digest;
 use usgp_proto::{
-    Architecture, ContentId, ContentKind, ContentState, DisplayName, Edition, EditionFacts, Fact,
-    FactSource, FileName, KitVersion, OperatorId, Release, SupportState, UnixMicros, UploadId,
-    UploadState, WimCompression, WimText,
+    Architecture, ArchiveFormat, ContentId, ContentKind, ContentKindV2, ContentManifestV2,
+    ContentState, DisplayName, Edition, EditionFacts, Fact, FactSource, FileName, KitVersion,
+    OperatorId, Release, SupportState, UnixMicros, UploadId, UploadState, WimCompression, WimText,
 };
 
 use super::conv::{
@@ -24,6 +27,7 @@ use super::conv::{
 };
 use crate::error::DbError;
 use crate::model::Edition as EditionRow;
+use crate::model::{ArchiveContent, ArchiveFacts, NewArchiveContent, ReadyArchiveContent};
 use crate::model::{
     Content, EditionDeclaration, NewContent, PeDeclaration, ReadyContent, Reason, StoredManifest,
     Upload, WimFacts,
@@ -34,6 +38,10 @@ const CONTENT_COLUMNS: &str = "id, kind, display_name, file_name, size, sha256, 
      reason_code, reason_text, created_by, initiating_audit_seq, created_at_us, updated_at_us, \
      ready_at_us, compression, image_count, boot_index, usable_index, pe_arch, pe_arch_source, \
      pe_kit_version, pe_kit_version_source, manifest, manifest_sig, manifest_key_id";
+
+/// The M2 readers see only image and PE rows; archive kinds (M4) are
+/// read through the `archive_*` functions below.
+const WIM_KINDS: &str = "kind IN ('image', 'pe')";
 
 const EDITION_COLUMNS: &str = "content_id, idx, name, description, total_bytes, decl_release, \
      decl_edition, decl_arch, release_source, edition_source, arch_source, declared_by, \
@@ -198,7 +206,7 @@ pub(crate) async fn get(
     lock: bool,
 ) -> Result<Option<Content>, DbError> {
     let sql = format!(
-        "SELECT {CONTENT_COLUMNS} FROM content WHERE id = $1{}",
+        "SELECT {CONTENT_COLUMNS} FROM content WHERE id = $1 AND {WIM_KINDS}{}",
         if lock { " FOR UPDATE" } else { "" }
     );
     let row = tx
@@ -213,7 +221,7 @@ pub(crate) async fn by_sha256(
 ) -> Result<Option<Content>, DbError> {
     let sql = format!(
         "SELECT {CONTENT_COLUMNS} FROM content \
-         WHERE sha256 = $1 AND state IN ('receiving', 'checking', 'ready')"
+         WHERE sha256 = $1 AND state IN ('receiving', 'checking', 'ready') AND {WIM_KINDS}"
     );
     let row = tx
         .query_opt("read content", &sql, &[&sha.0.as_slice()])
@@ -235,7 +243,7 @@ pub(crate) async fn list(
     let kind = kind.map(ContentKind::as_str);
     let sql = format!(
         "SELECT {CONTENT_COLUMNS} FROM content \
-         WHERE ($1::text IS NULL OR kind = $1) AND state = ANY($2) \
+         WHERE ($1::text IS NULL OR kind = $1) AND state = ANY($2) AND {WIM_KINDS} \
          ORDER BY created_at_us, id"
     );
     let rows = tx.query("list content", &sql, &[&kind, &st]).await?;
@@ -289,25 +297,7 @@ pub(crate) async fn create_upload(
         ],
     )
     .await?;
-    tx.execute(
-        "insert upload",
-        &format!(
-            "INSERT INTO upload ({UPLOAD_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
-        ),
-        &[
-            &to_uuid(u.id.as_bytes()),
-            &to_uuid(u.content_id.as_bytes()),
-            &to_uuid(u.operator_id.as_bytes()),
-            &to_i64(u.declared_size, "declared_size")?,
-            &u.declared_sha256.0.as_slice(),
-            &u.state.as_str(),
-            &check_text(&u.staging_name, "staging_name")?,
-            &u.created_at.as_micros(),
-            &u.expires_at.as_micros(),
-        ],
-    )
-    .await?;
-    Ok(())
+    insert_upload(tx, u).await
 }
 
 /// After a compare-and-set update that touched no row: tell "missing"
@@ -321,6 +311,10 @@ pub(crate) async fn cas_miss(tx: &mut PgTx, table: &'static str, id: &uuid::Uuid
         "job" => "SELECT 1 FROM job WHERE id = $1",
         "boot stop" => "SELECT 1 FROM boot_stop WHERE id = $1",
         "boot service" => "SELECT 1 FROM boot_service WHERE id = $1",
+        "driver archive" => "SELECT 1 FROM driver_archive WHERE id = $1",
+        "agent signer" => "SELECT 1 FROM agent_signer WHERE id = $1",
+        "agent package" => "SELECT 1 FROM agent_package WHERE id = $1",
+        "escrow" => "SELECT 1 FROM admin_password_escrow WHERE job_id = $1",
         _ => "SELECT 1 FROM content WHERE id = $1",
     };
     match tx.query_opt("compare-and-set check", sql, &[id]).await {
@@ -408,7 +402,7 @@ pub(crate) async fn set_ready(
              pe_arch = COALESCE($10, pe_arch), pe_arch_source = COALESCE($11, pe_arch_source), \
              pe_kit_version = COALESCE($12, pe_kit_version), \
              pe_kit_version_source = COALESCE($13, pe_kit_version_source) \
-             WHERE id = $1 AND state = 'checking'",
+             WHERE id = $1 AND state = 'checking' AND kind IN ('image', 'pe')",
             &[
                 &uid,
                 &r.at.as_micros(),
@@ -601,6 +595,271 @@ pub(crate) async fn set_upload_state(
         .await?;
     if n == 0 {
         return Err(cas_miss(tx, "upload", &uid).await);
+    }
+    Ok(())
+}
+
+// ----------------------------------------------- archive content (M4) --
+
+const ARCHIVE_COLUMNS: &str = "id, kind, display_name, file_name, size, sha256, state, \
+     reason_code, reason_text, created_by, initiating_audit_seq, created_at_us, updated_at_us, \
+     ready_at_us, manifest_schema, archive_format, archive_entries, archive_expanded_bytes, \
+     manifest, manifest_sig, manifest_key_id";
+
+/// The archive kinds (migration 0005).
+const ARCHIVE_KINDS: &str = "kind IN ('driver_archive', 'agent_package')";
+
+/// Checks a v2 manifest payload against the row it is (or will be)
+/// stored with, and returns the archive facts it states.
+pub(crate) fn archive_facts_of(
+    payload: &[u8],
+    id: ContentId,
+    kind: ContentKindV2,
+    size: u64,
+    sha256: &Sha256Digest,
+    ready_at: UnixMicros,
+) -> Option<ArchiveFacts> {
+    let m = ContentManifestV2::from_payload(payload).ok()?;
+    (m.content_id == id
+        && m.kind == kind
+        && m.size == size
+        && m.sha256 == *sha256
+        && m.ready_at == ready_at)
+        .then_some(ArchiveFacts {
+            format: m.archive.format,
+            entries: m.archive.entries,
+            expanded_bytes: m.archive.expanded_bytes,
+        })
+}
+
+fn archive_from_row(r: &Row) -> Result<ArchiveContent, DbError> {
+    let schema: i16 = col(r, "manifest_schema")?;
+    if schema != 2 {
+        return Err(DbError::Corrupt {
+            what: "manifest_schema",
+        });
+    }
+    let reason_code: Option<String> = col(r, "reason_code")?;
+    let reason_text: Option<String> = col(r, "reason_text")?;
+    let reason = reason_code.map(|code| Reason {
+        code,
+        text: reason_text.unwrap_or_default(),
+    });
+    let format = col_opt_enum(r, "archive_format", ArchiveFormat::parse)?;
+    let entries = col_opt_u32(r, "archive_entries")?;
+    let expanded = col_opt_u64(r, "archive_expanded_bytes")?;
+    let archive = match (format, entries, expanded) {
+        (Some(format), Some(entries), Some(expanded_bytes)) => Some(ArchiveFacts {
+            format,
+            entries,
+            expanded_bytes,
+        }),
+        (None, None, None) => None,
+        _ => {
+            return Err(DbError::Corrupt {
+                what: "archive facts",
+            });
+        }
+    };
+    let payload: Option<Vec<u8>> = col(r, "manifest")?;
+    let sig: Option<Vec<u8>> = col(r, "manifest_sig")?;
+    let key = col_opt_key_id(r, "manifest_key_id")?;
+    let c = ArchiveContent {
+        id: col_id(r, "id", ContentId::from_bytes)?,
+        kind: col_enum(r, "kind", ContentKindV2::parse)?,
+        display_name: col_text(r, "display_name", DisplayName::new)?,
+        file_name: col_text(r, "file_name", FileName::new)?,
+        size: col_u64(r, "size")?,
+        sha256: col_digest(r, "sha256")?,
+        state: col_enum(r, "state", ContentState::parse)?,
+        reason,
+        created_by: col_id(r, "created_by", OperatorId::from_bytes)?,
+        initiating_audit_seq: col_opt_u64(r, "initiating_audit_seq")?,
+        created_at: col_micros(r, "created_at_us")?,
+        updated_at: col_micros(r, "updated_at_us")?,
+        ready_at: col_opt_micros(r, "ready_at_us")?,
+        archive,
+        manifest: stored_manifest(payload, sig, key)?,
+    };
+    check_archive(&c)?;
+    Ok(c)
+}
+
+/// Re-validates a stored archive item: a stored manifest must parse as a
+/// v2 manifest of this item and state the stored facts (SI-7, SI-10).
+pub(crate) fn check_archive(c: &ArchiveContent) -> Result<(), DbError> {
+    match (&c.manifest, c.ready_at) {
+        (Some(m), Some(at)) => {
+            let facts = archive_facts_of(&m.payload, c.id, c.kind, c.size, &c.sha256, at);
+            if facts.is_none() || facts != c.archive {
+                return Err(DbError::Corrupt {
+                    what: "archive manifest",
+                });
+            }
+        }
+        (None, _) if c.archive.is_none() && c.state != ContentState::Ready => {}
+        _ => {
+            return Err(DbError::Corrupt {
+                what: "archive manifest",
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn archive_get(
+    tx: &mut PgTx,
+    id: ContentId,
+    lock: bool,
+) -> Result<Option<ArchiveContent>, DbError> {
+    let sql = format!(
+        "SELECT {ARCHIVE_COLUMNS} FROM content WHERE id = $1 AND {ARCHIVE_KINDS}{}",
+        if lock { " FOR UPDATE" } else { "" }
+    );
+    let row = tx
+        .query_opt("read archive content", &sql, &[&to_uuid(id.as_bytes())])
+        .await?;
+    row.map(|r| archive_from_row(&r)).transpose()
+}
+
+pub(crate) async fn archive_by_sha256(
+    tx: &mut PgTx,
+    sha: &Sha256Digest,
+) -> Result<Option<ArchiveContent>, DbError> {
+    let sql = format!(
+        "SELECT {ARCHIVE_COLUMNS} FROM content \
+         WHERE sha256 = $1 AND state IN ('receiving', 'checking', 'ready') AND {ARCHIVE_KINDS}"
+    );
+    let row = tx
+        .query_opt("read archive content", &sql, &[&sha.0.as_slice()])
+        .await?;
+    row.map(|r| archive_from_row(&r)).transpose()
+}
+
+pub(crate) async fn archive_list(
+    tx: &mut PgTx,
+    kind: Option<ContentKindV2>,
+    states: &[ContentState],
+) -> Result<Vec<ArchiveContent>, DbError> {
+    let states = if states.is_empty() {
+        ContentState::ALL
+    } else {
+        states
+    };
+    let st = texts(states, ContentState::as_str);
+    let kind = kind.map(ContentKindV2::as_str);
+    let sql = format!(
+        "SELECT {ARCHIVE_COLUMNS} FROM content \
+         WHERE ($1::text IS NULL OR kind = $1) AND state = ANY($2) AND {ARCHIVE_KINDS} \
+         ORDER BY created_at_us, id"
+    );
+    let rows = tx
+        .query("list archive content", &sql, &[&kind, &st])
+        .await?;
+    rows.iter().map(archive_from_row).collect()
+}
+
+pub(crate) async fn archive_create_upload(
+    tx: &mut PgTx,
+    c: &NewArchiveContent,
+    u: &Upload,
+) -> Result<(), DbError> {
+    if u.content_id != c.id || u.declared_size != c.size || u.declared_sha256 != c.sha256 {
+        return Err(DbError::InvalidArgument {
+            what: "upload does not match content",
+        });
+    }
+    let initiating = c
+        .initiating_audit_seq
+        .map(|s| to_i64(s, "initiating_audit_seq"))
+        .transpose()?;
+    tx.execute(
+        "insert archive content",
+        "INSERT INTO content (id, kind, display_name, file_name, size, sha256, state, \
+         created_by, initiating_audit_seq, created_at_us, updated_at_us, manifest_schema) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'receiving', $7, $8, $9, $9, 2)",
+        &[
+            &to_uuid(c.id.as_bytes()),
+            &c.kind.as_str(),
+            &c.display_name.as_str(),
+            &c.file_name.as_str(),
+            &to_i64(c.size, "size")?,
+            &c.sha256.0.as_slice(),
+            &to_uuid(c.created_by.as_bytes()),
+            &initiating,
+            &c.created_at.as_micros(),
+        ],
+    )
+    .await?;
+    insert_upload(tx, u).await
+}
+
+async fn insert_upload(tx: &mut PgTx, u: &Upload) -> Result<(), DbError> {
+    tx.execute(
+        "insert upload",
+        &format!(
+            "INSERT INTO upload ({UPLOAD_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        ),
+        &[
+            &to_uuid(u.id.as_bytes()),
+            &to_uuid(u.content_id.as_bytes()),
+            &to_uuid(u.operator_id.as_bytes()),
+            &to_i64(u.declared_size, "declared_size")?,
+            &u.declared_sha256.0.as_slice(),
+            &u.state.as_str(),
+            &check_text(&u.staging_name, "staging_name")?,
+            &u.created_at.as_micros(),
+            &u.expires_at.as_micros(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn archive_set_ready(
+    tx: &mut PgTx,
+    id: ContentId,
+    r: &ReadyArchiveContent,
+) -> Result<(), DbError> {
+    let Some(cur) = archive_get(tx, id, true).await? else {
+        return Err(DbError::NotFound { what: "content" });
+    };
+    if cur.state != ContentState::Checking {
+        return Err(DbError::Conflict { what: "content" });
+    }
+    let facts = archive_facts_of(
+        &r.manifest.payload,
+        cur.id,
+        cur.kind,
+        cur.size,
+        &cur.sha256,
+        r.at,
+    )
+    .ok_or(DbError::InvalidArgument {
+        what: "manifest does not describe this content",
+    })?;
+    let uid = to_uuid(id.as_bytes());
+    let n = tx
+        .execute(
+            "update archive content ready",
+            "UPDATE content SET state = 'ready', reason_code = NULL, reason_text = NULL, \
+             updated_at_us = $2, ready_at_us = $2, archive_format = $3, archive_entries = $4, \
+             archive_expanded_bytes = $5, manifest = $6, manifest_sig = $7, manifest_key_id = $8 \
+             WHERE id = $1 AND state = 'checking' AND kind IN ('driver_archive', 'agent_package')",
+            &[
+                &uid,
+                &r.at.as_micros(),
+                &facts.format.as_str(),
+                &to_i32(facts.entries, "archive entries")?,
+                &to_i64(facts.expanded_bytes, "archive expanded bytes")?,
+                &r.manifest.payload,
+                &r.manifest.signature,
+                &r.manifest.key_id.0.0.as_slice(),
+            ],
+        )
+        .await?;
+    if n == 0 {
+        return Err(cas_miss(tx, "content", &uid).await);
     }
     Ok(())
 }

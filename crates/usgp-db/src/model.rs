@@ -2,6 +2,8 @@
 //! (plan section 3.8: boot services, codes, device sessions, jobs, boot
 //! stops).
 //!
+//! M4 rows (migration 0005) are in [`m4`] and re-exported here.
+//!
 //! Values use the `usgp-proto` types, so a row read back from the database
 //! is re-validated: a value that no longer parses (a tampered or foreign
 //! row) is [`crate::DbError::Corrupt`], never a panic.
@@ -21,6 +23,18 @@ use usgp_proto::{
     EditionIndex, ErrorCode, Fact, FailureV1, FileName, JobId, JobState, KitVersion,
     LayoutReportV1, MacAddress, MacList, Note, OperatorId, PackageId, PackageStatus, SessionId,
     Step, StepState, SupportState, UnixMicros, UploadId, UploadState, WimCompression, WimText,
+};
+
+mod m4;
+
+pub use m4::{
+    AdminPasswordMode, AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId,
+    ArchiveContent, ArchiveFacts, DeviceValues, DriverArchive, DriverArchiveStatus, EscrowRecord,
+    EscrowState, JobStepV2, JobTimeoutsV2, JobV2, MAX_CONFIG_VALUE_CHARS,
+    MAX_DEVICE_VALUE_KEY_BYTES, MAX_DEVICE_VALUES, NewAgentPackage, NewArchiveContent,
+    NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce, NewResumeToken, PackageConfig,
+    PackageValues, ReadyArchiveContent, ResumeToken, SealedPassword, config_value_ok,
+    device_value_key_ok,
 };
 
 /// Role of an operator (M2 has one built-in role, REQ-RBAC-004).

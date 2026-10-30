@@ -53,7 +53,7 @@ fn from_row(r: &Row) -> Result<Package, DbError> {
     })
 }
 
-fn ref_from_row(r: &Row) -> Result<PackageRef, DbError> {
+pub(crate) fn ref_from_row(r: &Row) -> Result<PackageRef, DbError> {
     Ok(PackageRef {
         id: col_id(r, "id", PackageId::from_bytes)?,
         name: col_text(r, "name", DisplayName::new)?,

@@ -161,11 +161,12 @@ impl crate::repo::Store for PgStore {
     }
 }
 
-/// The only updates [`PgTx::execute_bookkeeping`] runs: bookkeeping that
-/// is not a state change and needs no audit record (plan section 3.1: a
-/// session's `last_seen_at`; section 3.4: a `progress` report's byte
-/// counts, sequence number and time). Nothing an operator or a device
-/// decides belongs here (finding SEC-007).
+/// The only statements [`PgTx::execute_bookkeeping`] runs: bookkeeping
+/// that is not a state change and needs no audit record (plan section 3.1:
+/// a session's `last_seen_at`; section 3.4: a `progress` report's byte
+/// counts, sequence number and time; M4 plan section 3.1: a resume
+/// challenge nonce, which the plan does not audit). Nothing an operator or
+/// a device decides belongs here (finding SEC-007).
 // COMPLIANCE MAPPING:
 // - NIST 800-53: AU-2, AU-12 - the unaudited write path is closed to all
 //   but these two statements; neither touches a state column.
@@ -175,12 +176,16 @@ pub(crate) enum Bookkeeping {
     TouchSession,
     /// `$1` job id, `$2` seq, `$3` time, `$4` bytes done, `$5` bytes total.
     JobProgress,
+    /// `$1` nonce SHA-256, `$2` job id, `$3` issue time, `$4` expiry, `$5`
+    /// most live nonces per job. Inserts one row only for a v2 job that is
+    /// running or lost with step 6 done; changes no existing row.
+    ResumeNonce,
 }
 
 impl Bookkeeping {
     /// Every statement (for tests).
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 2] = [Self::TouchSession, Self::JobProgress];
+    pub(crate) const ALL: [Self; 3] = [Self::TouchSession, Self::JobProgress, Self::ResumeNonce];
 
     /// The statement.
     pub(crate) const fn sql(self) -> &'static str {
@@ -195,6 +200,15 @@ impl Bookkeeping {
                  WHERE id = $1 AND state IN ('running', 'lost') AND last_seq < $2 \
                  AND COALESCE($4, bytes_done, 0) <= COALESCE($5, bytes_total, $4, bytes_done, 0)"
             }
+            Self::ResumeNonce => {
+                "INSERT INTO job_resume_nonce (nonce_hash, job_id, issued_at_us, expires_at_us) \
+                 SELECT $1::bytea, j.id, $3::bigint, $4::bigint FROM job j \
+                 WHERE j.id = $2 AND j.plan_schema = 2 AND j.state IN ('running', 'lost') \
+                 AND EXISTS (SELECT 1 FROM job_step s \
+                     WHERE s.job_id = j.id AND s.step = 6 AND s.state = 'done') \
+                 AND (SELECT count(*) FROM job_resume_nonce n \
+                     WHERE n.job_id = j.id AND n.used_at_us IS NULL AND n.expires_at_us > $3) < $5::bigint"
+            }
         }
     }
 
@@ -203,6 +217,7 @@ impl Bookkeeping {
         match self {
             Self::TouchSession => "touch device_session",
             Self::JobProgress => "update job progress",
+            Self::ResumeNonce => "insert job_resume_nonce",
         }
     }
 }
@@ -372,9 +387,18 @@ mod tests {
 
     /// Finding SEC-007: the unaudited write path runs only the two named
     /// updates, each of one row by id, and neither sets a state column
-    /// or anything a device or an operator decides.
+    /// or anything a device or an operator decides; and one insert of a
+    /// resume nonce, which writes only that table.
     #[test]
     fn bookkeeping_statements_are_closed() {
+        let nonce = Bookkeeping::ResumeNonce.sql();
+        assert!(nonce.starts_with(
+            "INSERT INTO job_resume_nonce (nonce_hash, job_id, issued_at_us, expires_at_us) SELECT"
+        ));
+        for forbidden in ["UPDATE", "DELETE", " SET ", "ON CONFLICT"] {
+            assert!(!nonce.contains(forbidden), "{forbidden} in {nonce}");
+        }
+        assert_eq!(nonce.matches("INSERT").count(), 1);
         let allowed: [(&str, &[&str]); 2] = [
             ("UPDATE device_session SET", &["last_seen_at_us"]),
             (
@@ -382,7 +406,9 @@ mod tests {
                 &["last_seq", "last_report_at_us", "bytes_done", "bytes_total"],
             ),
         ];
-        for (stmt, (prefix, cols)) in Bookkeeping::ALL.iter().zip(allowed) {
+        let updates = [Bookkeeping::TouchSession, Bookkeeping::JobProgress];
+        assert_eq!(Bookkeeping::ALL.len(), updates.len() + 1);
+        for (stmt, (prefix, cols)) in updates.iter().zip(allowed) {
             let sql = stmt.sql();
             assert!(sql.starts_with(prefix), "{sql}");
             assert!(sql.contains("WHERE id = $1"), "{sql}");

@@ -47,12 +47,20 @@ use usgp_proto::device::SessionState;
 use usgp_proto::limits::MAX_BOOT_SERVICE_PACKAGES;
 use usgp_proto::ops::BootServiceStatus;
 use usgp_proto::{
-    AuthCodeId, BootServiceId, BootStopId, ContentId, ContentKind, ContentState, DiskDescriptorV1,
-    ErrorCode, FailureV1, JobId, JobState, LayoutReportV1, MacList, OperatorId, PackageId,
-    PackageStatus, SessionId, Step, StepState, SupportState, UnixMicros, UploadId, UploadState,
+    AgentPackageId, AgentPackageManifestV1, AuthCodeId, BootServiceId, BootStopId, ContentId,
+    ContentKind, ContentKindV2, ContentState, DiskDescriptorV1, DriverArchiveId, ErrorCode,
+    FailureV1, FailureV2, JobId, JobState, LayoutReportV1, MacAddress, MacList, OperatorId,
+    PackageId, PackageStatus, SessionId, Step, StepState, StepV2, SupportState, UnixMicros,
+    UploadId, UploadState,
 };
 
 use crate::error::DbError;
+use crate::model::{
+    AgentPackage, AgentPackageStatus, AgentSigner, AgentSignerId, ArchiveContent, DeviceValues,
+    DriverArchive, DriverArchiveStatus, EscrowRecord, EscrowState, JobStepV2, JobV2,
+    NewAgentPackage, NewArchiveContent, NewDriverArchive, NewEscrow, NewJobV2, NewResumeNonce,
+    NewResumeToken, PackageConfig, ReadyArchiveContent, ResumeToken, SealedPassword,
+};
 use crate::model::{
     AuthCodeRecord, BootService, BootServicePackage, BootStop, ChosenPackage, Content,
     DeviceSession, Edition, EditionDeclaration, Job, JobStep, NewAuthCode, NewBootStop, NewContent,
@@ -75,11 +83,35 @@ struct State {
     sessions: Vec<DeviceSession>,
     jobs: Vec<Job>,
     job_steps: Vec<JobStep>,
+    // M4 (migration 0005).
+    archives: Vec<ArchiveContent>,
+    driver_archives: Vec<DriverArchive>,
+    /// Ordered driver lists by package.
+    package_drivers: Vec<(PackageId, Vec<DriverArchiveId>)>,
+    agent_signers: Vec<AgentSigner>,
+    agent_packages: Vec<AgentPackage>,
+    package_configs: Vec<PackageConfig>,
+    device_values: Vec<DeviceValues>,
+    jobs_v2: Vec<JobV2>,
+    job_steps_v2: Vec<JobStepV2>,
+    /// Nonces by SHA-256: job, issued, expires, used.
+    resume_nonces: Vec<MemNonce>,
+    /// Tokens by SHA-256.
+    resume_tokens: Vec<(Sha256Digest, ResumeToken)>,
+    escrows: Vec<(EscrowRecord, SealedPassword)>,
     boot_stops: Vec<BootStop>,
     generations: Vec<(BootServiceId, u64)>,
     records: Vec<AuditRecord>,
     checkpoints: Vec<Checkpoint>,
     head: Option<ChainHead>,
+}
+
+#[derive(Debug, Clone)]
+struct MemNonce {
+    hash: Sha256Digest,
+    job_id: JobId,
+    expires_at: UnixMicros,
+    used_at: Option<UnixMicros>,
 }
 
 #[derive(Debug, Default)]
@@ -302,17 +334,91 @@ impl MemoryTx {
     /// The deferred wipe guard of migration 0004: every job names a
     /// stored, successful `disk.wipe.authorised` record that targets it.
     fn wipe_records_ok(&self) -> bool {
-        self.work.jobs.iter().all(|j| {
-            let target = j.id.to_string();
+        let ok = |id: JobId, seq: u64, hash: Sha256Digest| {
+            let target = id.to_string();
             self.work.records.iter().any(|r| {
-                r.seq == j.wipe_audit_seq
-                    && r.record_hash == j.wipe_record_hash
+                r.seq == seq
+                    && r.record_hash == hash
                     && r.event == WIPE_EVENT
                     && r.outcome == "success"
                     && r.target_kind.as_deref() == Some("job")
                     && r.target_id.as_deref() == Some(target.as_str())
             })
-        })
+        };
+        self.work
+            .jobs
+            .iter()
+            .all(|j| ok(j.id, j.wipe_audit_seq, j.wipe_record_hash))
+            && self
+                .work
+                .jobs_v2
+                .iter()
+                .all(|j| ok(j.id, j.wipe_audit_seq, j.wipe_record_hash))
+    }
+
+    /// Any content item (any kind) has this id.
+    fn content_id_taken(&self, id: ContentId) -> bool {
+        self.content_ref(id).is_some() || self.work.archives.iter().any(|a| a.id == id)
+    }
+
+    /// A live item (any kind) has this digest (0001 partial index).
+    fn live_digest(&self, sha: &Sha256Digest) -> bool {
+        self.work
+            .content
+            .iter()
+            .any(|x| x.sha256 == *sha && LIVE.contains(&x.state))
+            || self
+                .work
+                .archives
+                .iter()
+                .any(|x| x.sha256 == *sha && LIVE.contains(&x.state))
+    }
+
+    /// A job of either schema exists.
+    fn job_exists(&self, id: JobId) -> bool {
+        self.job_ref(id).is_some() || self.work.jobs_v2.iter().any(|j| j.id == id)
+    }
+
+    /// The unique job columns of 0004 (id, session, wipe record) across
+    /// both schemas.
+    fn job_identity_taken(&self, id: JobId, session: SessionId, wipe_seq: u64) -> bool {
+        self.work
+            .jobs
+            .iter()
+            .any(|x| x.id == id || x.session_id == session || x.wipe_audit_seq == wipe_seq)
+            || self
+                .work
+                .jobs_v2
+                .iter()
+                .any(|x| x.id == id || x.session_id == session || x.wipe_audit_seq == wipe_seq)
+    }
+
+    /// `set_job_state` for a v2 job: success needs step 9 done.
+    fn set_job_v2_state(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        to: JobState,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        let step9_done = self.work.job_steps_v2.iter().any(|s| {
+            s.job_id == id && s.step == StepV2::REPORT_READY && s.state == StepState::Done
+        });
+        let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id) else {
+            return Err(DbError::NotFound { what: "job" });
+        };
+        if !from.contains(&j.state) || (to == JobState::Succeeded && !step9_done) {
+            return Err(DbError::Conflict { what: "job" });
+        }
+        if j.state != to && !j.state.can_become(to) {
+            self.failed = true;
+            return Err(DbError::Constraint {
+                what: "update job state",
+            });
+        }
+        j.state = to;
+        j.finished_at = (to == JobState::Succeeded).then_some(at);
+        Ok(())
     }
 
     fn package_refs(&self, f: impl Fn(&Package) -> bool) -> Vec<PackageRef> {
@@ -526,13 +632,7 @@ impl RepoTx for MemoryTx {
             return Err(DbError::InvalidArgument { what: "size" });
         }
         self.write()?;
-        if self.content_ref(c.id).is_some()
-            || self
-                .work
-                .content
-                .iter()
-                .any(|x| x.sha256 == c.sha256 && LIVE.contains(&x.state))
-        {
+        if self.content_id_taken(c.id) || self.live_digest(&c.sha256) {
             return Err(self.abort(DbError::Conflict {
                 what: "insert content",
             }));
@@ -596,6 +696,17 @@ impl RepoTx for MemoryTx {
             });
         }
         self.write()?;
+        if let Some(a) = self.work.archives.iter_mut().find(|a| a.id == id) {
+            if !from.contains(&a.state) {
+                return Err(DbError::Conflict { what: "content" });
+            }
+            a.state = to;
+            if let Some(r) = reason {
+                a.reason = Some(r.clone());
+            }
+            a.updated_at = at;
+            return Ok(());
+        }
         let c = self
             .content_mut(id)
             .ok_or(DbError::NotFound { what: "content" })?;
@@ -895,6 +1006,9 @@ impl RepoTx for MemoryTx {
             }));
         }
         self.work.packages.remove(pos);
+        // Migration 0005: configuration and driver list go with it.
+        self.work.package_drivers.retain(|(p, _)| *p != id);
+        self.work.package_configs.retain(|c| c.package_id != id);
         Ok(())
     }
 
@@ -1625,9 +1739,7 @@ impl RepoTx for MemoryTx {
         let json = crate::repo::conv::to_json(&j.disk, "disk descriptor")?;
         let disk: DiskDescriptorV1 = crate::repo::conv::from_json(&json, "disk")?;
         self.write()?;
-        if self.work.jobs.iter().any(|x| {
-            x.id == j.id || x.session_id == j.session_id || x.wipe_audit_seq == j.wipe_audit_seq
-        }) {
+        if self.job_identity_taken(j.id, j.session_id, j.wipe_audit_seq) {
             return Err(self.abort(DbError::Conflict { what: "insert job" }));
         }
         let refs_ok = self.session_ref(j.session_id).is_some()
@@ -1637,8 +1749,7 @@ impl RepoTx for MemoryTx {
                 .iter()
                 .any(|b| b.id == j.boot_service_id)
             && self.content_ref(j.image_content_id).is_some()
-            && j.previous_job_id
-                .is_none_or(|p| self.work.jobs.iter().any(|x| x.id == p));
+            && j.previous_job_id.is_none_or(|p| self.job_exists(p));
         if !refs_ok {
             return Err(self.abort(DbError::Constraint { what: "insert job" }));
         }
@@ -1739,26 +1850,42 @@ impl RepoTx for MemoryTx {
 
     async fn running_jobs_for_macs(&mut self, macs: &MacList) -> Result<Vec<JobId>, DbError> {
         self.check()?;
-        let mut v: Vec<&Job> = self
+        let mut v: Vec<(UnixMicros, JobId)> = self
             .work
             .jobs
             .iter()
             .filter(|j| j.state == JobState::Running && j.macs.overlaps(macs))
+            .map(|j| (j.started_at, j.id))
+            .chain(
+                self.work
+                    .jobs_v2
+                    .iter()
+                    .filter(|j| j.state == JobState::Running && j.macs.overlaps(macs))
+                    .map(|j| (j.started_at, j.id)),
+            )
             .collect();
-        v.sort_by_key(|j| (j.started_at, j.id));
-        Ok(v.into_iter().map(|j| j.id).collect())
+        v.sort();
+        Ok(v.into_iter().map(|(_, id)| id).collect())
     }
 
     async fn previous_failed_job(&mut self, macs: &MacList) -> Result<Option<JobId>, DbError> {
         self.check()?;
+        let failed = |s: JobState| matches!(s, JobState::Failed | JobState::Lost);
         Ok(self
             .work
             .jobs
             .iter()
-            .filter(|j| matches!(j.state, JobState::Failed | JobState::Lost))
-            .filter(|j| j.macs.overlaps(macs))
-            .max_by_key(|j| (j.started_at, j.id))
-            .map(|j| j.id))
+            .filter(|j| failed(j.state) && j.macs.overlaps(macs))
+            .map(|j| (j.started_at, j.id))
+            .chain(
+                self.work
+                    .jobs_v2
+                    .iter()
+                    .filter(|j| failed(j.state) && j.macs.overlaps(macs))
+                    .map(|j| (j.started_at, j.id)),
+            )
+            .max()
+            .map(|(_, id)| id))
     }
 
     async fn set_job_step(
@@ -1823,6 +1950,9 @@ impl RepoTx for MemoryTx {
             });
         }
         self.write()?;
+        if self.work.jobs_v2.iter().any(|j| j.id == id) {
+            return self.set_job_v2_state(id, from, to, at);
+        }
         let step4_done =
             self.work.job_steps.iter().any(|s| {
                 s.job_id == id && s.step == Step::MAKE_BOOTABLE && s.state == StepState::Done
@@ -1856,6 +1986,10 @@ impl RepoTx for MemoryTx {
         let json = crate::repo::conv::to_json(failure, "failure")?;
         let failure: FailureV1 = crate::repo::conv::from_json(&json, "failure_detail")?;
         self.write()?;
+        if self.work.jobs_v2.iter().any(|j| j.id == id) {
+            // As PostgreSQL: the row exists but is not a v1 job.
+            return Err(DbError::Conflict { what: "job" });
+        }
         let j = self.job_mut(id).ok_or(DbError::NotFound { what: "job" })?;
         if !from.contains(&j.state) {
             return Err(DbError::Conflict { what: "job" });
@@ -1877,6 +2011,13 @@ impl RepoTx for MemoryTx {
         let json = crate::repo::conv::to_json(layout, "layout")?;
         let layout: LayoutReportV1 = crate::repo::conv::from_json(&json, "layout")?;
         self.write()?;
+        if let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id) {
+            if j.state.is_final() {
+                return Err(DbError::Conflict { what: "job" });
+            }
+            j.layout = Some(layout);
+            return Ok(());
+        }
         let j = self.job_mut(id).ok_or(DbError::NotFound { what: "job" })?;
         if j.state.is_final() {
             return Err(DbError::Conflict { what: "job" });
@@ -1909,19 +2050,32 @@ impl RepoTx for MemoryTx {
         }
         // Bookkeeping, not a state change (no `write`, no audit needed).
         self.check()?;
-        let j = self.job_mut(id).ok_or(DbError::NotFound { what: "job" })?;
-        let done = bytes_done.or(j.bytes_done);
-        let total = bytes_total.or(j.bytes_total);
-        if j.state.is_final()
-            || seq <= j.last_seq
+        let (state, last_seq, cur_done, cur_total) =
+            if let Some(j) = self.work.jobs_v2.iter().find(|j| j.id == id) {
+                (j.state, j.last_seq, j.bytes_done, j.bytes_total)
+            } else {
+                let j = self.job_ref(id).ok_or(DbError::NotFound { what: "job" })?;
+                (j.state, j.last_seq, j.bytes_done, j.bytes_total)
+            };
+        let done = bytes_done.or(cur_done);
+        let total = bytes_total.or(cur_total);
+        if state.is_final()
+            || seq <= last_seq
             || matches!((done, total), (Some(d), Some(t)) if d > t)
         {
             return Err(DbError::Conflict { what: "job" });
         }
-        j.last_seq = seq;
-        j.last_report_at = Some(at);
-        j.bytes_done = done;
-        j.bytes_total = total;
+        if let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id) {
+            j.last_seq = seq;
+            j.last_report_at = Some(at);
+            j.bytes_done = done;
+            j.bytes_total = total;
+        } else if let Some(j) = self.job_mut(id) {
+            j.last_seq = seq;
+            j.last_report_at = Some(at);
+            j.bytes_done = done;
+            j.bytes_total = total;
+        }
         Ok(())
     }
 
@@ -1932,8 +2086,13 @@ impl RepoTx for MemoryTx {
         at: UnixMicros,
     ) -> Result<(), DbError> {
         self.write()?;
-        let j = self.job_ref(id).ok_or(DbError::NotFound { what: "job" })?;
-        if j.state != JobState::Failed || j.acknowledged.is_some() {
+        let (state, acked) = if let Some(j) = self.work.jobs_v2.iter().find(|j| j.id == id) {
+            (j.state, j.acknowledged.is_some())
+        } else {
+            let j = self.job_ref(id).ok_or(DbError::NotFound { what: "job" })?;
+            (j.state, j.acknowledged.is_some())
+        };
+        if state != JobState::Failed || acked {
             return Err(DbError::Conflict { what: "job" });
         }
         if !self.operator_exists(by) {
@@ -1941,7 +2100,9 @@ impl RepoTx for MemoryTx {
                 what: "update job acknowledged",
             }));
         }
-        if let Some(j) = self.job_mut(id) {
+        if let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id) {
+            j.acknowledged = Some((by, at));
+        } else if let Some(j) = self.job_mut(id) {
             j.acknowledged = Some((by, at));
         }
         Ok(())
@@ -1958,11 +2119,1239 @@ impl RepoTx for MemoryTx {
                 ids.push(j.id);
             }
         }
+        for j in &mut self.work.jobs_v2 {
+            if j.state == JobState::Running
+                && j.last_report_at.unwrap_or(j.started_at) < silent_before
+            {
+                j.state = JobState::Lost;
+                ids.push(j.id);
+            }
+        }
         if !ids.is_empty() {
             self.write()?;
         }
         ids.sort();
         Ok(ids)
+    }
+
+    async fn archive_content(&mut self, id: ContentId) -> Result<Option<ArchiveContent>, DbError> {
+        self.check()?;
+        Ok(self.work.archives.iter().find(|a| a.id == id).cloned())
+    }
+
+    async fn lock_archive_content(
+        &mut self,
+        id: ContentId,
+    ) -> Result<Option<ArchiveContent>, DbError> {
+        self.archive_content(id).await
+    }
+
+    async fn archive_content_by_sha256(
+        &mut self,
+        sha: &Sha256Digest,
+    ) -> Result<Option<ArchiveContent>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .archives
+            .iter()
+            .find(|c| c.sha256 == *sha && LIVE.contains(&c.state))
+            .cloned())
+    }
+
+    async fn list_archive_content(
+        &mut self,
+        kind: Option<ContentKindV2>,
+        states: &[ContentState],
+    ) -> Result<Vec<ArchiveContent>, DbError> {
+        self.check()?;
+        let mut v: Vec<ArchiveContent> = self
+            .work
+            .archives
+            .iter()
+            .filter(|c| kind.is_none_or(|k| c.kind == k))
+            .filter(|c| states.is_empty() || states.contains(&c.state))
+            .cloned()
+            .collect();
+        v.sort_by_key(|c| (c.created_at, c.id));
+        Ok(v)
+    }
+
+    async fn create_archive_upload(
+        &mut self,
+        c: &NewArchiveContent,
+        u: &Upload,
+    ) -> Result<(), DbError> {
+        if u.content_id != c.id || u.declared_size != c.size || u.declared_sha256 != c.sha256 {
+            return Err(DbError::InvalidArgument {
+                what: "upload does not match content",
+            });
+        }
+        if i64::try_from(c.size).is_err() || c.size == 0 {
+            return Err(DbError::InvalidArgument { what: "size" });
+        }
+        self.write()?;
+        if self.content_id_taken(c.id) || self.live_digest(&c.sha256) {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert archive content",
+            }));
+        }
+        if self
+            .work
+            .uploads
+            .iter()
+            .any(|x| x.id == u.id || x.staging_name == u.staging_name)
+        {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert upload",
+            }));
+        }
+        if !self.operator_exists(c.created_by) || !self.operator_exists(u.operator_id) {
+            return Err(self.abort(DbError::Constraint {
+                what: "insert archive content",
+            }));
+        }
+        self.work.archives.push(ArchiveContent {
+            id: c.id,
+            kind: c.kind,
+            display_name: c.display_name.clone(),
+            file_name: c.file_name.clone(),
+            size: c.size,
+            sha256: c.sha256,
+            state: ContentState::Receiving,
+            reason: None,
+            created_by: c.created_by,
+            initiating_audit_seq: c.initiating_audit_seq,
+            created_at: c.created_at,
+            updated_at: c.created_at,
+            ready_at: None,
+            archive: None,
+            manifest: None,
+        });
+        self.work.uploads.push(u.clone());
+        Ok(())
+    }
+
+    async fn set_archive_content_ready(
+        &mut self,
+        id: ContentId,
+        r: &ReadyArchiveContent,
+    ) -> Result<(), DbError> {
+        self.check()?;
+        let Some(cur) = self.work.archives.iter().find(|a| a.id == id) else {
+            return Err(DbError::NotFound { what: "content" });
+        };
+        if cur.state != ContentState::Checking {
+            return Err(DbError::Conflict { what: "content" });
+        }
+        let facts = crate::repo::content::archive_facts_of(
+            &r.manifest.payload,
+            cur.id,
+            cur.kind,
+            cur.size,
+            &cur.sha256,
+            r.at,
+        )
+        .ok_or(DbError::InvalidArgument {
+            what: "manifest does not describe this content",
+        })?;
+        self.write()?;
+        if let Some(a) = self.work.archives.iter_mut().find(|a| a.id == id) {
+            a.state = ContentState::Ready;
+            a.reason = None;
+            a.updated_at = r.at;
+            a.ready_at = Some(r.at);
+            a.archive = Some(facts);
+            a.manifest = Some(r.manifest.clone());
+        }
+        Ok(())
+    }
+
+    async fn insert_driver_archive(&mut self, a: &NewDriverArchive) -> Result<(), DbError> {
+        self.write()?;
+        if self
+            .work
+            .driver_archives
+            .iter()
+            .any(|x| x.id == a.id || x.content_id == a.content_id)
+        {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert driver_archive",
+            }));
+        }
+        let content_ok = self
+            .work
+            .archives
+            .iter()
+            .any(|c| c.id == a.content_id && c.kind == ContentKindV2::DriverArchive);
+        if !content_ok || !self.operator_exists(a.created_by) {
+            return Err(self.abort(DbError::Constraint {
+                what: "insert driver_archive",
+            }));
+        }
+        self.work.driver_archives.push(DriverArchive {
+            id: a.id,
+            content_id: a.content_id,
+            name: a.name.clone(),
+            format: None,
+            status: DriverArchiveStatus::Checking,
+            refusal: None,
+            infs: Vec::new(),
+            expanded_bytes: None,
+            created_by: a.created_by,
+            created_at: a.created_at,
+            updated_at: a.created_at,
+            replaced_at: None,
+        });
+        Ok(())
+    }
+
+    async fn driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> Result<Option<DriverArchive>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .driver_archives
+            .iter()
+            .find(|a| a.id == id)
+            .cloned())
+    }
+
+    async fn lock_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> Result<Option<DriverArchive>, DbError> {
+        self.driver_archive(id).await
+    }
+
+    async fn list_driver_archives(
+        &mut self,
+        statuses: &[DriverArchiveStatus],
+    ) -> Result<Vec<DriverArchive>, DbError> {
+        self.check()?;
+        let mut v: Vec<DriverArchive> = self
+            .work
+            .driver_archives
+            .iter()
+            .filter(|a| statuses.is_empty() || statuses.contains(&a.status))
+            .cloned()
+            .collect();
+        v.sort_by_key(|a| (a.created_at, a.id));
+        Ok(v)
+    }
+
+    async fn set_driver_archive_ready(
+        &mut self,
+        id: DriverArchiveId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.check()?;
+        let Some(cur) = self.work.driver_archives.iter().find(|a| a.id == id) else {
+            return Err(DbError::NotFound {
+                what: "driver archive",
+            });
+        };
+        if cur.status != DriverArchiveStatus::Checking {
+            return Err(DbError::Conflict {
+                what: "driver archive",
+            });
+        }
+        let content_id = cur.content_id;
+        let (format, infs, expanded) = self
+            .work
+            .archives
+            .iter()
+            .find(|c| c.id == content_id)
+            .and_then(crate::repo::drivers::ready_facts)
+            .ok_or(DbError::Conflict {
+                what: "driver archive content not ready",
+            })?;
+        self.write()?;
+        if let Some(a) = self.work.driver_archives.iter_mut().find(|a| a.id == id) {
+            a.status = DriverArchiveStatus::Ready;
+            a.format = Some(format);
+            a.infs = infs;
+            a.expanded_bytes = Some(expanded);
+            a.updated_at = at;
+        }
+        Ok(())
+    }
+
+    async fn refuse_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let a = self
+            .work
+            .driver_archives
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or(DbError::NotFound {
+                what: "driver archive",
+            })?;
+        if a.status != DriverArchiveStatus::Checking {
+            return Err(DbError::Conflict {
+                what: "driver archive",
+            });
+        }
+        a.status = DriverArchiveStatus::Refused;
+        a.refusal = Some(reason.clone());
+        a.updated_at = at;
+        Ok(())
+    }
+
+    async fn replace_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        content_id: ContentId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let Some(cur) = self.work.driver_archives.iter().find(|a| a.id == id) else {
+            return Err(DbError::NotFound {
+                what: "driver archive",
+            });
+        };
+        if !matches!(
+            cur.status,
+            DriverArchiveStatus::Ready | DriverArchiveStatus::Refused
+        ) || cur.content_id == content_id
+        {
+            return Err(DbError::Conflict {
+                what: "driver archive",
+            });
+        }
+        let taken = self
+            .work
+            .driver_archives
+            .iter()
+            .any(|a| a.content_id == content_id);
+        if taken {
+            return Err(self.abort(DbError::Conflict {
+                what: "update driver_archive replaced",
+            }));
+        }
+        let content_ok = self
+            .work
+            .archives
+            .iter()
+            .any(|c| c.id == content_id && c.kind == ContentKindV2::DriverArchive);
+        if !content_ok {
+            return Err(self.abort(DbError::Constraint {
+                what: "update driver_archive replaced",
+            }));
+        }
+        if let Some(a) = self.work.driver_archives.iter_mut().find(|a| a.id == id) {
+            a.status = DriverArchiveStatus::Checking;
+            a.content_id = content_id;
+            a.format = None;
+            a.infs = Vec::new();
+            a.expanded_bytes = None;
+            a.refusal = None;
+            a.updated_at = at;
+            a.replaced_at = Some(at);
+        }
+        Ok(())
+    }
+
+    async fn delete_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let used = self
+            .work
+            .package_drivers
+            .iter()
+            .any(|(_, ids)| ids.contains(&id));
+        let a = self
+            .work
+            .driver_archives
+            .iter_mut()
+            .find(|a| a.id == id)
+            .ok_or(DbError::NotFound {
+                what: "driver archive",
+            })?;
+        if a.status == DriverArchiveStatus::Deleted || used {
+            return Err(DbError::Conflict {
+                what: "driver archive",
+            });
+        }
+        a.status = DriverArchiveStatus::Deleted;
+        a.updated_at = at;
+        Ok(())
+    }
+
+    async fn packages_using_driver_archive(
+        &mut self,
+        id: DriverArchiveId,
+    ) -> Result<Vec<PackageRef>, DbError> {
+        self.check()?;
+        let users: Vec<PackageId> = self
+            .work
+            .package_drivers
+            .iter()
+            .filter(|(_, ids)| ids.contains(&id))
+            .map(|(p, _)| *p)
+            .collect();
+        Ok(self.package_refs(|p| users.contains(&p.id)))
+    }
+
+    async fn package_drivers(
+        &mut self,
+        package: PackageId,
+    ) -> Result<Vec<DriverArchiveId>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .package_drivers
+            .iter()
+            .find(|(p, _)| *p == package)
+            .map(|(_, ids)| ids.clone())
+            .unwrap_or_default())
+    }
+
+    async fn set_package_drivers(
+        &mut self,
+        package: PackageId,
+        archives: &[DriverArchiveId],
+    ) -> Result<(), DbError> {
+        crate::repo::drivers::check_driver_list(archives)?;
+        self.check()?;
+        if !self.work.packages.iter().any(|p| p.id == package) {
+            return Err(DbError::NotFound { what: "package" });
+        }
+        let all_live = archives.iter().all(|id| {
+            self.work
+                .driver_archives
+                .iter()
+                .any(|a| a.id == *id && a.status != DriverArchiveStatus::Deleted)
+        });
+        if !all_live {
+            return Err(self.abort(DbError::Constraint {
+                what: "package driver archive",
+            }));
+        }
+        self.write()?;
+        self.work.package_drivers.retain(|(p, _)| *p != package);
+        if !archives.is_empty() {
+            self.work.package_drivers.push((package, archives.to_vec()));
+        }
+        Ok(())
+    }
+
+    async fn insert_agent_signer(&mut self, s: &AgentSigner) -> Result<(), DbError> {
+        if s.revoked.is_some() || !crate::repo::agent_packages::key_id_matches(&s.spki, &s.key_id) {
+            return Err(DbError::InvalidArgument {
+                what: "agent signer",
+            });
+        }
+        self.write()?;
+        if self
+            .work
+            .agent_signers
+            .iter()
+            .any(|x| x.id == s.id || x.spki == s.spki || x.key_id == s.key_id)
+        {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert agent_signer",
+            }));
+        }
+        if !self.operator_exists(s.added_by) {
+            return Err(self.abort(DbError::Constraint {
+                what: "insert agent_signer",
+            }));
+        }
+        self.work.agent_signers.push(s.clone());
+        Ok(())
+    }
+
+    async fn agent_signer(&mut self, id: AgentSignerId) -> Result<Option<AgentSigner>, DbError> {
+        self.check()?;
+        Ok(self.work.agent_signers.iter().find(|s| s.id == id).cloned())
+    }
+
+    async fn agent_signer_by_key_id(
+        &mut self,
+        key_id: &Sha256Digest,
+    ) -> Result<Option<AgentSigner>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .agent_signers
+            .iter()
+            .find(|s| s.key_id == *key_id)
+            .cloned())
+    }
+
+    async fn list_agent_signers(&mut self) -> Result<Vec<AgentSigner>, DbError> {
+        self.check()?;
+        let mut v = self.work.agent_signers.clone();
+        v.sort_by_key(|s| (s.added_at, s.id));
+        Ok(v)
+    }
+
+    async fn revoke_agent_signer(
+        &mut self,
+        id: AgentSignerId,
+        by: OperatorId,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let known = self.operator_exists(by);
+        let s = self
+            .work
+            .agent_signers
+            .iter_mut()
+            .find(|s| s.id == id)
+            .ok_or(DbError::NotFound {
+                what: "agent signer",
+            })?;
+        if s.revoked.is_some() {
+            return Err(DbError::Conflict {
+                what: "agent signer",
+            });
+        }
+        if !known {
+            return Err(self.abort(DbError::Constraint {
+                what: "update agent_signer revoked",
+            }));
+        }
+        s.revoked = Some((by, at));
+        Ok(())
+    }
+
+    async fn insert_agent_package(&mut self, p: &NewAgentPackage) -> Result<(), DbError> {
+        self.write()?;
+        if self
+            .work
+            .agent_packages
+            .iter()
+            .any(|x| x.id == p.id || x.content_id == p.content_id)
+        {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert agent_package",
+            }));
+        }
+        let content_ok = self
+            .work
+            .archives
+            .iter()
+            .any(|c| c.id == p.content_id && c.kind == ContentKindV2::AgentPackage);
+        if !content_ok || !self.operator_exists(p.created_by) {
+            return Err(self.abort(DbError::Constraint {
+                what: "insert agent_package",
+            }));
+        }
+        self.work.agent_packages.push(AgentPackage {
+            id: p.id,
+            content_id: p.content_id,
+            signer_id: None,
+            manifest: None,
+            status: AgentPackageStatus::Checking,
+            refusal: None,
+            created_by: p.created_by,
+            created_at: p.created_at,
+            updated_at: p.created_at,
+        });
+        Ok(())
+    }
+
+    async fn agent_package(&mut self, id: AgentPackageId) -> Result<Option<AgentPackage>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .agent_packages
+            .iter()
+            .find(|p| p.id == id)
+            .cloned())
+    }
+
+    async fn lock_agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> Result<Option<AgentPackage>, DbError> {
+        self.agent_package(id).await
+    }
+
+    async fn list_agent_packages(
+        &mut self,
+        statuses: &[AgentPackageStatus],
+    ) -> Result<Vec<AgentPackage>, DbError> {
+        self.check()?;
+        let mut v: Vec<AgentPackage> = self
+            .work
+            .agent_packages
+            .iter()
+            .filter(|p| statuses.is_empty() || statuses.contains(&p.status))
+            .cloned()
+            .collect();
+        v.sort_by_key(|p| (p.created_at, p.id));
+        Ok(v)
+    }
+
+    async fn set_agent_package_ready(
+        &mut self,
+        id: AgentPackageId,
+        signer: AgentSignerId,
+        manifest: &AgentPackageManifestV1,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        let json = crate::repo::agent_packages::manifest_to_json(manifest)?;
+        let manifest = crate::repo::agent_packages::manifest_from_json(&json)?;
+        self.check()?;
+        let Some(cur) = self.work.agent_packages.iter().find(|p| p.id == id) else {
+            return Err(DbError::NotFound {
+                what: "agent package",
+            });
+        };
+        if cur.status != AgentPackageStatus::Checking {
+            return Err(DbError::Conflict {
+                what: "agent package",
+            });
+        }
+        let content_id = cur.content_id;
+        let content_ready = self.work.archives.iter().any(|c| {
+            c.id == content_id
+                && c.state == ContentState::Ready
+                && c.kind == ContentKindV2::AgentPackage
+                && c.manifest.is_some()
+        });
+        if !content_ready {
+            return Err(DbError::Conflict {
+                what: "agent package content not ready",
+            });
+        }
+        let signer_live = self
+            .work
+            .agent_signers
+            .iter()
+            .any(|s| s.id == signer && s.revoked.is_none());
+        if !signer_live {
+            return Err(DbError::Conflict {
+                what: "agent signer",
+            });
+        }
+        self.write()?;
+        if let Some(p) = self.work.agent_packages.iter_mut().find(|p| p.id == id) {
+            p.status = AgentPackageStatus::Ready;
+            p.signer_id = Some(signer);
+            p.manifest = Some(manifest);
+            p.updated_at = at;
+        }
+        Ok(())
+    }
+
+    async fn refuse_agent_package(
+        &mut self,
+        id: AgentPackageId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let p = self
+            .work
+            .agent_packages
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or(DbError::NotFound {
+                what: "agent package",
+            })?;
+        if p.status != AgentPackageStatus::Checking {
+            return Err(DbError::Conflict {
+                what: "agent package",
+            });
+        }
+        p.status = AgentPackageStatus::Refused;
+        p.refusal = Some(reason.clone());
+        p.updated_at = at;
+        Ok(())
+    }
+
+    async fn packages_using_agent_package(
+        &mut self,
+        id: AgentPackageId,
+    ) -> Result<Vec<PackageRef>, DbError> {
+        self.check()?;
+        let users: Vec<PackageId> = self
+            .work
+            .package_configs
+            .iter()
+            .filter(|c| c.agent_package_id == id)
+            .map(|c| c.package_id)
+            .collect();
+        Ok(self.package_refs(|p| users.contains(&p.id)))
+    }
+
+    async fn package_config(
+        &mut self,
+        package: PackageId,
+    ) -> Result<Option<PackageConfig>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .package_configs
+            .iter()
+            .find(|c| c.package_id == package)
+            .cloned())
+    }
+
+    async fn set_package_config(&mut self, c: &PackageConfig) -> Result<(), DbError> {
+        if !c.values.valid() {
+            return Err(DbError::InvalidArgument {
+                what: "config values",
+            });
+        }
+        crate::repo::package_config::tag_params(&c.tags)?;
+        crate::repo::conv::to_json(&c.values, "config values")?;
+        self.write()?;
+        let refs_ok = self.work.packages.iter().any(|p| p.id == c.package_id)
+            && self
+                .work
+                .agent_packages
+                .iter()
+                .any(|p| p.id == c.agent_package_id)
+            && self.operator_exists(c.updated_by);
+        if !refs_ok {
+            return Err(self.abort(DbError::Constraint {
+                what: "upsert package_config",
+            }));
+        }
+        self.work
+            .package_configs
+            .retain(|x| x.package_id != c.package_id);
+        self.work.package_configs.push(c.clone());
+        Ok(())
+    }
+
+    async fn device_values(&mut self, mac: MacAddress) -> Result<Option<DeviceValues>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .device_values
+            .iter()
+            .find(|v| v.mac == mac)
+            .cloned())
+    }
+
+    async fn set_device_values(&mut self, v: &DeviceValues) -> Result<(), DbError> {
+        crate::repo::device_values::values_json(v)?;
+        self.write()?;
+        if !self.operator_exists(v.updated_by) {
+            return Err(self.abort(DbError::Constraint {
+                what: "upsert device_value",
+            }));
+        }
+        self.work.device_values.retain(|x| x.mac != v.mac);
+        self.work.device_values.push(v.clone());
+        Ok(())
+    }
+
+    async fn delete_device_values(&mut self, mac: MacAddress) -> Result<(), DbError> {
+        self.write()?;
+        let before = self.work.device_values.len();
+        self.work.device_values.retain(|x| x.mac != mac);
+        if self.work.device_values.len() == before {
+            return Err(DbError::NotFound {
+                what: "device values",
+            });
+        }
+        Ok(())
+    }
+
+    async fn insert_job_v2(&mut self, j: &NewJobV2) -> Result<(), DbError> {
+        if j.previous_job_id == Some(j.id) {
+            return Err(DbError::InvalidArgument {
+                what: "previous job is the job itself",
+            });
+        }
+        if i64::try_from(j.wipe_audit_seq).is_err()
+            || i64::try_from(j.package.revision).is_err()
+            || j.bytes_total.is_some_and(|b| i64::try_from(b).is_err())
+            || !j.timeouts.valid()
+        {
+            return Err(DbError::InvalidArgument { what: "job" });
+        }
+        if usgp_crypto::sha256(j.job_key_spki.as_der()) != j.job_key_id {
+            return Err(DbError::InvalidArgument { what: "job key id" });
+        }
+        crate::repo::package_config::tag_params(&j.tags)?;
+        let json = crate::repo::conv::to_json(&j.disk, "disk descriptor")?;
+        let disk: DiskDescriptorV1 = crate::repo::conv::from_json(&json, "disk")?;
+        self.write()?;
+        if self.job_identity_taken(j.id, j.session_id, j.wipe_audit_seq) {
+            return Err(self.abort(DbError::Conflict { what: "insert job" }));
+        }
+        let refs_ok = self.session_ref(j.session_id).is_some()
+            && self
+                .work
+                .boot_services
+                .iter()
+                .any(|b| b.id == j.boot_service_id)
+            && self.content_ref(j.image_content_id).is_some()
+            && j.previous_job_id.is_none_or(|p| self.job_exists(p));
+        if !refs_ok {
+            return Err(self.abort(DbError::Constraint { what: "insert job" }));
+        }
+        self.work.jobs_v2.push(JobV2 {
+            id: j.id,
+            session_id: j.session_id,
+            boot_service_id: j.boot_service_id,
+            package: j.package,
+            image_content_id: j.image_content_id,
+            edition_index: j.edition_index,
+            disk,
+            layout: None,
+            macs: j.macs.clone(),
+            state: JobState::Running,
+            current_step: StepV2::VERIFY_CONTENT,
+            failure: None,
+            attempts: 0,
+            bytes_done: None,
+            bytes_total: j.bytes_total,
+            last_seq: 0,
+            started_at: j.started_at,
+            last_report_at: None,
+            finished_at: None,
+            previous_job_id: j.previous_job_id,
+            wipe_audit_seq: j.wipe_audit_seq,
+            wipe_record_hash: j.wipe_record_hash,
+            plan_sha256: j.plan_sha256,
+            plan_key_id: j.plan_key_id,
+            timeouts: j.timeouts,
+            acknowledged: None,
+            job_key_spki: j.job_key_spki.clone(),
+            job_key_id: j.job_key_id,
+            rendered_answer_sha256: j.rendered_answer_sha256,
+            tags: j.tags.clone(),
+            restart_pending: false,
+        });
+        for step in StepV2::ALL {
+            let first = step == StepV2::VERIFY_CONTENT;
+            self.work.job_steps_v2.push(JobStepV2 {
+                job_id: j.id,
+                step,
+                state: if first {
+                    StepState::Running
+                } else {
+                    StepState::Pending
+                },
+                started_at: first.then_some(j.started_at),
+                finished_at: None,
+            });
+        }
+        Ok(())
+    }
+
+    async fn job_v2(&mut self, id: JobId) -> Result<Option<JobV2>, DbError> {
+        self.check()?;
+        Ok(self.work.jobs_v2.iter().find(|j| j.id == id).cloned())
+    }
+
+    async fn lock_job_v2(&mut self, id: JobId) -> Result<Option<JobV2>, DbError> {
+        self.job_v2(id).await
+    }
+
+    async fn job_v2_by_session(&mut self, session: SessionId) -> Result<Option<JobV2>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .jobs_v2
+            .iter()
+            .find(|j| j.session_id == session)
+            .cloned())
+    }
+
+    async fn list_jobs_v2(&mut self, states: &[JobState]) -> Result<Vec<JobV2>, DbError> {
+        self.check()?;
+        let mut v: Vec<JobV2> = self
+            .work
+            .jobs_v2
+            .iter()
+            .filter(|j| states.is_empty() || states.contains(&j.state))
+            .cloned()
+            .collect();
+        v.sort_by_key(|j| (j.started_at, j.id));
+        Ok(v)
+    }
+
+    async fn job_plan_schema(&mut self, id: JobId) -> Result<Option<u8>, DbError> {
+        self.check()?;
+        if self.work.jobs_v2.iter().any(|j| j.id == id) {
+            return Ok(Some(2));
+        }
+        Ok(self.job_ref(id).map(|_| 1))
+    }
+
+    async fn job_steps_v2(&mut self, id: JobId) -> Result<Vec<JobStepV2>, DbError> {
+        self.check()?;
+        let mut v: Vec<JobStepV2> = self
+            .work
+            .job_steps_v2
+            .iter()
+            .filter(|s| s.job_id == id)
+            .copied()
+            .collect();
+        v.sort_by_key(|s| s.step);
+        Ok(v)
+    }
+
+    async fn set_job_step_v2(
+        &mut self,
+        id: JobId,
+        step: StepV2,
+        to: StepState,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        let from = crate::repo::jobs::step_from_state(to)?;
+        self.check()?;
+        let job = self
+            .work
+            .jobs_v2
+            .iter()
+            .find(|j| j.id == id)
+            .ok_or(DbError::NotFound { what: "job" })?;
+        if job.state.is_final() {
+            return Err(DbError::Conflict { what: "job" });
+        }
+        let steps: Vec<JobStepV2> = self
+            .work
+            .job_steps_v2
+            .iter()
+            .filter(|s| s.job_id == id)
+            .copied()
+            .collect();
+        let earlier_open = steps
+            .iter()
+            .any(|s| s.step < step && s.state != StepState::Done);
+        let current = steps.iter().find(|s| s.step == step).map(|s| s.state);
+        if current != Some(from) || (to == StepState::Running && earlier_open) {
+            return Err(DbError::Conflict { what: "job step" });
+        }
+        self.write()?;
+        if let Some(s) = self
+            .work
+            .job_steps_v2
+            .iter_mut()
+            .find(|s| s.job_id == id && s.step == step)
+        {
+            s.state = to;
+            if to == StepState::Running {
+                s.started_at = Some(at);
+            } else {
+                s.finished_at = Some(at);
+            }
+        }
+        if to == StepState::Running
+            && let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id)
+        {
+            j.current_step = j.current_step.max(step);
+        }
+        Ok(())
+    }
+
+    async fn fail_job_v2(
+        &mut self,
+        id: JobId,
+        from: &[JobState],
+        failure: &FailureV2,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        failure
+            .validate()
+            .map_err(|_| DbError::InvalidArgument { what: "failure" })?;
+        let json = crate::repo::conv::to_json(failure, "failure")?;
+        let failure: FailureV2 = crate::repo::conv::from_json(&json, "failure_detail")?;
+        self.write()?;
+        if self.job_ref(id).is_some() {
+            return Err(DbError::Conflict { what: "job" });
+        }
+        let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id) else {
+            return Err(DbError::NotFound { what: "job" });
+        };
+        if !from.contains(&j.state) {
+            return Err(DbError::Conflict { what: "job" });
+        }
+        if !j.state.can_become(JobState::Failed) {
+            self.failed = true;
+            return Err(DbError::Constraint {
+                what: "update job failed",
+            });
+        }
+        j.state = JobState::Failed;
+        j.attempts = failure.attempts;
+        j.failure = Some(failure);
+        j.finished_at = Some(at);
+        Ok(())
+    }
+
+    async fn set_job_restart_pending(&mut self, id: JobId) -> Result<(), DbError> {
+        self.write()?;
+        let Some(j) = self.work.jobs_v2.iter_mut().find(|j| j.id == id) else {
+            return Err(if self.job_ref(id).is_some() {
+                DbError::Conflict { what: "job" }
+            } else {
+                DbError::NotFound { what: "job" }
+            });
+        };
+        if j.state.is_final() {
+            return Err(DbError::Conflict { what: "job" });
+        }
+        j.restart_pending = true;
+        Ok(())
+    }
+
+    async fn close_confirmed_session(
+        &mut self,
+        id: SessionId,
+        reason: &ErrorCode,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let s = self.session_mut(id).ok_or(DbError::NotFound {
+            what: "device session",
+        })?;
+        if s.state != SessionState::Confirmed {
+            return Err(DbError::Conflict {
+                what: "device session",
+            });
+        }
+        s.state = SessionState::Ended;
+        s.ended_at = Some(at);
+        s.end_reason = Some(reason.clone());
+        Ok(())
+    }
+
+    async fn insert_resume_nonce(
+        &mut self,
+        n: &NewResumeNonce,
+        max_live: u32,
+    ) -> Result<bool, DbError> {
+        crate::repo::resume::check_window(n.issued_at, n.expires_at, "nonce expiry")?;
+        // Bookkeeping, as the PostgreSQL statement (no `write`).
+        self.check()?;
+        let eligible = self
+            .work
+            .jobs_v2
+            .iter()
+            .any(|j| j.id == n.job_id && matches!(j.state, JobState::Running | JobState::Lost))
+            && self.work.job_steps_v2.iter().any(|s| {
+                s.job_id == n.job_id
+                    && s.step == StepV2::MAKE_BOOTABLE_RESTART
+                    && s.state == StepState::Done
+            });
+        let live = self
+            .work
+            .resume_nonces
+            .iter()
+            .filter(|x| x.job_id == n.job_id && x.used_at.is_none() && x.expires_at > n.issued_at)
+            .count();
+        if !eligible || u64::try_from(live).unwrap_or(u64::MAX) >= u64::from(max_live) {
+            return Ok(false);
+        }
+        if self
+            .work
+            .resume_nonces
+            .iter()
+            .any(|x| x.hash == n.nonce_hash)
+        {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert job_resume_nonce",
+            }));
+        }
+        self.work.resume_nonces.push(MemNonce {
+            hash: n.nonce_hash,
+            job_id: n.job_id,
+            expires_at: n.expires_at,
+            used_at: None,
+        });
+        Ok(true)
+    }
+
+    async fn consume_resume_nonce(
+        &mut self,
+        job: JobId,
+        nonce_hash: &Sha256Digest,
+        at: UnixMicros,
+    ) -> Result<bool, DbError> {
+        self.check()?;
+        let Some(n) = self.work.resume_nonces.iter_mut().find(|x| {
+            x.hash == *nonce_hash && x.job_id == job && x.used_at.is_none() && x.expires_at > at
+        }) else {
+            return Ok(false);
+        };
+        n.used_at = Some(at);
+        self.mutated = true;
+        Ok(true)
+    }
+
+    async fn insert_resume_token(&mut self, t: &NewResumeToken) -> Result<(), DbError> {
+        crate::repo::resume::check_window(t.issued_at, t.expires_at, "token expiry")?;
+        self.write()?;
+        if self
+            .work
+            .resume_tokens
+            .iter()
+            .any(|(h, _)| *h == t.token_hash)
+        {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert job_resume_token",
+            }));
+        }
+        if !self.work.jobs_v2.iter().any(|j| j.id == t.job_id) {
+            return Err(self.abort(DbError::Constraint {
+                what: "insert job_resume_token",
+            }));
+        }
+        self.work.resume_tokens.push((
+            t.token_hash,
+            ResumeToken {
+                job_id: t.job_id,
+                issued_at: t.issued_at,
+                expires_at: t.expires_at,
+                revoked_at: None,
+            },
+        ));
+        Ok(())
+    }
+
+    async fn count_resume_tokens(&mut self, job: JobId) -> Result<u64, DbError> {
+        self.check()?;
+        let n = self
+            .work
+            .resume_tokens
+            .iter()
+            .filter(|(_, t)| t.job_id == job)
+            .count();
+        u64::try_from(n).map_err(|_| DbError::Corrupt { what: "count" })
+    }
+
+    async fn resume_token(&mut self, hash: &Sha256Digest) -> Result<Option<ResumeToken>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .resume_tokens
+            .iter()
+            .find(|(h, _)| h == hash)
+            .map(|(_, t)| *t))
+    }
+
+    async fn revoke_resume_tokens(&mut self, job: JobId, at: UnixMicros) -> Result<u64, DbError> {
+        self.check()?;
+        let mut n: u64 = 0;
+        for (_, t) in &mut self.work.resume_tokens {
+            if t.job_id == job && t.revoked_at.is_none() {
+                t.revoked_at = Some(at);
+                n = n.saturating_add(1);
+            }
+        }
+        if n > 0 {
+            self.mutated = true;
+        }
+        Ok(n)
+    }
+
+    async fn insert_escrow(&mut self, e: &NewEscrow) -> Result<(), DbError> {
+        if !e.sealed.valid() {
+            return Err(DbError::InvalidArgument {
+                what: "sealed password",
+            });
+        }
+        self.write()?;
+        if self.work.escrows.iter().any(|(r, _)| r.job_id == e.job_id) {
+            return Err(self.abort(DbError::Conflict {
+                what: "insert admin_password_escrow",
+            }));
+        }
+        if !self.work.jobs_v2.iter().any(|j| j.id == e.job_id) {
+            return Err(self.abort(DbError::Constraint {
+                what: "insert admin_password_escrow",
+            }));
+        }
+        self.work.escrows.push((
+            EscrowRecord {
+                job_id: e.job_id,
+                account: e.account,
+                key_id: e.key_id,
+                state: EscrowState::Received,
+                received_at: e.received_at,
+                applied_at: None,
+                reveal_count: 0,
+            },
+            e.sealed.clone(),
+        ));
+        Ok(())
+    }
+
+    async fn escrow(&mut self, job: JobId) -> Result<Option<EscrowRecord>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .escrows
+            .iter()
+            .find(|(r, _)| r.job_id == job)
+            .map(|(r, _)| r.clone()))
+    }
+
+    async fn lock_escrow(&mut self, job: JobId) -> Result<Option<EscrowRecord>, DbError> {
+        self.escrow(job).await
+    }
+
+    async fn escrow_sealed(&mut self, job: JobId) -> Result<Option<SealedPassword>, DbError> {
+        self.check()?;
+        Ok(self
+            .work
+            .escrows
+            .iter()
+            .find(|(r, _)| r.job_id == job)
+            .map(|(_, s)| s.clone()))
+    }
+
+    async fn set_escrow_outcome(
+        &mut self,
+        job: JobId,
+        applied: bool,
+        at: UnixMicros,
+    ) -> Result<(), DbError> {
+        self.write()?;
+        let (r, _) = self
+            .work
+            .escrows
+            .iter_mut()
+            .find(|(r, _)| r.job_id == job)
+            .ok_or(DbError::NotFound { what: "escrow" })?;
+        if r.state != EscrowState::Received {
+            return Err(DbError::Conflict { what: "escrow" });
+        }
+        r.state = if applied {
+            EscrowState::Applied
+        } else {
+            EscrowState::NotApplied
+        };
+        r.applied_at = Some(at);
+        Ok(())
+    }
+
+    async fn record_escrow_reveal(&mut self, job: JobId) -> Result<u32, DbError> {
+        self.check()?;
+        let (r, _) = self
+            .work
+            .escrows
+            .iter_mut()
+            .find(|(r, _)| r.job_id == job)
+            .ok_or(DbError::NotFound { what: "escrow" })?;
+        let n = r.reveal_count.checked_add(1).ok_or(DbError::Constraint {
+            what: "update admin_password_escrow reveal",
+        })?;
+        r.reveal_count = n;
+        self.mutated = true;
+        Ok(n)
     }
 
     async fn commit(self) -> Result<(), DbError> {
@@ -1980,6 +3369,12 @@ impl RepoTx for MemoryTx {
             .content
             .iter()
             .filter_map(|c| c.initiating_audit_seq)
+            .chain(
+                self.work
+                    .archives
+                    .iter()
+                    .filter_map(|c| c.initiating_audit_seq),
+            )
             .all(has);
         let editions_ok = self
             .work

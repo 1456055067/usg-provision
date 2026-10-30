@@ -210,6 +210,63 @@ test = false
 doc = false
 bench = false
 
+# M4 (plan WU-0 stubs; wired in WU-12).
+[[bin]]
+name = "unattend_template"
+path = "fuzz_targets/unattend_template.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip_archive"
+path = "fuzz_targets/zip_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cab_archive"
+path = "fuzz_targets/cab_archive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inflate_diff"
+path = "fuzz_targets/inflate_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inf_version"
+path = "fuzz_targets/inf_version.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dism_driver_table"
+path = "fuzz_targets/dism_driver_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postsetup_msgs"
+path = "fuzz_targets/postsetup_msgs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_package_manifest"
+path = "fuzz_targets/agent_package_manifest.rs"
+test = false
+doc = false
+bench = false
+
 # Seed generator for fuzz/corpus/ (see fuzz/corpus/*/SOURCE.md). Pure
 # Rust; it does not use libfuzzer-sys.
 [[example]]

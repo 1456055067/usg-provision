@@ -76,6 +76,12 @@ deny = [
   # M3 plan section 4: the HTTP/1.1 parser, for hyper and the pre-boot
   # agent's minimal client only.
   { crate = "httparse", wrappers = ["hyper", "usgp-preboot-agent"] },
+  # M4 WU-0 (plan section 4): pure-Rust reference inflater for the
+  # differential inflate tests of usgp-wincfg only. It must stay a
+  # [dev-dependencies] entry there (never linked into a binary); cargo-deny
+  # cannot express "dev only", so reviewers check the manifest section.
+  # The fuzz workspace (inflate_diff) is outside this policy (decision 0002).
+  { crate = "miniz_oxide", wrappers = ["usgp-wincfg"] },
 ]
 
 [sources]

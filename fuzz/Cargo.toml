@@ -267,6 +267,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "content_manifest_v2"
+path = "fuzz_targets/content_manifest_v2.rs"
+test = false
+doc = false
+bench = false
+
 # Seed generator for fuzz/corpus/ (see fuzz/corpus/*/SOURCE.md). Pure
 # Rust; it does not use libfuzzer-sys.
 [[example]]

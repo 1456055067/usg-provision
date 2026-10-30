@@ -51,7 +51,7 @@ use usgp_common::Sha256Digest;
 
 use crate::SignedManifestError;
 use crate::b64::{B64Bytes, P384Spki};
-use crate::content_manifest::ContentManifestV1;
+use crate::content_manifest::{ContentManifestV1, ContentManifestV2};
 use crate::device::{AgentNonce, MacList};
 use crate::disk::{DiskDescriptorV1, PlanDiskV1};
 use crate::envelope::{PayloadType, SignatureVerifier, SignedEnvelopeV1};
@@ -65,7 +65,7 @@ use crate::limits::{
 };
 use crate::names::{EditionIndex, RelPath, Tag, UrlPath, WimText};
 use crate::progress::{FailureCategory, Step, StepKind, StepKindV2, StepV2};
-use crate::status::ContentKind;
+use crate::status::{ContentKind, ContentKindV2};
 
 /// The v1 plan schema version.
 pub const SCHEMA_V1: u32 = 1;
@@ -822,6 +822,13 @@ impl JobPlanV2 {
         if self.tags.len() > MAX_TAGS {
             return Err(Invalid("tags must list at most 64 tags"));
         }
+        // M4 plan, WU-4 deviation 10: the runner signs only for this
+        // job's own resume route, never for a path the plan chooses.
+        if self.postsetup.resume_url_path.as_str() != resume_path(self.job_id) {
+            return Err(Invalid(
+                "postsetup.resume_url_path must be /v1/device/jobs/{job_id}/resume",
+            ));
+        }
         Ok(())
     }
 
@@ -886,6 +893,13 @@ impl JobPlanV2 {
     }
 }
 
+/// The only resume path a v2 plan may name: `/v1/device/jobs/{job_id}/resume`
+/// (M4 plan section 3.1).
+#[must_use]
+pub fn resume_path(job_id: JobId) -> String {
+    format!("/v1/device/jobs/{job_id}/resume")
+}
+
 /// What the agent expects a v2 plan to say: the v1 expectations plus the
 /// id of the job key it generated.
 #[derive(Debug, Clone, Copy)]
@@ -914,8 +928,8 @@ pub struct PlanContentV2<'a> {
 pub struct VerifiedJobPlanV2 {
     plan: JobPlanV2,
     image: ContentManifestV1,
-    drivers: Vec<ContentManifestV1>,
-    agent: ContentManifestV1,
+    drivers: Vec<ContentManifestV2>,
+    agent: ContentManifestV2,
 }
 
 impl VerifiedJobPlanV2 {
@@ -925,8 +939,12 @@ impl VerifiedJobPlanV2 {
     /// 8. the escrow key id is the SHA-256 of the escrow key, and the
     ///    answer file's SHA-256 is the plan's;
     /// 9. each driver and the agent manifest: signature with the content
-    ///    key, SHA-256 of the payload against the plan, parse, and the
-    ///    file SHA-256 against the plan.
+    ///    key under the v2 payload type, SHA-256 of the payload against
+    ///    the plan, parse, the kind (`driver_archive` or `agent_package`),
+    ///    the file SHA-256 against the plan, and for drivers the INF list
+    ///    equal to the plan's (M4 plan WU-4a).
+    ///
+    /// The image manifest (check 6) must be v1 with kind `image`.
     ///
     /// It stops at the first failure.
     ///
@@ -963,11 +981,13 @@ impl VerifiedJobPlanV2 {
             return Err(PlanError::DiskMismatch);
         }
         // 6.
-        let image = open_manifest(
+        let image = open_signed(
             content.image,
             content_keys,
             sha256,
             &plan.image.content_manifest_sha256,
+            PayloadType::ContentManifestV1,
+            |b| ContentManifestV1::from_payload(b).map(|m| (m.key_id, m)),
         )?;
         check_image(&plan.image, &image)?;
         // 7.
@@ -989,18 +1009,27 @@ impl VerifiedJobPlanV2 {
         }
         let mut drivers = Vec::with_capacity(plan.drivers.len());
         for (env, d) in content.drivers.iter().zip(&plan.drivers) {
-            let m = open_manifest(env, content_keys, sha256, &d.content_manifest_sha256)?;
+            let m = open_v2(env, content_keys, sha256, &d.content_manifest_sha256)?;
+            if m.kind != ContentKindV2::DriverArchive {
+                return Err(PlanError::ContentMismatch("drivers[].kind"));
+            }
             if m.sha256 != d.content_sha256 {
                 return Err(PlanError::ContentMismatch("drivers[].content_sha256"));
             }
+            if m.archive.infs != d.infs {
+                return Err(PlanError::ContentMismatch("drivers[].infs"));
+            }
             drivers.push(m);
         }
-        let agent = open_manifest(
+        let agent = open_v2(
             content.agent,
             content_keys,
             sha256,
             &plan.agent.content_manifest_sha256,
         )?;
+        if agent.kind != ContentKindV2::AgentPackage {
+            return Err(PlanError::ContentMismatch("agent.kind"));
+        }
         if agent.sha256 != plan.agent.content_sha256 {
             return Err(PlanError::ContentMismatch("agent.content_sha256"));
         }
@@ -1026,36 +1055,56 @@ impl VerifiedJobPlanV2 {
 
     /// The driver archives' content manifests, in plan order.
     #[must_use]
-    pub fn driver_manifests(&self) -> &[ContentManifestV1] {
+    pub fn driver_manifests(&self) -> &[ContentManifestV2] {
         &self.drivers
     }
 
     /// The agent package's content manifest.
     #[must_use]
-    pub const fn agent_manifest(&self) -> &ContentManifestV1 {
+    pub const fn agent_manifest(&self) -> &ContentManifestV2 {
         &self.agent
     }
 }
 
-/// Signature first, then the digest of the exact payload, then parse and
-/// the key id.
-fn open_manifest(
+/// Signature first (under `ty`), then the digest of the exact payload,
+/// then parse and the key id. `parse` returns the manifest and its
+/// `key_id`.
+fn open_signed<T>(
     env: &SignedEnvelopeV1,
     keys: &dyn SignatureVerifier,
     sha256: &dyn Fn(&[u8]) -> Sha256Digest,
     want: &Sha256Digest,
-) -> Result<ContentManifestV1, PlanError> {
+    ty: PayloadType,
+    parse: impl FnOnce(&[u8]) -> Result<(Sha256Digest, T), SignedManifestError>,
+) -> Result<T, PlanError> {
     let verified = env
-        .verified_payload(PayloadType::ContentManifestV1, keys)
+        .verified_payload(ty, keys)
         .map_err(|e| PlanError::ContentManifest(e.into()))?;
     if sha256(verified.bytes) != *want {
         return Err(PlanError::ContentManifestDigest);
     }
-    let m = ContentManifestV1::from_payload(verified.bytes).map_err(PlanError::ContentManifest)?;
-    if m.key_id != verified.key_id {
+    let (key_id, m) = parse(verified.bytes).map_err(PlanError::ContentManifest)?;
+    if key_id != verified.key_id {
         return Err(PlanError::ContentManifest(
             SignedManifestError::KeyIdMismatch,
         ));
     }
     Ok(m)
+}
+
+/// [`open_signed`] for a v2 (archive) manifest.
+fn open_v2(
+    env: &SignedEnvelopeV1,
+    keys: &dyn SignatureVerifier,
+    sha256: &dyn Fn(&[u8]) -> Sha256Digest,
+    want: &Sha256Digest,
+) -> Result<ContentManifestV2, PlanError> {
+    open_signed(
+        env,
+        keys,
+        sha256,
+        want,
+        PayloadType::ContentManifestV2,
+        |b| ContentManifestV2::from_payload(b).map(|m| (m.key_id, m)),
+    )
 }

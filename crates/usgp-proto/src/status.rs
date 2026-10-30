@@ -24,6 +24,29 @@ closed_enum!(
 );
 
 closed_enum!(
+    /// What an archive content item is (M4 plan WU-4a); described by a
+    /// [`crate::content_manifest::ContentManifestV2`]. Kept apart from
+    /// [`ContentKind`] so an archive manifest can never stand where an
+    /// image manifest is expected.
+    ContentKindV2, "content kind" {
+        /// A driver archive (REQ-DRV-001).
+        DriverArchive => "driver_archive",
+        /// A signed agent package (REQ-AGT-001).
+        AgentPackage => "agent_package",
+    }
+);
+
+closed_enum!(
+    /// Container format of an archive content item (M4 plan section 1.5).
+    ArchiveFormat, "archive format" {
+        /// ZIP (`specs/standards/zip-cab.md`).
+        Zip => "zip",
+        /// Cabinet (`specs/standards/zip-cab.md`).
+        Cab => "cab",
+    }
+);
+
+closed_enum!(
     /// Lifecycle state of a content item (image file or PE kit).
     ContentState, "content state" {
         /// The upload is in progress.

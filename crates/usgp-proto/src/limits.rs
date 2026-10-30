@@ -217,6 +217,8 @@ pub const MAX_POSTSETUP_CONFIG_BYTES: usize = MAX_ENVELOPE_BYTES + 1024 * 1024;
 pub const MAX_POSTSETUP_PEM_BYTES: usize = 256 * 1024;
 
 /// Largest v2 confirm response the agent parses: the plan, the image
-/// manifest, and the driver and agent manifests (project limit; each
-/// envelope is also bounded by [`MAX_ENVELOPE_BYTES`]).
-pub const MAX_CONFIRM_V2_RESPONSE_BYTES: usize = 4 * MAX_ENVELOPE_BYTES;
+/// manifest, and the driver and agent manifests (M4 plan, WU-4 deviation
+/// 2, as decided after WU-4a: 64 MiB; each envelope is also bounded by
+/// [`MAX_ENVELOPE_BYTES`]). A larger response is refused at confirm with
+/// `ConfirmedError::V2TooLarge`, before any disk write.
+pub const MAX_CONFIRM_V2_RESPONSE_BYTES: usize = 64 * 1024 * 1024;

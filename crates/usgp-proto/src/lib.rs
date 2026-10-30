@@ -65,7 +65,9 @@ pub use b64::{B64Bytes, B64Error, P384Spki};
 pub use boot_file_name::{BootFileName, BootFileNameError};
 pub use boot_manifest::{BootManifest, DigestName, ManifestEntry, ManifestError};
 pub use boot_policy::{BootPolicyError, BootPolicyV1, BootStopEntryV1};
-pub use content_manifest::{ContentManifestV1, ManifestEdition, WimSummaryV1};
+pub use content_manifest::{
+    ArchiveSummaryV1, ContentManifestV1, ContentManifestV2, ManifestEdition, WimSummaryV1,
+};
 pub use device::{
     AgentNonce, AuthCode, ConfirmV2, ConfirmedV2, DisplayCode, MacAddress, MacList, SessionToken,
 };
@@ -101,7 +103,10 @@ pub use progress::{
     ProgressV2, Step, StepKind, StepKindV2, StepState, StepV2,
 };
 pub use resume::{ResumeChallengeV1, ResumeRequestV1, ResumedV1};
-pub use status::{ContentKind, ContentState, PackageStatus, UploadState, WimCompression};
+pub use status::{
+    ArchiveFormat, ContentKind, ContentKindV2, ContentState, PackageStatus, UploadState,
+    WimCompression,
+};
 
 /// Errors from building, parsing or opening a signed payload (content or
 /// package manifest, job plan, boot-policy list).
@@ -120,8 +125,8 @@ pub enum SignedManifestError {
     /// The payload is not JSON of the manifest shape.
     #[error("manifest is not valid JSON of the expected shape")]
     Json(#[source] serde_json::Error),
-    /// `schema` is not 1.
-    #[error("manifest schema {0} is not supported (expected 1)")]
+    /// `schema` is not the version this type accepts.
+    #[error("manifest schema {0} is not supported")]
     UnsupportedSchema(u32),
     /// A manifest rule is broken; the text names it.
     #[error("manifest is invalid: {0}")]

@@ -54,6 +54,10 @@ closed_enum!(
         ContentManifestV1 => "application/vnd.usgp.content-manifest.v1+json",
         /// [`crate::package_manifest::PackageManifestV1`] JSON.
         PackageManifestV1 => "application/vnd.usgp.package-manifest.v1+json",
+        /// [`crate::content_manifest::ContentManifestV2`] JSON: a driver
+        /// archive or agent package, signed with the content key (M4 plan
+        /// WU-4a). A distinct type so it never verifies as a v1 manifest.
+        ContentManifestV2 => "application/vnd.usgp.content-manifest.v2+json",
         /// Audit checkpoint bytes (plan section 5.3:
         /// `seq(u64 BE) || record_hash || signed_at_us(i64 BE) || key_id`),
         /// built by `usgp-audit`. Never carried in a manifest envelope.
@@ -573,7 +577,7 @@ pub(crate) mod tests {
                 "",
                 "aGVsbG8=",
                 "b2s6Bw==",
-                "application/vnd.usgp.content-manifest.v2+json",
+                "application/vnd.usgp.content-manifest.v3+json",
             ),
         ] {
             assert!(

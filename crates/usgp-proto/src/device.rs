@@ -1148,6 +1148,13 @@ pub enum ConfirmedError {
         /// Length in bytes.
         len: usize,
     },
+    /// A v2 response over [`MAX_CONFIRM_V2_RESPONSE_BYTES`] (64 MiB). Refused
+    /// at confirm, before parsing and before any disk write.
+    #[error("confirm response is {len} bytes; the v2 limit is {MAX_CONFIRM_V2_RESPONSE_BYTES}")]
+    V2TooLarge {
+        /// Length in bytes.
+        len: usize,
+    },
     /// Not JSON of the expected shape (envelope limits included).
     #[error("confirm response is not valid JSON of the expected shape")]
     Json(#[source] serde_json::Error),
@@ -1249,12 +1256,12 @@ pub struct ConfirmedV2 {
     pub job_id: JobId,
     /// Signed [`crate::job_plan::JobPlanV2`].
     pub plan: SignedEnvelopeV1,
-    /// Signed content manifest of the image.
+    /// Signed [`crate::ContentManifestV1`] of the image.
     pub content_manifest: SignedEnvelopeV1,
-    /// Signed content manifests of the driver archives (at most
+    /// Signed [`crate::ContentManifestV2`] of each driver archive (at most
     /// [`MAX_PLAN_DRIVERS`]).
     pub driver_manifests: Vec<SignedEnvelopeV1>,
-    /// Signed content manifest of the agent package.
+    /// Signed [`crate::ContentManifestV2`] of the agent package.
     pub agent_manifest: SignedEnvelopeV1,
 }
 
@@ -1266,7 +1273,7 @@ impl ConfirmedV2 {
     /// [`ConfirmedError`].
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfirmedError> {
         if bytes.len() > MAX_CONFIRM_V2_RESPONSE_BYTES {
-            return Err(ConfirmedError::TooLarge { len: bytes.len() });
+            return Err(ConfirmedError::V2TooLarge { len: bytes.len() });
         }
         let c: Self = serde_json::from_slice(bytes).map_err(ConfirmedError::Json)?;
         if c.driver_manifests.len() > MAX_PLAN_DRIVERS {

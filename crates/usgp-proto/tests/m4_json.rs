@@ -16,7 +16,8 @@ mod m4_json {
     use base64ct::{Base64, Encoding};
     use usgp_common::Sha256Digest;
     use usgp_proto::content_manifest::{
-        ContentManifestV1, ManifestEdition, WimSummaryV1, chunk_count,
+        ArchiveSummaryV1, ContentManifestV1, ContentManifestV2, ManifestEdition, WimSummaryV1,
+        chunk_count,
     };
     use usgp_proto::device::{AgentNonce, ConfirmV2, ConfirmedV2, MacAddress, MacList};
     use usgp_proto::disk::{
@@ -36,10 +37,10 @@ mod m4_json {
     use usgp_proto::postsetup::PostSetupConfigV1;
     use usgp_proto::progress::StepV2;
     use usgp_proto::{
-        AgentPackageId, B64Bytes, BootServiceId, ContentId, ContentKind, DiskText, DisplayName,
-        DriverArchiveId, EditionIndex, FileName, JobId, P384Spki, PackageId, PartitionLabel,
-        RelPath, SessionId, SignedManifestError, Tag, UnixMicros, UrlPath, WimCompression, WimText,
-        codes,
+        AgentPackageId, ArchiveFormat, B64Bytes, BootServiceId, ContentId, ContentKind,
+        ContentKindV2, DiskText, DisplayName, DriverArchiveId, EditionIndex, FileName, JobId,
+        P384Spki, PackageId, PartitionLabel, RelPath, SessionId, SignedManifestError, Tag,
+        UnixMicros, UrlPath, WimCompression, WimText, codes,
     };
     // -----------------------------------------------------------------------
     // Test doubles (no cryptography)
@@ -204,31 +205,58 @@ mod m4_json {
         P384Spki::from_der(&der).unwrap()
     }
 
-    /// A manifest standing in for a driver or agent package (only its
-    /// file SHA-256 differs from the image's).
-    fn manifest_with_sha(sha: u8) -> ContentManifestV1 {
-        let mut m = content_manifest();
-        m.sha256 = Sha256Digest([sha; 32]);
-        m
+    fn infs() -> Vec<RelPath> {
+        vec![RelPath::new("net/e1d.inf").unwrap()]
     }
 
-    fn manifest_env(m: &ContentManifestV1) -> SignedEnvelopeV1 {
+    /// A v2 (archive) manifest for a driver archive or agent package.
+    fn archive_manifest(kind: ContentKindV2, sha: u8) -> ContentManifestV2 {
+        let size = CHUNK_SIZE + 9;
+        let n = usize::try_from(chunk_count(size)).unwrap();
+        ContentManifestV2 {
+            schema: 2,
+            kind,
+            content_id: ContentId::parse(CONTENT).unwrap(),
+            display_name: DisplayName::new("archive").unwrap(),
+            file_name: usgp_proto::FileName::new("archive.zip").unwrap(),
+            size,
+            sha256: Sha256Digest([sha; 32]),
+            chunk_size: CHUNK_SIZE,
+            chunk_sha256: vec![Sha256Digest([sha; 32]); n],
+            archive: ArchiveSummaryV1 {
+                format: ArchiveFormat::Zip,
+                entries: 3,
+                expanded_bytes: 70_000,
+                infs: match kind {
+                    ContentKindV2::DriverArchive => infs(),
+                    ContentKindV2::AgentPackage => Vec::new(),
+                },
+            },
+            ready_at: UnixMicros::new(1_793_000_000_000_000).unwrap(),
+            key_id: key(CONTENT_KEY),
+        }
+    }
+
+    fn manifest_env(m: &ContentManifestV2) -> SignedEnvelopeV1 {
         seal(
-            PayloadType::ContentManifestV1,
+            PayloadType::ContentManifestV2,
             m.to_payload().unwrap(),
             CONTENT_KEY,
         )
     }
 
-    fn driver_manifests() -> Vec<ContentManifestV1> {
-        vec![manifest_with_sha(0xa1), manifest_with_sha(0xa2)]
+    fn driver_manifests() -> Vec<ContentManifestV2> {
+        vec![
+            archive_manifest(ContentKindV2::DriverArchive, 0xa1),
+            archive_manifest(ContentKindV2::DriverArchive, 0xa2),
+        ]
     }
 
-    fn agent_manifest() -> ContentManifestV1 {
-        manifest_with_sha(0xb1)
+    fn agent_manifest() -> ContentManifestV2 {
+        archive_manifest(ContentKindV2::AgentPackage, 0xb1)
     }
 
-    fn sha_of(m: &ContentManifestV1) -> Sha256Digest {
+    fn sha_of(m: &ContentManifestV2) -> Sha256Digest {
         fake_sha(&m.to_payload().unwrap())
     }
 
@@ -292,7 +320,7 @@ mod m4_json {
                     archive_id: DriverArchiveId::parse(id).unwrap(),
                     content_sha256: m.sha256,
                     content_manifest_sha256: sha_of(m),
-                    infs: vec![RelPath::new("net/e1d.inf").unwrap()],
+                    infs: infs(),
                 })
                 .collect(),
             agent: PlanAgentV2 {
@@ -439,6 +467,30 @@ mod m4_json {
                 Box::new(|p| p.tags = vec![Tag::new("t").unwrap(); 65]),
             ),
             ("revision", Box::new(|p| p.package.revision = 0)),
+            (
+                "resume path of another job",
+                Box::new(|p| {
+                    p.postsetup.resume_url_path =
+                        UrlPath::new(format!("/v1/device/jobs/{SESSION}/resume")).unwrap();
+                }),
+            ),
+            (
+                "resume path elsewhere",
+                Box::new(|p| {
+                    p.postsetup.resume_url_path =
+                        UrlPath::new(format!("/v1/device/jobs/{JOB}/resume/x")).unwrap();
+                }),
+            ),
+            (
+                "resume path upper case",
+                Box::new(|p| {
+                    p.postsetup.resume_url_path = UrlPath::new(format!(
+                        "/v1/device/jobs/{}/resume",
+                        JOB.to_ascii_uppercase()
+                    ))
+                    .unwrap();
+                }),
+            ),
         ];
         for (name, m) in cases {
             let mut p = plan2();
@@ -529,6 +581,100 @@ mod m4_json {
         assert_eq!(e.code(), codes::CONTENT_MANIFEST_MISMATCH);
     }
 
+    /// Re-signs the plan so that drivers and agent point at `drivers` and
+    /// `agent`, and returns the plan envelope and the content envelopes.
+    fn rebind(
+        drivers: &[ContentManifestV2],
+        agent: &ContentManifestV2,
+    ) -> (SignedEnvelopeV1, Envs) {
+        let mut p = plan2();
+        for (d, m) in p.drivers.iter_mut().zip(drivers) {
+            d.content_sha256 = m.sha256;
+            d.content_manifest_sha256 = sha_of(m);
+        }
+        p.agent.content_sha256 = agent.sha256;
+        p.agent.content_manifest_sha256 = sha_of(agent);
+        let e = Envs {
+            image: content_env(),
+            drivers: drivers.iter().map(manifest_env).collect(),
+            agent: manifest_env(agent),
+        };
+        (plan2_env(&p), e)
+    }
+
+    #[test]
+    fn verified_plan2_checks_archive_manifests() {
+        // Control: rebinding the good manifests still verifies.
+        let (env, e) = rebind(&driver_manifests(), &agent_manifest());
+        assert!(verify2(&env, &e, good_job_key_id()).is_ok());
+
+        // A driver slot holding an agent-package manifest.
+        let mut ds = driver_manifests();
+        ds[1] = archive_manifest(ContentKindV2::AgentPackage, 0xa2);
+        let (env, e) = rebind(&ds, &agent_manifest());
+        let err = verify2(&env, &e, good_job_key_id()).unwrap_err();
+        assert!(
+            matches!(err, PlanError::ContentMismatch("drivers[].kind")),
+            "{err:?}"
+        );
+
+        // The agent slot holding a driver-archive manifest.
+        let ag = archive_manifest(ContentKindV2::DriverArchive, 0xb1);
+        let (env, e) = rebind(&driver_manifests(), &ag);
+        let err = verify2(&env, &e, good_job_key_id()).unwrap_err();
+        assert!(
+            matches!(err, PlanError::ContentMismatch("agent.kind")),
+            "{err:?}"
+        );
+
+        // A driver manifest whose INF list is not the plan's.
+        for other in [
+            vec![RelPath::new("net/other.inf").unwrap()],
+            vec![
+                RelPath::new("net/e1d.inf").unwrap(),
+                RelPath::new("x.inf").unwrap(),
+            ],
+        ] {
+            let mut ds = driver_manifests();
+            ds[0].archive.infs = other;
+            let (env, e) = rebind(&ds, &agent_manifest());
+            let err = verify2(&env, &e, good_job_key_id()).unwrap_err();
+            assert!(
+                matches!(err, PlanError::ContentMismatch("drivers[].infs")),
+                "{err:?}"
+            );
+        }
+
+        // An archive manifest signed under the v1 payload type is refused,
+        // and so is an image (v1) manifest in an archive slot.
+        let mut e = envs();
+        e.drivers[0] = seal(
+            PayloadType::ContentManifestV1,
+            driver_manifests()[0].to_payload().unwrap(),
+            CONTENT_KEY,
+        );
+        let err = verify2(&plan2_env(&plan2()), &e, good_job_key_id()).unwrap_err();
+        assert!(matches!(err, PlanError::ContentManifest(_)), "{err:?}");
+        let mut e = envs();
+        e.agent = content_env();
+        let err = verify2(&plan2_env(&plan2()), &e, good_job_key_id()).unwrap_err();
+        assert!(matches!(err, PlanError::ContentManifest(_)), "{err:?}");
+
+        // An archive manifest in the image slot is refused.
+        let mut e = envs();
+        e.image = manifest_env(&agent_manifest());
+        let err = verify2(&plan2_env(&plan2()), &e, good_job_key_id()).unwrap_err();
+        assert!(matches!(err, PlanError::ContentManifest(_)), "{err:?}");
+    }
+
+    #[test]
+    fn content_manifest_v2_open() {
+        let m = agent_manifest();
+        let k = Keys(vec![key(CONTENT_KEY)]);
+        assert_eq!(ContentManifestV2::open(&manifest_env(&m), &k).unwrap(), m);
+        assert!(ContentManifestV1::open(&manifest_env(&m), &k).is_err());
+    }
+
     // -----------------------------------------------------------------------
     // Confirm v2
     // -----------------------------------------------------------------------
@@ -565,6 +711,19 @@ mod m4_json {
         };
         let j = serde_json::to_vec(&c).unwrap();
         assert_eq!(ConfirmedV2::from_json(&j).unwrap(), c);
+        // The 64 MiB cap: a named error before parsing. Just under the
+        // cap is parsed (whitespace padding is valid JSON).
+        let cap = usgp_proto::limits::MAX_CONFIRM_V2_RESPONSE_BYTES;
+        assert_eq!(cap, 64 * 1024 * 1024);
+        let mut ok = j.clone();
+        ok.resize(cap, b' ');
+        assert_eq!(ConfirmedV2::from_json(&ok).unwrap(), c);
+        let mut big = j.clone();
+        big.resize(cap + 1, b' ');
+        assert!(matches!(
+            ConfirmedV2::from_json(&big),
+            Err(usgp_proto::device::ConfirmedError::V2TooLarge { len }) if len == cap + 1
+        ));
     }
 
     // -----------------------------------------------------------------------

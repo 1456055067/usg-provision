@@ -5,7 +5,8 @@ Topic 24 of the standards reading list (spec request SR-6, M3,
 fixes CR-SR6-001 to 008 applied). The OPEN items stay open, except
 OPEN-RPSD-2 and 3, which the R4 fold (2026-10-28, AUDITED
 2026-10-28) marks settled for the drive-letter form. Text added in
-that fold is marked "R4".
+that fold is marked "R4". M4 SR-4 (2026-10-29) added §13 and
+OPEN-RPSD-5 (AUDITED 2026-10-29; OPEN-RPSD-5 stays open).
 
 Background for PE-1 image apply (REQ-PE-017): a WIM image stores
 Windows symbolic links, junctions (mount points) and security
@@ -468,6 +469,99 @@ the parts may overlap (OPEN-RPSD-4).
 
 - The other reparse buffers: NFS, Linux-subsystem symbolic link, and
   the GUID-carrying third-party form.
-- The body layouts of individual ACE types (access mask, object and
-  callback ACEs, conditional expressions, resource attributes).
+- The body layouts of individual ACE types, **except** the
+  access-allowed ACE and the access mask (§13, M4 SR-4): object and
+  callback ACEs, conditional expressions, resource attributes.
 - SDDL text syntax and the RPC (absolute) form of the descriptor.
+
+## 13. Access-allowed ACE and access mask (M4 SR-4; AUDITED)
+
+Sources: [MS-DTYP] "ACCESS_ALLOWED_ACE" and "ACCESS_MASK" (the HTML
+pages give no section number), the same revision as above. Also the
+Microsoft Learn pages "ACCESS_ALLOWED_ACE" (winnt.h), "Standard Access
+Rights", "File Access Rights Constants" and "File Security and Access
+Rights".
+
+Access-allowed ACE (`AceType` 0x00, §8):
+
+| Offset | Size | Field | Notes |
+|--------|------|-------|-------|
+| 0 | 4 | `Header` | ACE header, §8 |
+| 4 | 4 | `Mask` | ACCESS_MASK, little-endian (§9) **[derived]** |
+| 8 | variable | `Sid` | SID, §7; length a multiple of 4 |
+
+- The Win32 structure calls the SID field `SidStart`: the first
+  `DWORD` of the SID, with the rest of the SID following it in the
+  same block of memory. **[derived]** So `sizeof(ACCESS_ALLOWED_ACE)`
+  in C counts only the first 4 bytes of the SID. The real size is
+  4 + 4 + the SID length.
+- `AceSize` must cover the header, the mask and the whole SID. The
+  Win32 page says data may follow the SID, which §8 already allows
+  for. **[derived]** For the 12-byte Local System SID (topic 23
+  §30.4), `AceSize` is 20.
+- ACEs must start on `DWORD` boundaries (Win32 page). This agrees with
+  §8's rule that sizes are multiples of 4.
+- The ACE grants the bits in `Mask` to any token that holds an
+  enabled SID equal to `Sid`.
+
+Access mask (32 bits; values from [MS-DTYP] "ACCESS_MASK"):
+
+| Bit value | Name |
+|-----------|------|
+| 0x80000000 | `GENERIC_READ` |
+| 0x40000000 | `GENERIC_WRITE` |
+| 0x20000000 | `GENERIC_EXECUTE` |
+| 0x10000000 | `GENERIC_ALL` |
+| 0x02000000 | `MAXIMUM_ALLOWED` (request only; never in an ACE) |
+| 0x01000000 | `ACCESS_SYSTEM_SECURITY` (never in a DACL ACE) |
+| 0x00100000 | `SYNCHRONIZE` |
+| 0x00080000 | `WRITE_OWNER` |
+| 0x00040000 | `WRITE_DAC` ([MS-DTYP] spells it `WRITE_DACL`) |
+| 0x00020000 | `READ_CONTROL` |
+| 0x00010000 | `DELETE` |
+
+- The [MS-DTYP] page prints `GENERIC_WRITE` as `0x4000000L`, with
+  one zero missing. **[reading]** The page's own bit diagram, and the
+  run of the other generic bits, put it at 0x40000000.
+- [MS-DTYP] says generic bits found in an ACE that is already stored
+  on an object are **not** mapped during access checks. **[reading]**
+  So write specific bits into stored ACEs, not `GENERIC_*` bits.
+- `STANDARD_RIGHTS_REQUIRED` combines `DELETE`, `READ_CONTROL`,
+  `WRITE_DAC` and `WRITE_OWNER`; **[derived]** that is 0x000F0000.
+  `STANDARD_RIGHTS_ALL` adds `SYNCHRONIZE`. `STANDARD_RIGHTS_READ`,
+  `_WRITE` and `_EXECUTE` each currently equal `READ_CONTROL`.
+- The file-specific rights, with the values the Learn page gives:
+  - `FILE_READ_DATA` / `FILE_LIST_DIRECTORY` 0x1;
+  - `FILE_WRITE_DATA` / `FILE_ADD_FILE` 0x2;
+  - `FILE_APPEND_DATA` / `FILE_ADD_SUBDIRECTORY` 0x4;
+  - `FILE_READ_EA` 0x8;
+  - `FILE_WRITE_EA` 0x10;
+  - `FILE_EXECUTE` / `FILE_TRAVERSE` 0x20;
+  - `FILE_DELETE_CHILD` 0x40;
+  - `FILE_READ_ATTRIBUTES` 0x80;
+  - `FILE_WRITE_ATTRIBUTES` 0x100.
+- Files accept the standard rights `DELETE`, `READ_CONTROL`,
+  `WRITE_DAC`, `WRITE_OWNER` and `SYNCHRONIZE`.
+- **`FILE_ALL_ACCESS`.** The Learn constants page describes it only as
+  all possible access rights for a file, and gives **no value or
+  composition** (**OPEN-RPSD-5**). **[derived]** The listed
+  file-specific bits OR together to 0x1FF. With
+  `STANDARD_RIGHTS_REQUIRED` and `SYNCHRONIZE` that would be
+  0x001F01FF, but no cited Learn page states this. Until it is
+  confirmed from Microsoft's published headers or API metadata, an
+  ACE can name the bits explicitly instead.
+- The file generic mappings (Learn page):
+  - `FILE_GENERIC_READ`: `FILE_READ_ATTRIBUTES`, `FILE_READ_DATA`,
+    `FILE_READ_EA`, `STANDARD_RIGHTS_READ`, `SYNCHRONIZE`;
+  - `FILE_GENERIC_WRITE`: `FILE_APPEND_DATA`,
+    `FILE_WRITE_ATTRIBUTES`, `FILE_WRITE_DATA`, `FILE_WRITE_EA`,
+    `STANDARD_RIGHTS_WRITE`, `SYNCHRONIZE`;
+  - `FILE_GENERIC_EXECUTE`: `FILE_EXECUTE`, `FILE_READ_ATTRIBUTES`,
+    `STANDARD_RIGHTS_EXECUTE`, `SYNCHRONIZE`.
+
+  The page also warns that, because these mappings share
+  `SYNCHRONIZE`, an access-denied ACE cannot deny only generic read or
+  only generic write. It advises using allow ACEs instead.
+- **OPEN-RPSD-5** (M4 SR-4): the numeric definition of
+  `FILE_ALL_ACCESS` is not on any cited Learn or Open Specifications
+  page.

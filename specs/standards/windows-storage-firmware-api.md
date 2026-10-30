@@ -18,6 +18,8 @@ added §28 and OPEN-WAPI-15 (AUDITED 2026-10-29; OPEN-WAPI-15 stays
 open). SR-8 (2026-10-29) added §29 and OPEN-WAPI-16 to 19 (AUDITED 2026-10-29;
 the OPEN items stay open). M4 SR-3 (2026-10-29) added §30, §31 and
 OPEN-WAPI-20 to 24 (AUDITED 2026-10-29; the OPEN items stay open).
+M4 SR-4 (2026-10-29) added §30.3, §30.4, two §31 bullets and
+OPEN-WAPI-25, 26 (AUDITED 2026-10-29; OPEN items stay open).
 
 Sources: Microsoft Learn Win32 and driver reference pages, one page
 per function, structure or control code, named in each section below.
@@ -456,6 +458,13 @@ Microsoft facts, not product behaviour.
 - **OPEN-WAPI-24** (M4 SR-3): the per-version default number of
   pages a process can lock, and the size of the "small overhead"
   subtracted from the minimum working set, are not published (§31).
+- **OPEN-WAPI-25** (M4 SR-4): what `CreateWellKnownSid` does
+  with a non-NULL `DomainSid` for a SID outside any domain, such as
+  Local System (§30.4).
+- **OPEN-WAPI-26** (M4 SR-4): the `GetProcessWorkingSetSize`
+  and `SetProcessWorkingSetSize` pages do not say whether the
+  current-process pseudo-handle carries the access rights they need
+  (§31).
 
 ## 13. Volumes not backed by a disk (SR-3b item 3; AUDITED)
 
@@ -1426,6 +1435,71 @@ by name.
   value (values: **OPEN-WAPI-22**). The name obtained is what to pass
   as `username` to `NetUserSetInfo`.
 
+### 30.3 Reading the current flags (SR-4; AUDITED)
+
+Pages: "NetUserGetInfo function", "USER_INFO_1" (lmaccess.h),
+"NetApiBufferFree function" (lmapibuf.h). This is the read half of the
+read-modify-write that §30.1 recommends (OPEN-WAPI-21 stays open).
+
+- Signature: `NET_API_STATUS NetUserGetInfo(LPCWSTR servername,
+  LPCWSTR username, DWORD level, LPBYTE *bufptr)`. `servername` NULL
+  means the local computer. Level 1 returns a `USER_INFO_1`.
+- The system allocates `*bufptr`. The caller must free it with
+  `NetApiBufferFree`, which also frees the strings the structure
+  points to. **[reading]** The page does not say whether `*bufptr` is
+  set on failure; free it only if it is non-NULL, as Microsoft's
+  example does.
+- Success is `NERR_Success`. The named failures are
+  `ERROR_ACCESS_DENIED`, `ERROR_BAD_NETPATH`, `ERROR_INVALID_LEVEL`,
+  `NERR_InvalidComputer` and `NERR_UserNotFound`. On a workstation or
+  member server, any authenticated user may read the information.
+- `USER_INFO_1` has these members, in order: `LPWSTR usri1_name`,
+  `LPWSTR usri1_password`, `DWORD usri1_password_age`,
+  `DWORD usri1_priv`, `LPWSTR usri1_home_dir`, `LPWSTR usri1_comment`,
+  `DWORD usri1_flags`, `LPWSTR usri1_script_path`.
+  - `usri1_password` always comes back NULL from the get call.
+  - `usri1_password_age` is the number of seconds since the password
+    was last changed.
+  - `usri1_priv` is one of `USER_PRIV_GUEST`, `USER_PRIV_USER` or
+    `USER_PRIV_ADMIN`. The numeric values are not given
+    (**OPEN-WAPI-22**).
+  - `usri1_flags` uses the same `UF_` names, with the same meanings,
+    as `USER_INFO_1008` in §30.1, including "`UF_SCRIPT` must be set".
+    It also has the same account-type values, of which only one is
+    set. The numeric values are still not given (**OPEN-WAPI-20**).
+  - **[derived]** On 64-bit Windows the pointers are 8 bytes and the
+    `DWORD`s 4 bytes. With natural alignment, `usri1_flags` is at
+    byte offset 40 of a 56-byte structure. No cited page states this.
+    Use the platform's own structure definition rather than the
+    offset.
+- `NetApiBufferFree(LPVOID Buffer)` returns `NERR_Success` on
+  success, otherwise a system error code. No group membership is
+  needed. The page marks the parameter optional, but does not say in
+  words whether NULL is accepted.
+
+### 30.4 Local System SID (SR-4; AUDITED)
+
+Pages: "Well-known SIDs", "WELL_KNOWN_SID_TYPE", "CreateWellKnownSid
+function" (the §30.2 pages).
+
+- The Local System SID is `S-1-5-18`: the NT authority (5) followed by
+  `SECURITY_LOCAL_SYSTEM_RID` (18). The page describes it as a special
+  account used by the operating system. **[derived]** In binary (topic
+  24 §7) it is revision 1, one sub-authority, authority bytes
+  `00 00 00 00 00 05`, then the sub-authority 18 as a little-endian
+  32-bit value. That makes 12 bytes.
+- `CreateWellKnownSid(WinLocalSystemSid /* = 22 */, NULL, pSid,
+  &cbSid)` builds it. `DomainSid` is documented only as "the domain to
+  use; NULL for the local computer". **[reading]** Local System
+  belongs to no domain, so NULL is the natural argument. The page does
+  not say whether a domain SID passed here would be ignored or
+  rejected (**OPEN-WAPI-25**).
+- `*cbSid` carries the bytes available in and the bytes used out. The
+  page does not name `SECURITY_MAX_SID_SIZE`, nor the error returned
+  when the buffer is too small (**OPEN-WAPI-22**). **[derived]** Topic
+  24 §7 gives a maximum SID size of 68 bytes, so a 68-byte buffer is
+  always enough.
+
 ## 31. Locking memory pages (M4 SR-3; AUDITED 2026-10-29)
 
 Pages: "VirtualLock function", "VirtualUnlock function",
@@ -1469,3 +1543,44 @@ Pages: "VirtualLock function", "VirtualUnlock function",
   silently failed or been undone, not as harmless.
 - Wiping the contents before unlock or free is not covered by these
   pages; it is the caller's duty.
+- **Page size (SR-4).** `VOID GetNativeSystemInfo(LPSYSTEM_INFO)`
+  cannot fail and returns nothing. It fills a `SYSTEM_INFO` structure
+  with these members, in order:
+  - a union: `DWORD dwOemId` (obsolete), or
+    `WORD wProcessorArchitecture` followed by `WORD wReserved`;
+  - `DWORD dwPageSize`;
+  - `LPVOID lpMinimumApplicationAddress`;
+  - `LPVOID lpMaximumApplicationAddress`;
+  - `DWORD_PTR dwActiveProcessorMask`;
+  - `DWORD dwNumberOfProcessors`;
+  - `DWORD dwProcessorType`;
+  - `DWORD dwAllocationGranularity`;
+  - `WORD wProcessorLevel`;
+  - `WORD wProcessorRevision`.
+
+  `dwPageSize` is the page size, and the granularity of page
+  protection and commitment; it is the unit `VirtualLock` and
+  `VirtualUnlock` work in. `dwAllocationGranularity` is a different
+  thing: the alignment of allocation start addresses.
+
+  From a 64-bit process, `GetNativeSystemInfo` is the same as
+  `GetSystemInfo`. Under WOW64 it reports the native system instead.
+  `wProcessorArchitecture` values: `PROCESSOR_ARCHITECTURE_INTEL` 0,
+  `ARM` 5, `IA64` 6, `AMD64` 9, `ARM64` 12, `UNKNOWN` 0xFFFF.
+
+  **[reading]** The page size is not a published constant. Read it at
+  run time; do not assume 4096. The `SetProcessWorkingSetSize` page
+  uses 4K only as an example.
+- **Current working set (SR-4).** `BOOL GetProcessWorkingSetSize(HANDLE
+  hProcess, PSIZE_T lpMinimumWorkingSetSize, PSIZE_T
+  lpMaximumWorkingSetSize)`. The handle needs
+  `PROCESS_QUERY_INFORMATION` or `PROCESS_QUERY_LIMITED_INFORMATION`.
+  Both sizes come back in bytes. It returns nonzero on success, and
+  zero with `GetLastError` on failure. The page does not mention the
+  current-process pseudo-handle (`GetCurrentProcess`), nor the access
+  that handle carries (**OPEN-WAPI-26**). **[reading]** To lock N
+  more bytes, read the current minimum, add N rounded up to whole
+  pages plus some margin for the unpublished overhead
+  (**OPEN-WAPI-24**), and pass the result to
+  `SetProcessWorkingSetSize`. Keep the maximum at least as large as
+  the new minimum.

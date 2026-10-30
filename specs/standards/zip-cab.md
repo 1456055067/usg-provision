@@ -2,6 +2,8 @@
 
 Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, re-check
 after CR-M4-002 and 005 fixes). OPEN-ARC-LIC and other OPEN items stay OPEN.
+M4 SR-5 (2026-10-29) added A.5a, B.5a, B.5b and OPEN-ARC-4, 5 (AUDITED
+2026-10-29; OPEN items stay open).
 
 What a bounded, safe reader of driver archives needs from the public
 format documents, in the researcher's own words. INDEX topic 19 is
@@ -90,6 +92,149 @@ methods. Which methods a product must accept is a clean-side decision
   no leading slash, forward slashes only.
 - Comments are neither encrypted nor authenticated (§4.4.26).
 
+### A.5a Field tables (M4 SR-5; AUDITED)
+
+The offsets are in bytes from the start of the record. Widths and order
+are from the cited sections. The offsets are **[derived]** by adding
+up the widths, and the labels are our own. All values are
+little-endian (A.1). "Var" means variable length.
+
+Local file header (§4.3.7), signature 0x04034B50:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | signature |
+| 4 | 2 | version needed |
+| 6 | 2 | flags (A.3) |
+| 8 | 2 | method (A.4) |
+| 10 | 2 | modification time (DOS) |
+| 12 | 2 | modification date (DOS) |
+| 14 | 4 | CRC-32 |
+| 18 | 4 | compressed size |
+| 22 | 4 | uncompressed size |
+| 26 | 2 | name length n |
+| 28 | 2 | extra length e |
+| 30 | n | name |
+| 30+n | e | extra field |
+
+Central directory header (§4.3.12), signature 0x02014B50:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | signature |
+| 4 | 2 | version made by |
+| 6 | 2 | version needed |
+| 8 | 2 | flags |
+| 10 | 2 | method |
+| 12 | 2 | modification time |
+| 14 | 2 | modification date |
+| 16 | 4 | CRC-32 |
+| 20 | 4 | compressed size |
+| 24 | 4 | uncompressed size |
+| 28 | 2 | name length n |
+| 30 | 2 | extra length e |
+| 32 | 2 | comment length c |
+| 34 | 2 | starting disk |
+| 36 | 2 | internal attributes |
+| 38 | 4 | external attributes |
+| 42 | 4 | local header offset |
+| 46 | n, e, c | name, extra field, comment |
+
+End of central directory (§4.3.16), signature 0x06054B50:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | signature |
+| 4 | 2 | this disk number |
+| 6 | 2 | disk where the central directory starts |
+| 8 | 2 | entries on this disk |
+| 10 | 2 | total entries |
+| 12 | 4 | central directory size |
+| 16 | 4 | central directory offset |
+| 20 | 2 | comment length c |
+| 22 | c | comment |
+
+Zip64 end of central directory record (§4.3.14), signature 0x06064B50:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | signature |
+| 4 | 8 | size of the record, excluding these first 12 bytes |
+| 12 | 2 | version made by |
+| 14 | 2 | version needed |
+| 16 | 4 | this disk number |
+| 20 | 4 | disk where the central directory starts |
+| 24 | 8 | entries on this disk |
+| 32 | 8 | total entries |
+| 40 | 8 | central directory size |
+| 48 | 8 | central directory offset |
+| 56 | var | extensible data |
+
+Zip64 locator (§4.3.15), signature 0x07064B50, 20 bytes:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | signature |
+| 4 | 4 | disk holding the Zip64 end record |
+| 8 | 8 | offset of the Zip64 end record |
+| 16 | 4 | total number of disks |
+
+**[reading]** The locator sits immediately before the ordinary end
+record. Section 4.3.6 gives that order.
+
+Zip64 extra field (§4.5.3), header ID 0x0001:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 2 | header ID 0x0001 |
+| 2 | 2 | size of the data that follows |
+| 4 | 8 | uncompressed size, if present |
+| … | 8 | compressed size, if present |
+| … | 8 | local header offset, if present |
+| … | 4 | starting disk, if present |
+
+- The four values always come in that order. Each is present only when
+  the matching ordinary field holds all ones (0xFFFFFFFF, or 0xFFFF for
+  the disk). Absent values take no space, so the offset of each later
+  value depends on which earlier ones are present.
+- In a **local** header, if this field is used it must hold both sizes
+  (§4.5.3).
+
+Data descriptor (§4.3.9). Bit 3 of the flags must be set for one to
+follow the data (A.3):
+
+| Form | Layout | Total |
+|------|--------|-------|
+| With signature | 0x08074B50 (4), CRC-32 (4), compressed size (4), uncompressed size (4) | 16 |
+| Without signature | CRC-32 (4), compressed size (4), uncompressed size (4) | 12 |
+| Zip64, with signature | signature (4), CRC-32 (4), sizes (8 each) | 24 |
+| Zip64, without signature | CRC-32 (4), sizes (8 each) | 20 |
+
+- The APPNOTE says the signature is widely used but was not originally
+  assigned, and that readers must accept both forms (A.2).
+- **[reading]** A reader cannot tell the two forms apart with
+  certainty, because a CRC can equal the signature value. Using the
+  central directory's values to check is the safer course.
+- When the 8-byte sizes apply is decided by Zip64 use for that entry
+  (§4.3.9). The exact test is in the parts of §4.3.9 not summarised
+  here (**OPEN-ARC-5**).
+
+General-purpose flags (§4.4.4), bit by bit:
+
+| Bit | Meaning (short) |
+|-----|-----------------|
+| 0 | encrypted |
+| 1, 2 | method-specific. Deflate (8, 9): together they pick the compression option. LZMA (14): bit 1 means an end-of-stream marker is used. Implode (6): dictionary size and tree count |
+| 3 | CRC and sizes are in the data descriptor; local header values are zero |
+| 4 | reserved (enhanced deflate) |
+| 5 | compressed patched data |
+| 6 | strong encryption |
+| 7 to 10 | unused |
+| 11 | name and comment are UTF-8 |
+| 12 | reserved by PKWARE |
+| 13 | central directory encrypted, with local header values masked |
+| 14, 15 | reserved by PKWARE |
+
 ### A.6 Safety points for a bounded reader
 
 [project concern] The APPNOTE does not address the following; they are
@@ -168,6 +313,136 @@ into an accumulator; 1 to 3 leftover bytes form a final word. It is
 computed over the data with seed 0, then over the block header fields
 after the checksum, seeded with the first result.
 
+### B.5a Field tables (M4 SR-5; AUDITED; SRC-055)
+
+All values are little-endian and packed with no padding (B.1). The
+offsets are **[derived]** from the published order and widths; the
+labels are our own. R_h, R_f and R_d are the header, folder and
+data-block reserve sizes. They are zero unless the header flag 0x0004
+is set.
+
+Header:
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | signature `MSCF` (0x4D 0x53 0x43 0x46) |
+| 4 | 4 | reserved, must be zero |
+| 8 | 4 | total cabinet size in bytes |
+| 12 | 4 | reserved, must be zero |
+| 16 | 4 | absolute offset of the first file record |
+| 20 | 4 | reserved, must be zero |
+| 24 | 1 | minor version (3) |
+| 25 | 1 | major version (1) |
+| 26 | 2 | number of folders |
+| 28 | 2 | number of files |
+| 30 | 2 | flags: 0x0001 previous cabinet, 0x0002 next cabinet, 0x0004 reserve present; other bits reserved |
+| 32 | 2 | set identifier |
+| 34 | 2 | index in set, from 0 |
+| 36 | 2 | R_h, 0 to 60,000 (only if 0x0004) |
+| 38 | 1 | R_f, 0 to 255 (only if 0x0004) |
+| 39 | 1 | R_d, 0 to 255 (only if 0x0004) |
+| 40 | R_h | header reserve bytes (only if 0x0004) |
+
+- Without the reserve flag, the fixed header is 36 bytes. With it, the
+  header is 40 + R_h bytes.
+- Next come, if 0x0001 is set, the previous cabinet name and previous
+  disk name. Then, if 0x0002 is set, the next cabinet name and next
+  disk name. Each is a NUL-terminated string of at most 255 bytes plus
+  the NUL (B.2).
+- The folder records follow, one per folder.
+
+Folder record (8 + R_f bytes):
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | absolute offset of the folder's first data block |
+| 4 | 2 | number of data blocks for this folder in this cabinet |
+| 6 | 2 | compression type (B.3) |
+| 8 | R_f | folder reserve bytes |
+
+File record (16 bytes plus the name; it starts at the offset given in
+the header):
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | uncompressed file size |
+| 4 | 4 | uncompressed offset within the folder |
+| 8 | 2 | folder index, or 0xFFFD / 0xFFFE / 0xFFFF (B.4) |
+| 10 | 2 | date: (year − 1980) × 512 + month × 32 + day |
+| 12 | 2 | time: hour × 2048 + minute × 32 + seconds ÷ 2 |
+| 14 | 2 | attributes (B.4) |
+| 16 | var | NUL-terminated name |
+
+- The special folder indexes have these meanings: 0xFFFD continues
+  from the previous cabinet and means folder 0; 0xFFFE continues into
+  the next cabinet and means the last folder; 0xFFFF means both.
+
+Data block (8 + R_d + compressed count):
+
+| Off | Width | Field |
+|-----|-------|-------|
+| 0 | 4 | checksum (0 means none) |
+| 4 | 2 | compressed byte count |
+| 6 | 2 | uncompressed byte count (0 in the first part of a split block) |
+| 8 | R_d | data-block reserve bytes |
+| 8+R_d | compressed count | data |
+
+- The document's own text has two copy errors here. One says the
+  data-block reserve applies when the flag is **not** set. The other
+  names the header reserve size where the data-block reserve size is
+  meant. The structure and the header rule make the reading above the
+  consistent one.
+- **Compression type.** The cabinet document says the values are
+  defined by each compression format, and gives none. Its MakeCAB
+  section names the types MSZIP and LZX, and LZX window settings 15 to
+  21 (default 18), but gives no numeric codes. B.3 (SRC-186) gives
+  0x0000 none and 0x0001 MSZIP. No document read gives the numeric
+  encoding of LZX or Quantum, nor which bits carry the LZX window, so
+  **OPEN-ARC-1 stays open**.
+
+### B.5b Data block checksum (M4 SR-5; AUDITED; SRC-055)
+
+This is the published algorithm, restated in our own words. The
+document gives it as a short reference routine, and the restatement
+follows that routine.
+
+- **Folding a byte run with a seed.** Start the accumulator at the
+  seed.
+  - Take the run 4 bytes at a time. Make each group of 4 into a 32-bit
+    value with the first byte least significant (little-endian), and
+    XOR it into the accumulator.
+  - If 1 to 3 bytes are left over, make **one** further value with the
+    first leftover byte **most** significant among those present, and
+    the high bytes zero. With 1 byte the value is that byte. With 2
+    bytes it is first × 256 + second. With 3 bytes it is
+    first × 65,536 + second × 256 + third. XOR that value in once.
+  - **[reading]** The tail is in the opposite byte order to the full
+    groups. A reader that assumes little-endian for the tail too will
+    get a different result for any length that is not a multiple of 4.
+- **What is covered, and in what order.**
+  1. Fold the data bytes (the compressed count of them) with seed 0.
+  2. Fold the 4 bytes of the block header that follow the checksum
+     (the compressed count and the uncompressed count), using the
+     result of step 1 as the seed.
+  3. The result is the checksum.
+- **Reserve bytes.** The reference routine covers neither the
+  data-block reserve bytes nor the checksum field. The field
+  description, however, says the checksum runs from the compressed
+  count through the end of the data. That wording would take in the
+  reserve, but the description never mentions the reserve. The
+  routine is the precise statement; whether reserve bytes are covered
+  is still **OPEN-ARC-4**. **[reading]** Since reserves are normally
+  absent (R_d = 0), both readings agree for ordinary cabinets.
+- **Split blocks.** The part at the end of one cabinet is checksummed
+  over its own partial data, with its header showing the partial
+  compressed count and an uncompressed count of 0. The remainder in the
+  next cabinet is checksummed over the remaining data, with seed 0.
+  Its header gives the full uncompressed count.
+- A checksum of 0 means none was supplied, and the check is skipped
+  (B.5). **[reading]** A non-zero checksum that by chance works out to
+  0 cannot be told apart from "none". The document does not discuss
+  this.
+
 ### B.6 MSZIP (SRC-185 §2)
 
 Each MSZIP block starts with the two bytes 0x43 0x4B, followed by one or
@@ -214,5 +489,10 @@ to the data.
 - **OPEN-ARC-3**: how ZIP marks symbolic links and other special entries
   (external attributes and host system values are in parts of the
   APPNOTE not summarised here).
+- **OPEN-ARC-4** (M4 SR-5): whether the cabinet data-block
+  checksum covers the per-block reserve bytes. The reference routine
+  does not; the field description is ambiguous (B.5b).
+- **OPEN-ARC-5** (M4 SR-5): the exact rule for when a data
+  descriptor's sizes are 8 bytes wide (§4.3.9 detail not summarised).
 - **OPEN-ARC-LIC**: counsel to confirm that a summary of the APPNOTE in
   the project's own words is consistent with its terms.

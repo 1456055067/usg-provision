@@ -40,10 +40,40 @@ fn protected_system_only_dacl_is_applied() {
         acl::protect_file_system_only(&f).expect("protect");
     }
     let sddl = fsquery::sddl(&path).expect("read back");
-    println!("{sddl}");
-    assert!(sddl.contains("D:P(A;;FA;;;SY)"), "{sddl}");
-    assert!(!sddl.contains(";ID;"), "no inherited entries: {sddl}");
+    println!("observed: protected DACL read back as {sddl}");
+    let (flags, entries) = dacl_parts(&sddl).expect("SDDL has a DACL part");
+    // Topic 23 §20: SetSecurityInfo may add the auto-inherited flag (AI);
+    // only "protected" (P) is required.
+    assert!(flags.contains('P'), "DACL not protected: {sddl}");
+    assert!(
+        flags.replace("AI", "").replace('P', "").is_empty(),
+        "unexpected DACL flags {flags:?}: {sddl}"
+    );
+    assert_eq!(
+        entries,
+        ["A;;FA;;;SY"],
+        "exactly one entry, SYSTEM full: {sddl}"
+    );
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// The DACL flags and entries of an SDDL string: the text after `D:` up to
+/// the first `(`, then each parenthesised entry, up to the next part
+/// (`S:`) or the end.
+fn dacl_parts(sddl: &str) -> Option<(String, Vec<String>)> {
+    let rest = sddl.split_once("D:")?.1;
+    let rest = rest.split_once("S:").map_or(rest, |(d, _)| d);
+    let (flags, aces) = rest.split_once('(').map_or((rest, ""), |(f, a)| (f, a));
+    let entries = if aces.is_empty() {
+        Vec::new()
+    } else {
+        format!("({aces}")
+            .split(')')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_start_matches('(').to_owned())
+            .collect()
+    };
+    Some((flags.to_owned(), entries))
 }
 
 #[test]

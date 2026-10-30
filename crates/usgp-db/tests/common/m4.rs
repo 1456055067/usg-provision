@@ -1,7 +1,9 @@
 //! M4 fixtures and store-generic scenarios (migration 0005): archive
 //! content with v2 manifests, driver archives and package driver lists,
 //! agent signers and packages, package configuration, device values, the
-//! nine-step job, resume nonces and tokens, and the escrow. The same
+//! nine-step job, resume nonces and tokens, and the escrow. Operators are
+//! enrolled through the administrative store (decision 0016: the app role
+//! cannot write `operator`), as in the M3 flows. The same
 //! scenarios run on the in-memory store (`memory_repo.rs`) and on
 //! PostgreSQL (`repo_pg.rs`, CI).
 
@@ -358,8 +360,8 @@ async fn run_step<S: Store>(store: &S, a: &Audit, job: JobId, step: StepV2) {
 /// Archive content: v2 manifests stored and checked against the row; the
 /// M2 readers never see archive kinds; one live item per digest across
 /// kinds.
-pub async fn flow_archive_content<S: Store>(store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-content").await;
+pub async fn flow_archive_content<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let op = enrol(admin, a, "m4-content").await;
     let c = ready_archive(
         store,
         a,
@@ -455,8 +457,8 @@ pub async fn flow_archive_content<S: Store>(store: &S, a: &Audit) {
 
 /// Driver archives: ready from the manifest, refusal, replacement keeps
 /// the id, ordered package lists, deletion rules.
-pub async fn flow_driver_archives<S: Store>(store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-drivers").await;
+pub async fn flow_driver_archives<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let op = enrol(admin, a, "m4-drivers").await;
     let p = ready_package(store, a, &op).await;
     let c1 = ready_archive(
         store,
@@ -653,8 +655,8 @@ pub async fn flow_driver_archives<S: Store>(store: &S, a: &Audit) {
 }
 
 /// Agent signers and packages; package configuration.
-pub async fn flow_agent_packages_and_config<S: Store>(store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-agent").await;
+pub async fn flow_agent_packages_and_config<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let op = enrol(admin, a, "m4-agent").await;
     let signer = register_signer(store, a, &op).await;
 
     // Key id must be the digest of the SPKI; a key registers once.
@@ -851,8 +853,8 @@ pub async fn flow_agent_packages_and_config<S: Store>(store: &S, a: &Audit) {
 }
 
 /// Device values: set, replace, read, delete, bounds.
-pub async fn flow_device_values<S: Store>(store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-values").await;
+pub async fn flow_device_values<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
+    let op = enrol(admin, a, "m4-values").await;
     let mac = super::m3::mac();
     let v = DeviceValues {
         mac,
@@ -924,7 +926,7 @@ pub async fn flow_device_values<S: Store>(store: &S, a: &Audit) {
 /// success only after step 9, session closed at step 6, resume nonces and
 /// tokens, escrow rules, restart pending, failure.
 pub async fn flow_job_v2<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-job").await;
+    let op = enrol(admin, a, "m4-job").await;
     let bs = enrol_boot_service(admin, a, "m4-relay").await.id;
     let p = ready_package(store, a, &op).await;
     let s = ready_session(store, a, &op, bs, &p, macs(2)).await;
@@ -1205,7 +1207,7 @@ pub async fn flow_job_v2<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
 
 /// A v2 job fails with a v2 failure; v1 and v2 failure calls do not cross.
 pub async fn flow_job_v2_failure<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-fail").await;
+    let op = enrol(admin, a, "m4-fail").await;
     let bs = enrol_boot_service(admin, a, "m4-fail-relay").await.id;
     let p = ready_package(store, a, &op).await;
     let s = ready_session(store, a, &op, bs, &p, macs(1)).await;
@@ -1270,7 +1272,7 @@ pub async fn flow_job_v2_failure<A: Store, S: Store>(admin: &A, store: &S, a: &A
 /// The wipe guard holds for v2 jobs: no `disk.wipe.authorised` record, no
 /// job; a job key id that is not the key's digest is refused.
 pub async fn flow_job_v2_guards<A: Store, S: Store>(admin: &A, store: &S, a: &Audit) {
-    let op = enrol(store, a, "m4-guard").await;
+    let op = enrol(admin, a, "m4-guard").await;
     let bs = enrol_boot_service(admin, a, "m4-guard-relay").await.id;
     let p = ready_package(store, a, &op).await;
     let s = ready_session(store, a, &op, bs, &p, macs(1)).await;

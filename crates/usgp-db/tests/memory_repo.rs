@@ -309,28 +309,28 @@ mod t {
     #[tokio::test]
     async fn m4_archive_content() {
         let (s, a) = setup().await;
-        common::m4::flow_archive_content(&s, &a).await;
+        common::m4::flow_archive_content(&s, &s, &a).await;
         flow_chain_verifies(&s, &a).await;
     }
 
     #[tokio::test]
     async fn m4_driver_archives() {
         let (s, a) = setup().await;
-        common::m4::flow_driver_archives(&s, &a).await;
+        common::m4::flow_driver_archives(&s, &s, &a).await;
         flow_chain_verifies(&s, &a).await;
     }
 
     #[tokio::test]
     async fn m4_agent_packages_and_config() {
         let (s, a) = setup().await;
-        common::m4::flow_agent_packages_and_config(&s, &a).await;
+        common::m4::flow_agent_packages_and_config(&s, &s, &a).await;
         flow_chain_verifies(&s, &a).await;
     }
 
     #[tokio::test]
     async fn m4_device_values() {
         let (s, a) = setup().await;
-        common::m4::flow_device_values(&s, &a).await;
+        common::m4::flow_device_values(&s, &s, &a).await;
     }
 
     #[tokio::test]

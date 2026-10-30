@@ -33,7 +33,7 @@ mod t {
     async fn m4_archive_content() {
         let db = TestDb::migrated().await;
         let a = init_audit(&db.app).await;
-        m4::flow_archive_content(&db.app, &a).await;
+        m4::flow_archive_content(&db.admin, &db.app, &a).await;
         flow_chain_verifies(&db.app, &a).await;
         db.finish().await;
     }
@@ -42,7 +42,7 @@ mod t {
     async fn m4_driver_archives() {
         let db = TestDb::migrated().await;
         let a = init_audit(&db.app).await;
-        m4::flow_driver_archives(&db.app, &a).await;
+        m4::flow_driver_archives(&db.admin, &db.app, &a).await;
         db.finish().await;
     }
 
@@ -50,7 +50,7 @@ mod t {
     async fn m4_agent_packages_and_config() {
         let db = TestDb::migrated().await;
         let a = init_audit(&db.app).await;
-        m4::flow_agent_packages_and_config(&db.app, &a).await;
+        m4::flow_agent_packages_and_config(&db.admin, &db.app, &a).await;
         db.finish().await;
     }
 
@@ -58,7 +58,7 @@ mod t {
     async fn m4_device_values() {
         let db = TestDb::migrated().await;
         let a = init_audit(&db.app).await;
-        m4::flow_device_values(&db.app, &a).await;
+        m4::flow_device_values(&db.admin, &db.app, &a).await;
         db.finish().await;
     }
 

@@ -378,6 +378,10 @@ pub mod codes {
         RESUME_REFUSED = "resume_refused";
         /// The server refused the escrow submission.
         ESCROW_REFUSED = "escrow_refused";
+        /// The password was escrowed and set, but the server did not
+        /// accept the confirmation before the step 7 deadline (M4 plan
+        /// WU-7a item 10); the escrow row stays `received`.
+        ESCROW_CONFIRM_FAILED = "escrow_confirm_failed";
         /// Base: `admin_password_set_failed:<win32>`.
         ADMIN_PASSWORD_SET_FAILED = "admin_password_set_failed";
         /// The tags could not be written.

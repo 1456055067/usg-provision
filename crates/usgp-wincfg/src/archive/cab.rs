@@ -21,8 +21,8 @@
 use super::inflate::{Inflater, SliceSource, Window};
 use super::names::{self, Flavor};
 use super::{
-    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveReport, Collector, ExtractSink, Input, Le,
-    Listed, RelPath, check_listing,
+    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveMode, ArchiveReport, Collector, ExtractSink,
+    Input, Le, Listed, RelPath, check_listing,
 };
 
 const HEADER_LEN: usize = 36;
@@ -94,6 +94,7 @@ fn read_name(input: &Input<'_>, off: u64, max: usize) -> Result<(Vec<u8>, u64), 
 pub(crate) fn extract(
     input: &Input<'_>,
     lim: &ArchiveLimits,
+    mode: ArchiveMode,
     sink: &mut dyn ExtractSink,
 ) -> Result<ArchiveReport, ArchiveError> {
     let mut h = [0u8; HEADER_LEN];
@@ -282,7 +283,7 @@ pub(crate) fn extract(
         .collect();
     let names = check_listing(&listed, input.len(), lim)?;
 
-    let mut col = Collector::new(sink, names, lim);
+    let mut col = Collector::new(sink, names, lim, mode);
     let mut window = Window::new();
     let mut next_file = 0usize;
     for (fi, folder) in folders.iter().enumerate() {

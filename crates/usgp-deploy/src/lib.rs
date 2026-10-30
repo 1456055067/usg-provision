@@ -74,15 +74,14 @@ pub mod steps;
 
 pub use bootentry::{BootEntry, BootEntryError, make_windows_first};
 pub use clock::{Clock, SystemClock};
-pub use content::{ChunkError, ChunkErrorKind, VerifiedChunks};
-pub use engine::{Engine, EngineConfig, JobView, SignedJob, Succeeded, ViewEvent};
+pub use content::{ChunkError, ChunkErrorKind, StreamError, VerifiedChunks};
+pub use engine::{Engine, EngineConfig, JobView, PrebootDone, SignedJob, Succeeded, ViewEvent};
 pub use error::{JobFailure, JobFailureV2};
 pub use link::{LinkError, ProgressLinkV2, ServerLink, ServerLinkV2};
 pub use plan::{PinnedKey, PlanKeys, verify_plan};
 pub use platform::{
-    BootFiles, FirmwareVars, FormattedVolume, FwError, OpenedTarget, Platform, PlatformError,
-    PlatformErrorKind, VolumeOps, VolumeSpec,
+    BootFiles, FileWriter, FirmwareVars, FormattedVolume, FwError, OpenedTarget, Platform,
+    PlatformError, PlatformErrorKind, StagedArchive, StagedFile, VolumeOps, VolumeSpec,
 };
-pub use postsetup::{PostSetupPlatform, PostSetupRunner, ResumeLink, RunnerConfig};
-pub use report_v2::POSTSETUP_SEQ_BASE;
+pub use postsetup::{OpenedFile, PostSetupPlatform, PostSetupRunner, ResumeLink, RunnerConfig};
 pub use steps::{AfterApply, PostSetupInputs, PrebootTail, TailConfig, TailDone};

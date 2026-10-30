@@ -30,7 +30,7 @@
 //   #REQ-DISK-013, #REQ-DISK-015
 // - specs/standards/gpt.md §7 (backup first)
 
-use usgp_proto::job_plan::VerifiedJobPlan;
+use usgp_proto::job_plan::{VerifiedJobPlan, VerifiedJobPlanV2};
 
 use crate::device::BlockDevice;
 use crate::eligibility::DiskIdentity;
@@ -64,9 +64,10 @@ pub struct WipeEvidence {
 
 /// Proof that the wipe of one disk was confirmed and durably recorded.
 ///
-/// Sealed: the field is private and the only constructor is
-/// [`WipeAuthorisation::from_verified_plan`] (NIST-007). Neither of these
-/// compiles outside this crate:
+/// Sealed: the field is private and the only constructors are
+/// [`WipeAuthorisation::from_verified_plan`] and
+/// [`WipeAuthorisation::from_verified_plan_v2`] (NIST-007). Neither of
+/// these compiles outside this crate:
 ///
 /// ```compile_fail
 /// # use usgp_disk::{WipeAuthorisation, WipeEvidence, DiskIdentity};
@@ -98,6 +99,42 @@ impl WipeAuthorisation {
     /// opened device's geometry against them before any write.
     #[must_use]
     pub fn from_verified_plan(plan: &VerifiedJobPlan, opened: DiskIdentity) -> Self {
+        let p = plan.plan();
+        Self {
+            evidence: WipeEvidence {
+                job_id: p.job_id.to_string(),
+                audit_seq: p.wipe.audit_seq,
+                audit_record_hash: p.wipe.record_hash.0,
+                disk: opened,
+                size_bytes: p.disk.size_bytes,
+                logical_sector: p.disk.logical_sector,
+            },
+        }
+    }
+
+    /// As [`WipeAuthorisation::from_verified_plan`], for a v2 plan (M4
+    /// plan WU-7a item 1): the same evidence from `plan.wipe` and
+    /// `plan.disk`.
+    ///
+    /// The guarantee is unchanged because [`VerifiedJobPlanV2`] has no
+    /// public constructor except signature verification in `usgp-proto`.
+    /// Building one any other way does not compile:
+    ///
+    /// ```compile_fail
+    /// # use usgp_proto::job_plan::{JobPlanV2, VerifiedJobPlanV2};
+    /// # use usgp_proto::content_manifest::{ContentManifestV1, ContentManifestV2};
+    /// # use usgp_disk::{DiskIdentity, WipeAuthorisation};
+    /// # fn f(plan: JobPlanV2, image: ContentManifestV1, agent: ContentManifestV2, d: DiskIdentity) {
+    /// let forged = VerifiedJobPlanV2 { plan, image, drivers: Vec::new(), agent };
+    /// let _ = WipeAuthorisation::from_verified_plan_v2(&forged, d);
+    /// # }
+    /// ```
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: AC-3 (Access Enforcement) - built only from a
+    //   signature-verified v2 plan naming a durable audit record.
+    // - SPEC: specs/disk.md#REQ-DISK-006
+    #[must_use]
+    pub fn from_verified_plan_v2(plan: &VerifiedJobPlanV2, opened: DiskIdentity) -> Self {
         let p = plan.plan();
         Self {
             evidence: WipeEvidence {

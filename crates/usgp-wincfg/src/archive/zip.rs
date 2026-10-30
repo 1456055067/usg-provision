@@ -22,8 +22,8 @@ use usgp_common::crc32::Crc32;
 use super::inflate::{Inflater, Window};
 use super::names::{self, Flavor};
 use super::{
-    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveReport, Collector, ExtractSink, Input, Le,
-    Listed, RangeReader, RelPath, check_listing,
+    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveMode, ArchiveReport, Collector, ExtractSink,
+    Input, Le, Listed, RangeReader, RelPath, check_listing,
 };
 
 const SIG_LOCAL: u32 = 0x0403_4b50;
@@ -531,6 +531,7 @@ fn check_descriptor(
 pub(crate) fn extract(
     input: &Input<'_>,
     lim: &ArchiveLimits,
+    mode: ArchiveMode,
     sink: &mut dyn ExtractSink,
 ) -> Result<ArchiveReport, ArchiveError> {
     let dir = find_directory(input)?;
@@ -558,7 +559,7 @@ pub(crate) fn extract(
         }
     }
 
-    let mut col = Collector::new(sink, names, lim);
+    let mut col = Collector::new(sink, names, lim, mode);
     let mut window = Window::new();
     for e in &entries {
         if e.is_dir {

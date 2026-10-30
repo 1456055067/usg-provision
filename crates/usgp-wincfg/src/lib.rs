@@ -12,6 +12,6 @@ pub mod dism;
 pub mod unattend;
 
 pub use archive::{
-    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveReport, ExtractSink, ReadAt, RelPath,
-    extract_archive, validate_archive,
+    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveMode, ArchiveReport, ExtractSink, ReadAt,
+    RelPath, extract_archive, extract_archive_mode, validate_archive, validate_archive_mode,
 };

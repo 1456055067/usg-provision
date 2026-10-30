@@ -30,6 +30,11 @@ pub fn fill_random(buf: &mut [u8]) -> Result<(), CryptoError> {
 pub const PASSWORD_ALPHABET: &[u8; 64] =
     b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789+-.,:=@_";
 
+/// Length of the generated local administrator password: fixed at 24
+/// characters (144 bits; M4 plan §1.3 and WU-7a item 6). There is no
+/// configuration key and the plan carries no length.
+pub const PASSWORD_LEN: usize = 24;
+
 /// Shortest password [`random_password`] produces (one of each class).
 pub const MIN_PASSWORD_LEN: usize = 4;
 /// Longest password [`random_password`] produces.
@@ -104,7 +109,7 @@ mod tests {
     #[test]
     fn password_shape() {
         for _ in 0..200 {
-            let pw = random_password(24).unwrap();
+            let pw = random_password(PASSWORD_LEN).unwrap();
             assert_eq!(pw.len(), 24);
             assert!(pw.bytes().all(|b| PASSWORD_ALPHABET.contains(&b)));
             assert!(has_all_classes(pw.as_bytes()));

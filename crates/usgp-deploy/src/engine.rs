@@ -32,6 +32,14 @@
 //! (the engine returns it and never retries the job), and is reported as
 //! `failed` (REQ-JOB-005, REQ-JOB-006). There is no cancel: the engine
 //! starts after the wipe confirmation (REQ-TGT-011).
+//!
+//! **v2 jobs (M4 plan WU-7a item 3).** [`Engine::run_v2`] runs steps 1 to
+//! 3 of a [`VerifiedJobPlanV2`] with the same code, then
+//! [`PrebootTail`] (steps 4 to 6), and returns so the caller restarts.
+//! Step 1 of a v2 job also fetches, verifies and discards every chunk of
+//! each driver archive and of the agent package, so nothing is written
+//! before step 2 unless all content verifies. Reports go out as progress
+//! schema 2 with one sequence, and the screen gets the v2 step events.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-7, SI-7(1), SI-7(6) - verify plan, then all content,
@@ -52,6 +60,8 @@
 // - SPEC: specs/boot-network.md#REQ-BOOT-065, #REQ-BOOT-066
 // - SPEC: specs/targeting.md#REQ-TGT-011
 // - DECISION: docs/decisions/0011, 0018 items 7 to 10, 0021 item 4
+// - DECISION: M4 plan WU-7a items 1 to 3 (v2 wipe authority, verified
+//   image reference, v2 steps 1 to 3)
 
 use std::cell::{Cell, RefCell};
 use std::ops::ControlFlow;
@@ -64,25 +74,32 @@ use usgp_disk::{
     DiskError, DiskFacts, DiskIdentity, EligibilityPolicy, WipeAuthorisation, WipePlan, assess,
     wipe_and_write,
 };
-use usgp_image::apply::{ApplyError, ApplyLimits, ApplyPreview, ApplyRoot, apply, verify_pass};
+use usgp_image::apply::{
+    ApplyError, ApplyLimits, ApplyPreview, ApplyReport, ApplyRoot, apply, verify_pass,
+};
 use usgp_proto::disk::{
     Bus, DiskGuid, LayoutReportV1, PartitionKind, PlanDiskV1, WrittenPartitionV1,
 };
 use usgp_proto::envelope::SignedEnvelopeV1;
-use usgp_proto::job_plan::{PlanExpectation, RetryPolicyV1, VerifiedJobPlan};
+use usgp_proto::job_plan::{
+    PlanExpectation, RetryPolicyV1, VerifiedImageRef, VerifiedJobPlan, VerifiedJobPlanV2,
+};
 use usgp_proto::progress::{
-    FailureCategory, FileRole, JobState, ProgressEvent, ProgressItemV1, ProgressV1, Step,
+    FailureCategory, FileRole, JobState, PROGRESS_SCHEMA_V2, ProgressAckV1, ProgressEvent,
+    ProgressItemV1, ProgressV1, ProgressV2, Step, StepV2,
 };
 use usgp_proto::{DiskText, ItemName, JobId, PartitionLabel, codes};
 
 use crate::bootentry::{BootEntry, make_windows_first};
 use crate::clock::{Clock, TimeLimit, Watch};
-use crate::content::{ChunkError, ChunkErrorKind, FetchHook, VerifiedChunks};
-use crate::error::{JobFailure, code, code_of};
-use crate::link::ServerLink;
+use crate::content::{ChunkError, FetchHook, VerifiedChunks, chunk_code};
+use crate::error::{JobFailure, JobFailureV2, code, code_of};
+use crate::link::{LinkError, ServerLink, ServerLinkV2};
 use crate::plan::{PlanKeys, verify_plan};
 use crate::platform::{FormattedVolume, Platform, PlatformError, PlatformErrorKind, VolumeSpec};
 use crate::report::Reporter;
+use crate::report_v2::{Must, ReporterV2};
+use crate::steps::{AfterApply, DriverCheck, PostSetupInputs, PrebootTail, TailConfig, TailIo};
 
 /// Design value: the device screen's byte counter moves in steps of at
 /// least this much (and at the end).
@@ -124,6 +141,37 @@ pub enum ViewEvent<'a> {
     Failed(&'a JobFailure),
     /// Every step succeeded and the server has the report.
     Succeeded,
+    /// A v2 job started (M4): what is being installed and steps 1 to 9.
+    StartedV2 {
+        /// The job.
+        job_id: JobId,
+        /// The image's display name.
+        package: &'a str,
+        /// The edition's name.
+        edition: &'a str,
+        /// Every step, in order.
+        steps: &'a [StepV2],
+    },
+    /// A v2 step started.
+    StepStartedV2(StepV2),
+    /// Bytes moved in a v2 content step.
+    ProgressV2 {
+        /// The step.
+        step: StepV2,
+        /// Bytes done.
+        bytes_done: u64,
+        /// Bytes in all.
+        bytes_total: u64,
+        /// The file being fetched.
+        item: Option<&'a ProgressItemV1>,
+    },
+    /// A v2 step completed.
+    StepCompletedV2(StepV2),
+    /// A v2 job failed. Stays on screen until the person acts.
+    FailedV2(&'a JobFailureV2),
+    /// Steps 1 to 6 of a v2 job succeeded and the server acknowledged
+    /// step 6; the caller restarts the device now.
+    Restarting,
 }
 
 /// The device's screen.
@@ -195,6 +243,163 @@ pub struct Succeeded {
     pub bytes_written: u64,
     /// The progress reports the server acknowledged, in order.
     pub reports: Vec<ProgressV1>,
+}
+
+/// Steps 1 to 6 of a v2 job done; the caller restarts the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrebootDone {
+    /// The job.
+    pub job_id: JobId,
+    /// The layout written (REQ-DISK-014).
+    pub layout: LayoutReportV1,
+    /// The boot option made first.
+    pub boot: BootEntry,
+    /// Bytes the image expanded to on the Windows volume.
+    pub image_bytes: u64,
+    /// Bytes written by the apply.
+    pub bytes_written: u64,
+    /// What step 4 checked.
+    pub drivers: DriverCheck,
+    /// The progress reports the server acknowledged, in order.
+    pub reports: Vec<ProgressV2>,
+}
+
+/// The verified plan a run works from: v1 (M3) or v2 (M4). Both give the
+/// same verified image reference and wipe authority.
+#[derive(Clone, Copy)]
+enum PlanRef<'p> {
+    V1(&'p VerifiedJobPlan),
+    V2(&'p VerifiedJobPlanV2),
+}
+
+impl<'p> PlanRef<'p> {
+    fn image(self) -> VerifiedImageRef<'p> {
+        match self {
+            Self::V1(v) => v.image(),
+            Self::V2(v) => v.image(),
+        }
+    }
+
+    fn disk(self) -> &'p PlanDiskV1 {
+        match self {
+            Self::V1(v) => &v.plan().disk,
+            Self::V2(v) => &v.plan().disk,
+        }
+    }
+
+    fn retry(self) -> RetryPolicyV1 {
+        match self {
+            Self::V1(v) => v.plan().retry,
+            Self::V2(v) => v.plan().retry,
+        }
+    }
+
+    fn stall_timeout_s(self) -> u32 {
+        match self {
+            Self::V1(v) => v.plan().stall_timeout_s,
+            Self::V2(v) => v.plan().stall_timeout_s,
+        }
+    }
+
+    /// Steps 1 to 3 have the same numbers in both schemas.
+    fn timeout_s(self, s: Step) -> Option<u32> {
+        match self {
+            Self::V1(v) => v.plan().timeout_s(s),
+            Self::V2(v) => StepV2::new(s.get())
+                .ok()
+                .and_then(|s| v.plan().timeout_s(s)),
+        }
+    }
+
+    /// The only place a [`WipeAuthorisation`] is built: from the verified
+    /// plan's durable `disk.wipe.authorised` record (DEC-0018 item 7). The
+    /// constructors take only a verified plan (NIST-007).
+    fn wipe_authorisation(self, opened: DiskIdentity) -> WipeAuthorisation {
+        match self {
+            Self::V1(v) => WipeAuthorisation::from_verified_plan(v, opened),
+            Self::V2(v) => WipeAuthorisation::from_verified_plan_v2(v, opened),
+        }
+    }
+}
+
+/// What steps 1 to 3 leave for the steps after them.
+struct Applied {
+    layout: WindowsUefiLayout,
+    vols: Vec<FormattedVolume>,
+    layout_report: LayoutReportV1,
+    report: ApplyReport,
+}
+
+/// A v1 progress report of steps 1 to 3 in schema 2 (same step numbers,
+/// same fields). `None` for a failure report, which the v2 path sends
+/// itself.
+fn progress_v2(r: &ProgressV1) -> Option<ProgressV2> {
+    if r.failure.is_some() {
+        return None;
+    }
+    Some(ProgressV2 {
+        schema: PROGRESS_SCHEMA_V2,
+        seq: r.seq,
+        step: StepV2::new(r.step.get()).ok()?,
+        event: r.event,
+        bytes_done: r.bytes_done,
+        bytes_total: r.bytes_total,
+        item: r.item.clone(),
+        layout: r.layout.clone(),
+        restart_pending: None,
+        failure: None,
+    })
+}
+
+/// The v2 link as steps 1 to 3 use it: chunk fetch as is, reports in
+/// schema 2.
+struct V2Link<'l> {
+    inner: &'l mut dyn ServerLinkV2,
+}
+
+impl ServerLink for V2Link<'_> {
+    fn fetch_chunk(
+        &mut self,
+        job: JobId,
+        content: &usgp_common::Sha256Digest,
+        n: u64,
+    ) -> Result<Vec<u8>, LinkError> {
+        self.inner.fetch_chunk(job, content, n)
+    }
+
+    fn report(&mut self, job: JobId, report: &ProgressV1) -> Result<ProgressAckV1, LinkError> {
+        match progress_v2(report) {
+            Some(r) => self.inner.report_v2(job, &r),
+            None => Err(LinkError::Protocol),
+        }
+    }
+}
+
+/// The screen as steps 1 to 3 of a v2 job use it: v2 step events.
+struct V2View<'v> {
+    inner: &'v mut dyn JobView,
+}
+
+impl JobView for V2View<'_> {
+    fn show(&mut self, event: &ViewEvent<'_>) {
+        let v2 = |s: Step| StepV2::new(s.get()).unwrap_or(StepV2::VERIFY_CONTENT);
+        match event {
+            ViewEvent::StepStarted(s) => self.inner.show(&ViewEvent::StepStartedV2(v2(*s))),
+            ViewEvent::StepCompleted(s) => self.inner.show(&ViewEvent::StepCompletedV2(v2(*s))),
+            ViewEvent::Progress {
+                step,
+                bytes_done,
+                bytes_total,
+                item,
+            } => self.inner.show(&ViewEvent::ProgressV2 {
+                step: v2(*step),
+                bytes_done: *bytes_done,
+                bytes_total: *bytes_total,
+                item: *item,
+            }),
+            other => self.inner.show(other),
+        }
+    }
 }
 
 /// The engine. Holds no job state; [`Engine::run`] drives one job.
@@ -344,7 +549,7 @@ impl<'a> Engine<'a> {
         });
         let mut run = Run {
             engine: self,
-            plan,
+            plan: PlanRef::V1(plan),
             link,
             view,
             rep: Reporter::new(
@@ -375,10 +580,126 @@ impl<'a> Engine<'a> {
     }
 }
 
+impl Engine<'_> {
+    /// Runs a verified v2 job in Windows PE: steps 1 to 3 (as [`Engine::run`],
+    /// with the driver archives and agent package also verified in step 1),
+    /// then steps 4 to 6 ([`PrebootTail`] with `tail`), stopping at the
+    /// first failure. On success the server has acknowledged step 6 and
+    /// the screen shows [`ViewEvent::Restarting`]; the caller restarts the
+    /// device (M4 plan WU-7a item 3).
+    ///
+    /// # Errors
+    ///
+    /// [`JobFailureV2`], already shown on `view` and (if the server can be
+    /// reached) reported as `failed`.
+    pub fn run_v2(
+        &self,
+        plan: &VerifiedJobPlanV2,
+        tail: &TailConfig,
+        inputs: &PostSetupInputs<'_>,
+        platform: &mut dyn Platform,
+        link: &mut dyn ServerLinkV2,
+        view: &mut dyn JobView,
+    ) -> Result<PrebootDone, JobFailureV2> {
+        let p = plan.plan();
+        view.show(&ViewEvent::StartedV2 {
+            job_id: p.job_id,
+            package: plan.content_manifest().display_name.as_str(),
+            edition: p.image.edition_name.as_str(),
+            steps: &StepV2::ALL,
+        });
+        let (applied, last_seq, pending, sent) = {
+            let mut blink = V2Link { inner: &mut *link };
+            let mut bview = V2View { inner: &mut *view };
+            let mut run = Run {
+                engine: self,
+                plan: PlanRef::V2(plan),
+                link: &mut blink,
+                view: &mut bview,
+                rep: Reporter::new(
+                    p.job_id,
+                    Duration::from_secs(u64::from(p.report_interval_s)),
+                ),
+            };
+            let r = run.steps_1_to_3(platform);
+            let (seq, pending, sent) = run.rep.hand_off();
+            (r, seq, pending, sent)
+        };
+        // One sequence across both schemas: anything steps 1 to 3 could not
+        // send yet is sent first by the v2 reporter.
+        let mut rep = ReporterV2::with_pending(
+            p.job_id,
+            last_seq,
+            pending.iter().filter_map(progress_v2).collect(),
+            sent.iter().filter_map(progress_v2).collect(),
+        );
+        let applied = match applied {
+            Ok(a) => a,
+            Err(f) => {
+                let f = JobFailureV2::from_v1(f);
+                view.show(&ViewEvent::FailedV2(&f));
+                // Best effort: the device keeps showing the failure.
+                let _ = rep.deliver(
+                    &mut *link,
+                    self.clock,
+                    &p.retry,
+                    None,
+                    Must::failed(f.to_wire()),
+                );
+                return Err(f);
+            }
+        };
+        let (Some(esp), Some(windows)) = (
+            volume(&applied.vols, PartRole::Esp),
+            volume(&applied.vols, PartRole::Windows),
+        ) else {
+            let mut f = JobFailureV2::new(
+                StepV2::ADD_DRIVERS,
+                FailureCategory::Local,
+                code_of(code::FORMAT_FAILED),
+                "a formatted volume is missing",
+            );
+            f.disk_written = true;
+            view.show(&ViewEvent::FailedV2(&f));
+            let _ = rep.deliver(
+                &mut *link,
+                self.clock,
+                &p.retry,
+                None,
+                Must::failed(f.to_wire()),
+            );
+            return Err(f);
+        };
+        let after = AfterApply {
+            esp,
+            windows,
+            esp_part: &applied.layout.esp,
+            last_seq,
+        };
+        let io = TailIo {
+            platform,
+            link: &mut *link,
+            view: &mut *view,
+        };
+        let done = PrebootTail::new(self.crypto, self.clock, tail.clone())
+            .run_with(plan, &after, inputs, io, rep)?;
+        view.show(&ViewEvent::Restarting);
+        Ok(PrebootDone {
+            job_id: p.job_id,
+            layout: applied.layout_report,
+            boot: done.boot,
+            image_bytes: applied.report.preview.total_bytes,
+            bytes_written: applied.report.bytes_written,
+            drivers: done.drivers,
+            reports: done.reports,
+        })
+    }
+}
+
 /// One job in progress.
 struct Run<'e, 'a> {
     engine: &'e Engine<'a>,
-    plan: &'e VerifiedJobPlan,
+    plan: PlanRef<'e>,
     link: &'e mut dyn ServerLink,
     view: &'e mut dyn JobView,
     rep: Reporter,
@@ -389,14 +710,14 @@ impl<'a> Run<'_, 'a> {
         self.view.show(&ViewEvent::StepStarted(s));
         self.rep
             .state(self.link, s, ProgressEvent::StepStarted, None);
-        let p = self.plan.plan();
+        let p = self.plan;
         // `validate` guarantees every step has a timeout; the fallback is
         // the shortest allowed value (fail early, never late).
         let t = p.timeout_s(s).unwrap_or(1);
         // Stall detection applies to the steps that move content; the
         // others make no byte progress to measure.
         let stall = if s == Step::VERIFY_CONTENT || s == Step::APPLY_IMAGE {
-            Duration::from_secs(u64::from(p.stall_timeout_s))
+            Duration::from_secs(u64::from(p.stall_timeout_s()))
         } else {
             Duration::MAX
         };
@@ -410,14 +731,64 @@ impl<'a> Run<'_, 'a> {
     }
 
     fn steps(&mut self, platform: &mut dyn Platform) -> Result<Succeeded, JobFailure> {
-        let p = self.plan.plan();
-        let index = p.image.edition_index.get();
+        let Applied {
+            layout,
+            vols,
+            layout_report,
+            report,
+        } = self.steps_1_to_3(platform)?;
+        let windows = volume(&vols, PartRole::Windows).ok_or_else(|| {
+            local(
+                Step::MAKE_BOOTABLE,
+                code::FORMAT_FAILED,
+                "no Windows volume",
+                true,
+            )
+        })?;
+
+        // ---- Step 4: boot files, then the firmware option first. ----
+        let s = Step::MAKE_BOOTABLE;
+        let watch = self.start(s);
+        let esp = volume(&vols, PartRole::Esp)
+            .ok_or_else(|| local(s, code::FORMAT_FAILED, "no EFI system volume", true))?;
+        platform
+            .boot_files()
+            .create(esp, windows)
+            .map_err(|e| platform_failure(s, code::BOOT_FILES_FAILED, e, true))?;
+        check_time(s, &watch, true)?;
+        let boot = make_windows_first(
+            platform.firmware(),
+            &layout.esp,
+            &self.engine.config.uefi_limits,
+        )
+        .map_err(|e| local(s, code::BOOT_ENTRY_FAILED, e.to_string(), true))?;
+        check_time(s, &watch, true)?;
+        self.complete(s, None);
+
+        // ---- Step 5: report success; the caller restarts. ----
+        let s = Step::REPORT_RESTART;
+        let watch = self.start(s);
+        self.report_success(s, &watch)?;
+        Ok(Succeeded {
+            job_id: self.plan.image().job_id(),
+            layout: layout_report,
+            boot,
+            image_bytes: report.preview.total_bytes,
+            bytes_written: report.bytes_written,
+            reports: Vec::new(),
+        })
+    }
+
+    /// Steps 1 to 3, shared by v1 and v2 jobs.
+    fn steps_1_to_3(&mut self, platform: &mut dyn Platform) -> Result<Applied, JobFailure> {
+        let index = self.plan.image().image().edition_index.get();
+        let disk = self.plan.disk();
         let crypto = self.engine.crypto;
 
         // ---- Step 1: verify all content; nothing is written. ----
         let s = Step::VERIFY_CONTENT;
         let watch = self.start(s);
-        let layout = self.plan_layout(s, &p.disk)?;
+        let layout = self.plan_layout(s, disk)?;
         let limits = apply_limits(s, &layout)?;
         // The apply root is fixed now, before the wipe, so the verify pass
         // re-bases links exactly as the apply will (decision 0022).
@@ -425,6 +796,8 @@ impl<'a> Run<'_, 'a> {
         let preview = self.content_pass(s, &watch, |src, progress| {
             verify_pass(src, index, &root, &limits, progress, crypto)
         })?;
+        check_time(s, &watch, false)?;
+        self.verify_archives(s, &watch)?;
         check_time(s, &watch, false)?;
         self.complete(s, None);
 
@@ -455,44 +828,56 @@ impl<'a> Run<'_, 'a> {
         };
         check_time(s, &watch, true)?;
         self.complete(s, None);
-
-        // ---- Step 4: boot files, then the firmware option first. ----
-        let s = Step::MAKE_BOOTABLE;
-        let watch = self.start(s);
-        let esp = volume(&vols, PartRole::Esp)
-            .ok_or_else(|| local(s, code::FORMAT_FAILED, "no EFI system volume", true))?;
-        platform
-            .boot_files()
-            .create(esp, windows)
-            .map_err(|e| platform_failure(s, code::BOOT_FILES_FAILED, e, true))?;
-        check_time(s, &watch, true)?;
-        let boot = make_windows_first(
-            platform.firmware(),
-            &layout.esp,
-            &self.engine.config.uefi_limits,
-        )
-        .map_err(|e| local(s, code::BOOT_ENTRY_FAILED, e.to_string(), true))?;
-        check_time(s, &watch, true)?;
-        self.complete(s, None);
-
-        // ---- Step 5: report success; the caller restarts. ----
-        let s = Step::REPORT_RESTART;
-        let watch = self.start(s);
-        self.report_success(s, &watch)?;
-        Ok(Succeeded {
-            job_id: p.job_id,
-            layout: layout_report,
-            boot,
-            image_bytes: report.preview.total_bytes,
-            bytes_written: report.bytes_written,
-            reports: Vec::new(),
+        Ok(Applied {
+            layout,
+            vols,
+            layout_report,
+            report,
         })
+    }
+
+    /// Step 1 of a v2 job, after the image: every chunk of each driver
+    /// archive and of the agent package is fetched, verified and
+    /// discarded, and each whole file's SHA-256 checked (M4 plan WU-7a
+    /// item 3). Nothing for a v1 job.
+    fn verify_archives(&mut self, s: Step, watch: &Watch<'_>) -> Result<(), JobFailure> {
+        let PlanRef::V2(v) = self.plan else {
+            return Ok(());
+        };
+        let p = v.plan();
+        let named = v
+            .driver_manifests()
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (format!("driver archive {}", i + 1), m))
+            .chain(std::iter::once((
+                "agent package".to_owned(),
+                v.agent_manifest(),
+            )));
+        for (what, m) in named {
+            let mut src = VerifiedChunks::for_archive(
+                &mut *self.link,
+                self.engine.crypto,
+                self.engine.clock,
+                p.job_id,
+                p.retry,
+                m,
+            )
+            .with_watch(watch);
+            src.verify_all().map_err(|c| {
+                let (category, c_code) = chunk_code(c.kind);
+                let mut f = JobFailure::new(s, category, c_code, format!("{what}: {c}"));
+                f.attempts = c.attempts.max(1);
+                f
+            })?;
+        }
+        Ok(())
     }
 
     /// Step 5: `succeeded` delivered and acknowledged as Succeeded
     /// (REQ-JOB-013).
     fn report_success(&mut self, s: Step, watch: &Watch<'_>) -> Result<(), JobFailure> {
-        let retry = self.plan.plan().retry;
+        let retry = self.plan.retry();
         match self
             .rep
             .finish(self.link, self.engine.clock, &retry, Some(watch), s, None)
@@ -560,7 +945,7 @@ impl<'a> Run<'_, 'a> {
             &mut dyn usgp_image::Progress,
         ) -> Result<T, ApplyError>,
     ) -> Result<T, JobFailure> {
-        let manifest = self.plan.content_manifest();
+        let manifest = self.plan.image().manifest();
         let total = manifest.size;
         let item = ItemName::new(manifest.file_name.as_str())
             .ok()
@@ -598,9 +983,14 @@ impl<'a> Run<'_, 'a> {
                 ControlFlow::Continue(())
             }
         };
-        let mut src = VerifiedChunks::new(&mut *self.link, self.engine.crypto, clock, self.plan)
-            .with_watch(watch)
-            .with_hook(&meter);
+        let mut src = VerifiedChunks::new(
+            &mut *self.link,
+            self.engine.crypto,
+            clock,
+            self.plan.image(),
+        )
+        .with_watch(watch)
+        .with_hook(&meter);
         let r = pass(&mut src, &mut progress);
         let chunk = src.failure();
         r.map_err(|e| content_failure(s, &e, chunk, watch, item.as_ref()))
@@ -616,19 +1006,15 @@ impl<'a> Run<'_, 'a> {
         root: &ApplyRoot,
         platform: &mut dyn Platform,
     ) -> Result<(Vec<FormattedVolume>, LayoutReportV1), JobFailure> {
-        let p = self.plan.plan();
+        let disk = self.plan.disk();
         let config = &self.engine.config;
-        let disk_text = format!(
-            "disk {} ({} bytes)",
-            p.disk.model.as_str(),
-            p.disk.size_bytes
-        );
-        let target = platform.open_target(&p.disk).map_err(|e| {
+        let disk_text = format!("disk {} ({} bytes)", disk.model.as_str(), disk.size_bytes);
+        let target = platform.open_target(disk).map_err(|e| {
             let mut f = platform_failure(s, code::DISK_OPEN_FAILED, e, false);
             f.message = format!("{disk_text}: {}", f.message);
             f
         })?;
-        if let Err(why) = check_target(&p.disk, &target.facts) {
+        if let Err(why) = check_target(disk, &target.facts) {
             return Err(refused_with(
                 s,
                 codes::DISK_IDENTITY_MISMATCH,
@@ -637,7 +1023,7 @@ impl<'a> Run<'_, 'a> {
             ));
         }
         let min = minimum_disk_bytes(
-            p.disk.logical_sector,
+            disk.logical_sector,
             config.recovery_image_bytes,
             preview.total_bytes,
         )
@@ -653,11 +1039,10 @@ impl<'a> Run<'_, 'a> {
         let wipe = WipePlan::for_disk(layout, &target.facts.partitions)
             .map_err(|e| local(s, code::LAYOUT_FAILED, format!("{disk_text}: {e}"), false))?;
 
-        // The only place a WipeAuthorisation is built: from the verified
-        // plan's durable `disk.wipe.authorised` record and the disk the
-        // opened device was just checked to be (DEC-0018 item 7). The
-        // constructor takes only a VerifiedJobPlan (NIST-007).
-        let auth = WipeAuthorisation::from_verified_plan(self.plan, target.facts.identity.clone());
+        // The authorisation comes only from the verified plan's durable
+        // `disk.wipe.authorised` record and the disk the opened device was
+        // just checked to be (DEC-0018 item 7; NIST-007).
+        let auth = self.plan.wipe_authorisation(target.facts.identity.clone());
         let mut device = target.device;
         wipe_and_write(&mut *device, &auth, &wipe, layout)
             .map_err(|e| disk_failure(s, &disk_text, &e))?;
@@ -780,27 +1165,7 @@ fn content_failure(
     item: Option<&ProgressItemV1>,
 ) -> JobFailure {
     let mut f = if let Some(c) = chunk {
-        let (category, c_code) = match c.kind {
-            ChunkErrorKind::Network => {
-                (FailureCategory::Network, code_of(code::SERVER_UNREACHABLE))
-            }
-            ChunkErrorKind::Protocol => (FailureCategory::Network, code_of(code::SERVER_REFUSED)),
-            ChunkErrorKind::NotFound => {
-                (FailureCategory::Refused, code_of(code::CONTENT_NOT_FOUND))
-            }
-            ChunkErrorKind::Refused => (FailureCategory::Refused, code_of(code::SERVER_REFUSED)),
-            ChunkErrorKind::ServerIntegrity => {
-                (FailureCategory::Integrity, codes::INTEGRITY_FAILED)
-            }
-            ChunkErrorKind::Digest | ChunkErrorKind::Length => {
-                (FailureCategory::Integrity, codes::CHUNK_DIGEST_MISMATCH)
-            }
-            ChunkErrorKind::NoDigest => {
-                (FailureCategory::Integrity, codes::CONTENT_MANIFEST_MISMATCH)
-            }
-            ChunkErrorKind::StepTimeout => (FailureCategory::Timeout, codes::STEP_TIMEOUT),
-            ChunkErrorKind::Stalled => (FailureCategory::Timeout, codes::STALLED),
-        };
+        let (category, c_code) = chunk_code(c.kind);
         let mut f = JobFailure::new(s, category, c_code, c.to_string());
         f.attempts = c.attempts.max(1);
         f.files.extend(item.cloned());

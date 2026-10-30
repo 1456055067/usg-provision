@@ -1,4 +1,5 @@
-//! M4 engine steps 4 to 9 (plan WU-7): driver staging and its checks,
+//! M4 engine (plan WU-7 and WU-7a): v2 steps 1 to 3 through
+//! `Engine::run_v2`, driver staging to file and its per-archive checks,
 //! configuration placement, make-bootable with the restart report, and the
 //! post-setup runner (resume, tags, escrow then set, answer file removal,
 //! agent install, ready), on a directory tree standing in for the Windows
@@ -29,18 +30,20 @@ use usgp_common::Sha256Digest;
 use usgp_crypto::{EscrowKey, SigningKey, sign_typed, verify_typed};
 use usgp_deploy::link::ProgressLinkV2;
 use usgp_deploy::platform::{
-    BootFiles, FileProtection, FirmwareVars, FormattedVolume, OpenedTarget, Platform,
-    PlatformError, PlatformErrorKind, STAGE_ROOT, StagePath, TargetPath, ToolOutcome, VolumeOps,
-    VolumeSpec,
+    BootFiles, FileProtection, FileWriter, FirmwareVars, FormattedVolume, OpenedTarget, Platform,
+    PlatformError, PlatformErrorKind, STAGE_ROOT, StagePath, StagedArchive, StagedFile, TargetPath,
+    ToolOutcome, VolumeOps, VolumeSpec,
 };
 use usgp_deploy::postsetup::{
-    AccountError, InstallOutcome, InstallerCommand, PostSetupPlatform, PostSetupRunner, Ready,
-    ResumeLink, RunnerConfig, RunnerFile,
+    AccountError, InstallOutcome, InstallerCommand, OpenedFile, PostSetupPlatform, PostSetupRunner,
+    Ready, ResumeLink, RunnerConfig, RunnerFile,
 };
 use usgp_deploy::steps::{
     AfterApply, PostSetupInputs, PrebootTail, SETUP_COMPLETE_CMD, TailConfig, TailDone,
 };
-use usgp_deploy::{JobFailureV2, LinkError, POSTSETUP_SEQ_BASE, ServerLink};
+use usgp_deploy::{
+    Engine, EngineConfig, JobFailureV2, JobView, LinkError, PrebootDone, ServerLink, ViewEvent,
+};
 use usgp_disk::layout::PartRole;
 use usgp_image::chunks::ContentHasher;
 use usgp_proto::content_manifest::{ArchiveSummaryV1, ContentManifestV2};
@@ -59,7 +62,7 @@ use usgp_proto::{
     ResumeChallengeV1, ResumeRequestV1, Tag, UnixMicros, UrlPath,
 };
 use usgp_wincfg::archive::testkit::{ZipBuilder, ZipEntrySpec};
-use usgp_wincfg::archive::{ExtractSink, RelPath as ArcPath};
+use usgp_wincfg::archive::{ExtractSink, ReadAt, RelPath as ArcPath};
 use zeroize::Zeroizing;
 
 const DRIVER_A: &str = "1a2b3c4d-0000-4000-8000-00000000000a";
@@ -129,38 +132,45 @@ struct M4 {
     job_key: SigningKey,
 }
 
+/// A driver archive for the fixture: its id, ZIP bytes and INF list.
+type DriverSpec = (&'static str, Vec<u8>, Vec<&'static str>);
+
+fn default_drivers() -> Vec<DriverSpec> {
+    vec![
+        (
+            DRIVER_A,
+            zip(&[
+                ("net/E1000.inf", INF_A),
+                ("net/e1000.cat", b"catalog"),
+                ("net/e1000.sys", b"driver"),
+            ]),
+            vec!["net/E1000.inf"],
+        ),
+        (
+            DRIVER_B,
+            zip(&[("stor/stor.inf", INF_B), ("stor/stor.cat", b"catalog")]),
+            vec!["stor/stor.inf"],
+        ),
+    ]
+}
+
 impl M4 {
     fn new(escrow: bool) -> Self {
+        Self::build(escrow, default_drivers())
+    }
+
+    fn build(escrow: bool, specs: Vec<DriverSpec>) -> Self {
         let base = Fixture::new(small_wim());
         let ck = &base.content_key;
-        let za = zip(&[
-            ("net/E1000.inf", INF_A),
-            ("net/e1000.cat", b"catalog"),
-            ("net/e1000.sys", b"driver"),
-        ]);
-        let zb = zip(&[("stor/stor.inf", INF_B), ("stor/stor.cat", b"catalog")]);
-        let drivers = vec![
-            (
-                za.clone(),
-                manifest_v2(
-                    ck,
-                    ContentKindV2::DriverArchive,
-                    DRIVER_A,
-                    &za,
-                    &["net/E1000.inf"],
-                ),
-            ),
-            (
-                zb.clone(),
-                manifest_v2(
-                    ck,
-                    ContentKindV2::DriverArchive,
-                    DRIVER_B,
-                    &zb,
-                    &["stor/stor.inf"],
-                ),
-            ),
-        ];
+        let drivers: Vec<(Vec<u8>, ContentManifestV2)> = specs
+            .iter()
+            .map(|(id, z, infs)| {
+                (
+                    z.clone(),
+                    manifest_v2(ck, ContentKindV2::DriverArchive, id, z, infs),
+                )
+            })
+            .collect();
         let agent_zip = zip(&[
             (
                 "agent.json",
@@ -205,8 +215,9 @@ impl M4 {
                 sha256: crypto().sha256(ANSWER),
                 b64: B64Bytes::new(ANSWER.to_vec()).unwrap(),
             },
-            drivers: [DRIVER_A, DRIVER_B]
+            drivers: specs
                 .iter()
+                .map(|(id, _, _)| *id)
                 .zip(&drivers)
                 .map(|(id, (_, m))| PlanDriverV2 {
                     archive_id: DriverArchiveId::parse(id).unwrap(),
@@ -293,6 +304,8 @@ type Log = Rc<RefCell<Vec<String>>>;
 struct M4Link {
     content: BTreeMap<[u8; 32], Vec<u8>>,
     fetched: Vec<Sha256Digest>,
+    /// Reports accepted when each fetch in `fetched` was made.
+    fetched_after: Vec<usize>,
     tamper: Option<Sha256Digest>,
     reports: Vec<ProgressV2>,
     job_key: Option<usgp_crypto::VerifyingKey>,
@@ -303,6 +316,12 @@ struct M4Link {
     refuse_escrow: bool,
     escrow: Option<EscrowSubmitV1>,
     confirms: Vec<EscrowConfirmV1>,
+    /// Confirm calls answered `Transient` before one succeeds.
+    confirm_transient: u32,
+    /// Every confirm is refused.
+    refuse_confirm: bool,
+    /// `ack_seq` the resume returns instead of the last report's.
+    ack_override: Option<u64>,
     refuse_step6: bool,
     log: Log,
 }
@@ -314,9 +333,11 @@ impl M4Link {
             content.insert(man.sha256.0, b.clone());
         }
         content.insert(m.agent.1.sha256.0, m.agent.0.clone());
+        content.insert(m.base.manifest.sha256.0, m.base.wim.clone());
         Self {
             content,
             fetched: Vec::new(),
+            fetched_after: Vec::new(),
             tamper: None,
             reports: Vec::new(),
             job_key: Some(m.job_key.verifying_key().clone()),
@@ -327,6 +348,9 @@ impl M4Link {
             refuse_escrow: false,
             escrow: None,
             confirms: Vec::new(),
+            confirm_transient: 0,
+            refuse_confirm: false,
+            ack_override: None,
             refuse_step6: false,
             log,
         }
@@ -348,6 +372,7 @@ impl ServerLink for M4Link {
         n: u64,
     ) -> Result<Vec<u8>, LinkError> {
         self.fetched.push(*content);
+        self.fetched_after.push(self.reports.len());
         let bytes = self.content.get(&content.0).ok_or(LinkError::NotFound)?;
         let start = usize::try_from(n * CHUNK_SIZE).unwrap();
         let end = (start + CHUNK_SIZE as usize).min(bytes.len());
@@ -412,7 +437,7 @@ impl ResumeLink for M4Link {
         })
     }
 
-    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<(), LinkError> {
+    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<u64, LinkError> {
         if self.refuse_resume {
             return Err(LinkError::Refused);
         }
@@ -427,7 +452,8 @@ impl ResumeLink for M4Link {
         .map_err(|_| LinkError::Refused)?;
         self.resumed = true;
         self.log.borrow_mut().push("resumed".to_owned());
-        Ok(())
+        let last = self.reports.last().map_or(0, |r| r.seq);
+        Ok(self.ack_override.unwrap_or(last))
     }
 
     fn submit_escrow(&mut self, _job: JobId, body: &EscrowSubmitV1) -> Result<(), LinkError> {
@@ -441,6 +467,13 @@ impl ResumeLink for M4Link {
     }
 
     fn confirm_escrow(&mut self, _job: JobId, body: &EscrowConfirmV1) -> Result<(), LinkError> {
+        if self.refuse_confirm {
+            return Err(LinkError::Refused);
+        }
+        if self.confirm_transient > 0 {
+            self.confirm_transient -= 1;
+            return Err(LinkError::Transient);
+        }
         self.log
             .borrow_mut()
             .push(format!("escrow confirmed {}", body.set));
@@ -488,6 +521,34 @@ impl ExtractSink for DirExtract {
     }
 }
 
+/// A file on the "volume", written in order and read by position.
+struct DiskFile(fs::File);
+
+impl FileWriter for DiskFile {
+    fn append(&mut self, data: &[u8]) -> io::Result<()> {
+        self.0.write_all(data)
+    }
+    fn finish(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl ReadAt for DiskFile {
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        ReadAt::read_exact_at(&self.0, offset, buf)
+    }
+}
+
+fn create_new(path: &Path) -> Result<fs::File, PlatformError> {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| PlatformError::new(PlatformErrorKind::Io(e.kind()), "write"))
+}
+
 fn win_path(vol: &Path, rel: &str) -> PathBuf {
     rel.split('\\').fold(vol.to_path_buf(), |p, s| p.join(s))
 }
@@ -501,7 +562,13 @@ fn fresh_dir(name: &str) -> PathBuf {
 
 struct WinPe {
     inner: TestPlatform,
+    dev: SharedDev,
     vol: PathBuf,
+    /// Archives staged to file, by plan position.
+    staged: Vec<u16>,
+    /// DISM skips a package whose original file name is already in the
+    /// store (as for an identical package).
+    skip_duplicates: bool,
     /// Drivers in the offline image: (published, original).
     store: Vec<(String, String)>,
     /// Original file names DISM silently skips (unsigned, say).
@@ -516,10 +583,13 @@ struct WinPe {
 
 impl WinPe {
     fn new(name: &str) -> Self {
-        let (inner, _) = TestPlatform::mem();
+        let (inner, dev) = TestPlatform::mem();
         Self {
             inner,
+            dev,
             vol: fresh_dir(name),
+            staged: Vec::new(),
+            skip_duplicates: false,
             store: vec![("oem0.inf".to_owned(), "inbox.inf".to_owned())],
             skip: Vec::new(),
             add_exit: 0,
@@ -573,7 +643,9 @@ impl Platform for WinPe {
         let mut infs = Vec::new();
         find_infs(&win_path(&self.vol, &dir.relative()), &mut infs);
         for i in infs {
-            if !self.skip.contains(&i.to_lowercase()) {
+            let dup =
+                self.skip_duplicates && self.store.iter().any(|(_, o)| o.eq_ignore_ascii_case(&i));
+            if !dup && !self.skip.contains(&i.to_lowercase()) {
                 let n = self.store.len();
                 self.store.push((format!("oem{n}.inf"), i));
             }
@@ -620,6 +692,43 @@ impl Platform for WinPe {
     fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError> {
         Ok(b"agent binary".to_vec())
     }
+    fn stage_archive_file(
+        &mut self,
+        at: &StagedArchive,
+    ) -> Result<Box<dyn StagedFile>, PlatformError> {
+        let path = win_path(&self.vol, &at.relative());
+        assert!(path.starts_with(self.stage_root()));
+        self.staged.push(at.index());
+        Ok(Box::new(DiskFile(create_new(&path)?)))
+    }
+    fn create_target_file(
+        &mut self,
+        p: &TargetPath,
+    ) -> Result<Box<dyn FileWriter + '_>, PlatformError> {
+        let f = create_new(&win_path(&self.vol, &p.relative()))?;
+        self.protections.push((p.relative(), p.protection()));
+        self.writes.push(p.relative());
+        Ok(Box::new(DiskFile(f)))
+    }
+}
+
+/// What the screen was shown, for v2 jobs.
+#[derive(Default)]
+struct V2Screen(Vec<String>);
+
+impl JobView for V2Screen {
+    fn show(&mut self, e: &ViewEvent<'_>) {
+        let s = match e {
+            ViewEvent::StartedV2 { steps, .. } => format!("started {}", steps.len()),
+            ViewEvent::StepStartedV2(s) => format!("start {}", s.get()),
+            ViewEvent::StepCompletedV2(s) => format!("done {}", s.get()),
+            ViewEvent::ProgressV2 { .. } => return,
+            ViewEvent::FailedV2(f) => format!("failed {} {}", f.step.get(), f.code.as_str()),
+            ViewEvent::Restarting => "restarting".to_owned(),
+            other => panic!("a v2 job showed a v1 event: {other:?}"),
+        };
+        self.0.push(s);
+    }
 }
 
 fn vol(n: u32, role: PartRole, fs: FileSystem, label: &str) -> FormattedVolume {
@@ -665,7 +774,15 @@ fn run_tail(m: &M4, pf: &mut WinPe, link: &mut M4Link) -> Result<TailDone, JobFa
         esp_part: &part,
         last_seq: 12,
     };
-    PrebootTail::new(crypto(), &clock, TailConfig::default()).run(&v, &after, &inputs, pf, link)
+    let mut screen = V2Screen::default();
+    PrebootTail::new(crypto(), &clock, TailConfig::default()).run(
+        &v,
+        &after,
+        &inputs,
+        pf,
+        link,
+        &mut screen,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +923,209 @@ fn step_6_fails_if_the_server_does_not_take_the_restart_report() {
     assert_eq!(f.code.as_str(), "server_refused");
 }
 
+/// WU-7a item 4: each archive is staged to `$usgp-stage\arc\<i>.bin`
+/// (removed with the root), and the agent package written by chunks.
+#[test]
+fn archives_are_staged_to_file_and_removed() {
+    let m = M4::new(true);
+    let mut pf = WinPe::new("m4-staged-files");
+    let mut link = M4Link::new(&m, Log::default());
+    run_tail(&m, &mut pf, &mut link).unwrap();
+    assert_eq!(pf.staged, [0, 1]);
+    assert_eq!(
+        StagedArchive::driver(1).relative(),
+        format!("{STAGE_ROOT}\\arc\\1.bin")
+    );
+    assert!(!pf.stage_root().exists());
+}
+
+/// WU-7a item 7: an archive's INF identical to one an earlier archive
+/// added (same SHA-256) is satisfied although DISM skipped it; the same
+/// name with other content is not.
+#[test]
+fn identical_inf_in_a_later_archive_is_matched_by_digest() {
+    let same = zip(&[("net/E1000.inf", INF_A), ("net/e1000.cat", b"catalog")]);
+    let mut specs = default_drivers();
+    specs[1] = (DRIVER_B, same, vec!["net/E1000.inf"]);
+    let m = M4::build(true, specs);
+    let mut pf = WinPe::new("m4-dup-same");
+    pf.skip_duplicates = true;
+    let mut link = M4Link::new(&m, Log::default());
+    let done = run_tail(&m, &mut pf, &mut link).expect("identical INF reused");
+    assert_eq!(done.drivers.reused, 1);
+    assert_eq!(done.drivers.infs, 2);
+    assert_eq!(done.drivers.new_drivers, 1);
+
+    let other_inf: &[u8] =
+        b"[Version]\r\nSignature=\"$Windows NT$\"\r\nCatalogFile=e1000.cat\r\n; v2\r\n";
+    let differs = zip(&[("net/E1000.inf", other_inf), ("net/e1000.cat", b"catalog")]);
+    let mut specs = default_drivers();
+    specs[1] = (DRIVER_B, differs, vec!["net/E1000.inf"]);
+    let m = M4::build(true, specs);
+    let mut pf = WinPe::new("m4-dup-differs");
+    pf.skip_duplicates = true;
+    let mut link = M4Link::new(&m, Log::default());
+    let f = run_tail(&m, &mut pf, &mut link).unwrap_err();
+    assert_eq!(
+        f.code.as_str(),
+        format!("driver_not_staged:{DRIVER_B}:e1000.inf")
+    );
+    // The archive's own listing difference is in the failure text.
+    assert!(f.message.contains("no new drivers"), "{}", f.message);
+    assert!(!pf.stage_root().exists());
+}
+
+/// A row added by an earlier archive does not satisfy a later archive's
+/// INF of the same name unless the digests match (per-archive delta).
+#[test]
+fn matching_is_per_archive() {
+    let m = M4::new(true);
+    let mut pf = WinPe::new("m4-per-archive");
+    // Archive B's INF was already in the image before the step: it is in
+    // no archive's difference, so B is not proven staged.
+    pf.store
+        .push(("oem9.inf".to_owned(), "stor.inf".to_owned()));
+    pf.skip_duplicates = true;
+    let mut link = M4Link::new(&m, Log::default());
+    let f = run_tail(&m, &mut pf, &mut link).unwrap_err();
+    assert_eq!(
+        f.code.as_str(),
+        format!("driver_not_staged:{DRIVER_B}:stor.inf")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Engine::run_v2: steps 1 to 6 (WU-7a item 3)
+// ---------------------------------------------------------------------------
+
+fn run_v2(
+    m: &M4,
+    pf: &mut WinPe,
+    link: &mut M4Link,
+) -> (Result<PrebootDone, JobFailureV2>, V2Screen) {
+    let clock = FakeClock::default();
+    let v = m.verified();
+    let plan_key_pem = m.base.plan_key.verifying_key().to_spki_pem().unwrap();
+    let key_der = m.job_key.to_pkcs8_der().unwrap();
+    let env = m.plan_env();
+    let inputs = PostSetupInputs {
+        server_url: "https://server.example:8443/",
+        server_name: "server.example",
+        trust_anchors_pem: TRUST_PEM,
+        plan_key_pem: &plan_key_pem,
+        plan_envelope: &env,
+        job_key_pkcs8: &key_der,
+    };
+    let mut screen = V2Screen::default();
+    let r = Engine::new(crypto(), &clock, EngineConfig::default()).run_v2(
+        &v,
+        &TailConfig::default(),
+        &inputs,
+        pf,
+        link,
+        &mut screen,
+    );
+    (r, screen)
+}
+
+#[test]
+fn run_v2_runs_steps_1_to_6_with_one_sequence() {
+    let m = M4::new(true);
+    let mut pf = WinPe::new("m4-run-v2");
+    let mut link = M4Link::new(&m, Log::default());
+    let (r, screen) = run_v2(&m, &mut pf, &mut link);
+    let done = r.expect("steps 1 to 6");
+    assert_eq!(done.drivers.archives, 2);
+    assert!(done.bytes_written > 0);
+    assert!(pf.dev.writes() > 0);
+
+    use ProgressEvent::{StepCompleted as C, StepStarted as S};
+    let states: Vec<_> = link
+        .states()
+        .into_iter()
+        .filter(|(_, e)| *e != ProgressEvent::Progress)
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (1, S),
+            (1, C),
+            (2, S),
+            (2, C),
+            (3, S),
+            (3, C),
+            (4, S),
+            (4, C),
+            (5, S),
+            (5, C),
+            (6, S),
+            (6, C)
+        ]
+    );
+    // One sequence from 1 (the link checks it increases), all schema 2.
+    assert_eq!(link.reports[0].seq, 1);
+    assert!(link.reports.iter().all(|r| r.schema == 2));
+    assert!(
+        link.reports
+            .iter()
+            .any(|r| r.step == StepV2::PARTITION_FORMAT && r.layout.is_some())
+    );
+    assert_eq!(done.reports.len(), link.reports.len());
+
+    // Step 1 fetched every archive and the agent package before step 2
+    // started (so before any write).
+    let step2 = link
+        .reports
+        .iter()
+        .position(|r| r.step == StepV2::PARTITION_FORMAT)
+        .unwrap();
+    for d in m
+        .drivers
+        .iter()
+        .map(|(_, man)| man.sha256)
+        .chain([m.agent.1.sha256])
+    {
+        let first = link.fetched.iter().position(|f| *f == d).unwrap();
+        assert!(link.fetched_after[first] <= step2);
+    }
+
+    assert_eq!(screen.0.first().map(String::as_str), Some("started 9"));
+    for n in 1..=6 {
+        assert!(screen.0.contains(&format!("start {n}")), "{n}");
+        assert!(screen.0.contains(&format!("done {n}")), "{n}");
+    }
+    assert_eq!(screen.0.last().map(String::as_str), Some("restarting"));
+}
+
+/// WU-7a item 3: a tampered agent package chunk fails step 1, before the
+/// disk is opened for writing.
+#[test]
+fn run_v2_verifies_archives_before_any_write() {
+    let m = M4::new(true);
+    for (name, tamper) in [
+        ("m4-v2-tamper-agent", m.agent.1.sha256),
+        ("m4-v2-tamper-driver", m.drivers[0].1.sha256),
+    ] {
+        let mut pf = WinPe::new(name);
+        let mut link = M4Link::new(&m, Log::default());
+        link.tamper = Some(tamper);
+        let (r, screen) = run_v2(&m, &mut pf, &mut link);
+        let f = r.unwrap_err();
+        assert_eq!(f.step, StepV2::VERIFY_CONTENT);
+        assert_eq!(f.code.as_str(), "chunk_digest_mismatch");
+        assert!(!f.disk_written);
+        assert_eq!(pf.dev.writes(), 0, "{name}");
+        assert_eq!(pf.inner.opens, 0, "{name}");
+        let last = link.reports.last().unwrap();
+        assert_eq!(last.event, ProgressEvent::Failed);
+        assert_eq!(last.failure.as_ref().unwrap().step, StepV2::VERIFY_CONTENT);
+        assert_eq!(
+            screen.0.last().map(String::as_str),
+            Some("failed 1 chunk_digest_mismatch")
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Steps 7 to 9: the post-setup runner on the same tree
 // ---------------------------------------------------------------------------
@@ -860,6 +1180,14 @@ impl PostSetupPlatform for Installed {
         let b = fs::read(self.path(f)).map_err(io_pf)?;
         assert!(b.len() as u64 <= max);
         Ok(Zeroizing::new(b))
+    }
+    fn open_file(&mut self, f: RunnerFile) -> Result<OpenedFile, PlatformError> {
+        let file = fs::File::open(self.path(f)).map_err(io_pf)?;
+        let len = file.metadata().map_err(io_pf)?.len();
+        Ok(OpenedFile {
+            reader: Box::new(file),
+            len,
+        })
     }
     fn delete_file(&mut self, f: RunnerFile) -> Result<(), PlatformError> {
         match fs::remove_file(self.path(f)) {
@@ -992,7 +1320,15 @@ fn runner_escrows_then_sets_then_installs_and_reports_ready() {
         .iter()
         .filter(|r| r.step.runs_after_restart())
         .collect();
-    assert_eq!(after[0].seq, POSTSETUP_SEQ_BASE + 1);
+    // Numbering continues from the server's ack_seq (WU-7a item 5).
+    let last_pe = link
+        .reports
+        .iter()
+        .filter(|r| !r.step.runs_after_restart())
+        .map(|r| r.seq)
+        .max()
+        .unwrap();
+    assert_eq!(after[0].seq, last_pe + 1);
     use ProgressEvent::{StepCompleted as C, StepStarted as S, Succeeded};
     assert_eq!(
         link.states()[6..],
@@ -1069,26 +1405,44 @@ fn installer_exit_codes() {
     assert_eq!(r.unwrap_err().code.as_str(), "agent_install_timeout");
 }
 
+/// WU-7a item 9: only unreadable inputs stay on the device; every check
+/// after the resume is reported to the server with the token.
 #[test]
-fn runner_checks_its_inputs_before_contact() {
-    // Another key in job.key.
-    let (_, inst, link, r) = whole("m4-key-mismatch", true, |i, _| {
-        let other = SigningKey::generate().unwrap().to_pkcs8_der().unwrap();
-        fs::write(i.path(RunnerFile::JobKey), other.as_slice()).unwrap();
+fn runner_resumes_before_its_checks_and_reports_them() {
+    // A job.key that does not load: nothing to resume with.
+    let (_, inst, link, r) = whole("m4-key-garbage", true, |i, _| {
+        fs::write(i.path(RunnerFile::JobKey), b"not a key").unwrap();
     });
     assert_eq!(r.unwrap_err().code.as_str(), "job_key_mismatch");
     assert!(!link.resumed);
     assert_eq!(inst.failures.len(), 1);
 
-    // A changed agent package.
-    let (_, _, link, r) = whole("m4-agent-digest", true, |i, _| {
+    // Another key in job.key: the server refuses its resume proof.
+    let (_, inst, link, r) = whole("m4-key-mismatch", true, |i, _| {
+        let other = SigningKey::generate().unwrap().to_pkcs8_der().unwrap();
+        fs::write(i.path(RunnerFile::JobKey), other.as_slice()).unwrap();
+    });
+    assert_eq!(r.unwrap_err().code.as_str(), "resume_refused");
+    assert!(!link.resumed);
+    assert_eq!(inst.failures.len(), 1);
+
+    // A changed agent package: found after the resume, and reported.
+    let (_, inst, link, r) = whole("m4-agent-digest", true, |i, _| {
         fs::write(i.path(RunnerFile::AgentPackage), b"PK other").unwrap();
     });
     assert_eq!(r.unwrap_err().code.as_str(), "agent_digest_mismatch");
-    assert!(!link.resumed);
+    assert!(link.resumed);
+    let last = link.reports.last().unwrap();
+    assert_eq!(last.event, ProgressEvent::Failed);
+    assert_eq!(
+        last.failure.as_ref().unwrap().code.as_str(),
+        "agent_digest_mismatch"
+    );
+    assert!(link.escrow.is_none());
+    assert!(inst.password.is_none());
 
-    // A tampered job.json plan.
-    let (_, _, _, r) = whole("m4-plan-tamper", true, |i, _| {
+    // A tampered job.json plan: reported, nothing done.
+    let (_, inst, link, r) = whole("m4-plan-tamper", true, |i, _| {
         let p = i.path(RunnerFile::JobJson);
         let text = fs::read_to_string(&p).unwrap();
         // `{"schema":2,` becomes `{"schema":3,`: valid base64, bad signature.
@@ -1096,6 +1450,44 @@ fn runner_checks_its_inputs_before_contact() {
         fs::write(&p, text.replacen("eyJzY2hlbWEiOjIs", "eyJzY2hlbWEiOjMs", 1)).unwrap();
     });
     assert_eq!(r.unwrap_err().code.as_str(), "postsetup_config_invalid");
+    assert!(link.resumed);
+    assert_eq!(link.reports.last().unwrap().event, ProgressEvent::Failed);
+    assert!(inst.tags.is_none());
+    assert!(!inst.path(RunnerFile::JobKey).exists());
+}
+
+/// WU-7a item 5: the runner numbers from the server's `ack_seq`.
+#[test]
+fn runner_numbers_from_the_servers_ack_seq() {
+    let (_, _, link, r) = whole("m4-ack-seq", false, |_, l| l.ack_override = Some(500));
+    r.unwrap();
+    let after: Vec<u64> = link
+        .reports
+        .iter()
+        .filter(|r| r.step.runs_after_restart())
+        .map(|r| r.seq)
+        .collect();
+    assert_eq!(after.first(), Some(&501));
+    assert!(after.windows(2).all(|w| w[1] == w[0] + 1));
+}
+
+/// WU-7a item 10: a confirm that never succeeds after a successful set is
+/// `escrow_confirm_failed`; transient confirm failures are retried.
+#[test]
+fn escrow_confirm_is_retried_then_fails_with_its_own_code() {
+    let (_, inst, link, r) = whole("m4-confirm-late", true, |_, l| l.confirm_transient = 5);
+    assert!(r.unwrap().password_set);
+    assert_eq!(link.confirms.len(), 1);
+    assert!(inst.password.is_some());
+
+    let (_, inst, link, r) = whole("m4-confirm-refused", true, |_, l| l.refuse_confirm = true);
+    let f = r.unwrap_err();
+    assert_eq!(f.step, StepV2::WINDOWS_SETUP);
+    assert_eq!(f.code.as_str(), "escrow_confirm_failed");
+    // The password was escrowed and set; the agent never installed.
+    assert!(link.escrow.is_some());
+    assert!(inst.password.is_some());
+    assert!(inst.installs.is_empty());
 }
 
 #[test]

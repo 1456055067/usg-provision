@@ -46,7 +46,7 @@ pub use envelope::{sign_typed, verify_typed};
 pub use error::CryptoError;
 pub use escrow::{EscrowContext, EscrowKey, EscrowPublicKey, SealedV1, escrow_open, escrow_seal};
 pub use hmac::{HmacKey, HmacTag, ct_eq, hmac_sha256};
-pub use rand::{PASSWORD_ALPHABET, fill_random, random_password};
+pub use rand::{PASSWORD_ALPHABET, PASSWORD_LEN, fill_random, random_password};
 pub use sign::{KeyId, SIGNATURE_ALGORITHM, SigningKey, VerifyingKey, verify_signing_input};
 pub use usgp_common::Sha256Digest;
 pub use x509::PeerCertificate;

@@ -31,9 +31,13 @@ use usgp_crypto::CryptoProvider;
 use usgp_image::wim::remote::{ChunkFetchError, ChunkSource};
 use usgp_proto::JobId;
 use usgp_proto::content_manifest::{ContentManifestV1, ContentManifestV2, chunk_count};
-use usgp_proto::job_plan::{RetryPolicyV1, VerifiedJobPlan};
+use usgp_proto::job_plan::{RetryPolicyV1, VerifiedImageRef};
+
+use usgp_proto::progress::FailureCategory;
+use usgp_proto::{ErrorCode, codes};
 
 use crate::clock::{Clock, TimeLimit, Watch, backoff};
+use crate::error::{code, code_of};
 use crate::link::{LinkError, ServerLink};
 
 /// What went wrong with a chunk.
@@ -97,6 +101,39 @@ impl fmt::Display for ChunkError {
 
 impl std::error::Error for ChunkError {}
 
+/// The failure category and reason code of a chunk failure (REQ-JOB-005,
+/// REQ-JOB-011), the same for every step that fetches content.
+pub(crate) fn chunk_code(kind: ChunkErrorKind) -> (FailureCategory, ErrorCode) {
+    match kind {
+        ChunkErrorKind::Network => (FailureCategory::Network, code_of(code::SERVER_UNREACHABLE)),
+        ChunkErrorKind::Protocol => (FailureCategory::Network, code_of(code::SERVER_REFUSED)),
+        ChunkErrorKind::NotFound => (FailureCategory::Refused, code_of(code::CONTENT_NOT_FOUND)),
+        ChunkErrorKind::Refused => (FailureCategory::Refused, code_of(code::SERVER_REFUSED)),
+        ChunkErrorKind::ServerIntegrity => (FailureCategory::Integrity, codes::INTEGRITY_FAILED),
+        ChunkErrorKind::Digest | ChunkErrorKind::Length => {
+            (FailureCategory::Integrity, codes::CHUNK_DIGEST_MISMATCH)
+        }
+        ChunkErrorKind::NoDigest => (FailureCategory::Integrity, codes::CONTENT_MANIFEST_MISMATCH),
+        ChunkErrorKind::StepTimeout => (FailureCategory::Timeout, codes::STEP_TIMEOUT),
+        ChunkErrorKind::Stalled => (FailureCategory::Timeout, codes::STALLED),
+    }
+}
+
+/// Why [`VerifiedChunks::stream_to`] stopped.
+#[derive(Debug)]
+pub enum StreamError {
+    /// A chunk (or the whole content) failed.
+    Chunk(ChunkError),
+    /// The writer failed.
+    Write(std::io::Error),
+}
+
+impl From<ChunkError> for StreamError {
+    fn from(c: ChunkError) -> Self {
+        Self::Chunk(c)
+    }
+}
+
 /// Called after each verified chunk, with the link, so the engine can send
 /// a progress report while the chunk source holds the link.
 pub(crate) trait FetchHook {
@@ -157,22 +194,23 @@ impl fmt::Debug for VerifiedChunks<'_> {
 }
 
 impl<'a> VerifiedChunks<'a> {
-    /// Chunks of `plan`'s image, fetched over `link` for `plan`'s job.
+    /// Chunks of a verified plan's image (v1 or v2; M4 plan WU-7a item 2),
+    /// fetched over `link` for the plan's job. Only a signature-verified
+    /// plan can give a [`VerifiedImageRef`].
     pub fn new(
         link: &'a mut dyn ServerLink,
         crypto: &'a dyn CryptoProvider,
         clock: &'a dyn Clock,
-        plan: &'a VerifiedJobPlan,
+        image: VerifiedImageRef<'a>,
     ) -> Self {
-        let p = plan.plan();
         Self {
             link,
             crypto,
             clock,
-            manifest: ManifestRef::V1(plan.content_manifest()),
-            job: p.job_id,
-            content: p.image.content_sha256,
-            retry: p.retry,
+            manifest: ManifestRef::V1(image.manifest()),
+            job: image.job_id(),
+            content: image.image().content_sha256,
+            retry: image.retry(),
             watch: None,
             hook: None,
             cache: [None, None],
@@ -211,34 +249,60 @@ impl<'a> VerifiedChunks<'a> {
         }
     }
 
-    /// Fetches and verifies every chunk, in order, into one buffer, and
-    /// then checks the SHA-256 of the whole content against the manifest.
-    /// Content larger than `max_bytes` is refused before any fetch.
+    /// Fetches and verifies every chunk, in order, and passes each one to
+    /// `out` only after its length and SHA-256 matched the manifest (M4
+    /// plan WU-7a item 4: nothing unverified is written). Then checks the
+    /// SHA-256 of the whole content against the manifest. Nothing is held
+    /// beyond the two cached chunks, so the size is bounded only by the
+    /// signed manifest.
     ///
     /// # Errors
     ///
-    /// [`ChunkError`]; a whole-file digest mismatch is
-    /// [`ChunkErrorKind::Digest`] on the last chunk, and an oversized
-    /// content is [`ChunkErrorKind::Length`] on chunk 0.
-    pub fn read_all(&mut self, max_bytes: u64) -> Result<Vec<u8>, ChunkError> {
+    /// [`StreamError::Chunk`]: a chunk failure, or a whole-content digest
+    /// mismatch ([`ChunkErrorKind::Digest`] on the last chunk);
+    /// [`StreamError::Write`] if `out` failed.
+    pub fn stream_to(
+        &mut self,
+        out: &mut dyn FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> Result<u64, StreamError> {
         let size = self.manifest.size();
-        let Some(cap) = usize::try_from(size).ok().filter(|_| size <= max_bytes) else {
-            return Err(self.fail(ChunkErrorKind::Length, 0, 0));
-        };
-        let mut out = Vec::with_capacity(cap);
         let n = chunk_count(size);
+        let mut whole = self.crypto.sha256_hasher();
+        let mut done: u64 = 0;
         for i in 0..n {
             let c = self.get(i)?;
-            out.extend_from_slice(&c);
+            whole.update(&c);
+            out(&c).map_err(StreamError::Write)?;
+            done = done.saturating_add(u64::try_from(c.len()).unwrap_or(u64::MAX));
         }
         let want = match self.manifest {
             ManifestRef::V1(m) => m.sha256,
             ManifestRef::V2(m) => m.sha256,
         };
-        if self.crypto.sha256(&out) != want {
-            return Err(self.fail(ChunkErrorKind::Digest, n.saturating_sub(1), 1));
+        if whole.finish() != want || done != size {
+            return Err(self
+                .fail(ChunkErrorKind::Digest, n.saturating_sub(1), 1)
+                .into());
         }
-        Ok(out)
+        Ok(done)
+    }
+
+    /// [`VerifiedChunks::stream_to`] with nothing kept: every chunk and the
+    /// whole content are verified and discarded (step 1).
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkError`].
+    pub fn verify_all(&mut self) -> Result<u64, ChunkError> {
+        self.stream_to(&mut |_| Ok(())).map_err(|e| match e {
+            StreamError::Chunk(c) => c,
+            // The discarding writer never fails.
+            StreamError::Write(_) => ChunkError {
+                kind: ChunkErrorKind::Protocol,
+                chunk: 0,
+                attempts: 0,
+            },
+        })
     }
 
     /// Applies a step's time limits.

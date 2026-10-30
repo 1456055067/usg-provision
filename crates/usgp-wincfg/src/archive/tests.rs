@@ -119,6 +119,44 @@ fn empty_zip_has_no_packages() {
     assert_eq!(reason(check(&z)), "no_inf_packages");
 }
 
+/// WU-7a item 8: `Plain` (agent packages) skips only the INF rule.
+#[test]
+fn plain_mode_skips_only_the_inf_rule() {
+    let z = ZipBuilder::default()
+        .entry(ZipEntrySpec::stored("agent.json", b"{}"))
+        .entry(ZipEntrySpec::stored("setup.exe", b"MZ"))
+        .build();
+    assert_eq!(reason(check(&z)), "no_inf_packages");
+    let r =
+        validate_archive_mode(&z.as_slice(), z.len() as u64, &lim(), ArchiveMode::Plain).unwrap();
+    assert!(r.infs.is_empty());
+    assert_eq!(r.entries, 2);
+    assert_eq!(r.ignored_executables, 1);
+    // Every other bound still applies.
+    let mut l = lim();
+    l.max_entries = 1;
+    let e = validate_archive_mode(&z.as_slice(), z.len() as u64, &l, ArchiveMode::Plain);
+    assert_eq!(reason(e), "limit_exceeded");
+    let mut bad = z.clone();
+    let n = bad.len();
+    bad.truncate(n - 4);
+    assert!(
+        validate_archive_mode(
+            &bad.as_slice(),
+            bad.len() as u64,
+            &lim(),
+            ArchiveMode::Plain
+        )
+        .is_err()
+    );
+    // A driver archive reads the same in either mode.
+    let d = driver_zip().build();
+    let a = check(&d).unwrap();
+    let b =
+        validate_archive_mode(&d.as_slice(), d.len() as u64, &lim(), ArchiveMode::Plain).unwrap();
+    assert_eq!(a, b);
+}
+
 #[test]
 fn inf_without_catalog_present_is_not_a_package() {
     let z = ZipBuilder::default()

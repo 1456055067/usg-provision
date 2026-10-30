@@ -69,6 +69,11 @@ pub struct ResumedV1 {
     pub token: SessionToken,
     /// When it expires (at most 24 h, or when the job ends).
     pub expires_at: UnixMicros,
+    /// The last progress sequence number the server accepted for the job.
+    /// The runner numbers its reports from `ack_seq + 1` after every
+    /// resume (M4 plan WU-7a item 5: the server is the authority, so a
+    /// lost Windows PE report cannot cause a gap or a collision).
+    pub ack_seq: u64,
 }
 
 /// The resume payload: the 16 job id bytes, then the 32 nonce bytes.
@@ -118,6 +123,12 @@ mod tests {
         assert!(serde_json::from_str::<ResumeRequestV1>(&extra).is_err());
         let ch = format!(r#"{{"nonce":"{n}","expires_at":1793000000000000}}"#);
         assert!(serde_json::from_str::<ResumeChallengeV1>(&ch).is_ok());
+        let t = "A".repeat(43);
+        let ok = format!(r#"{{"token":"{t}","expires_at":1793000000000000,"ack_seq":12}}"#);
+        let r: ResumedV1 = serde_json::from_str(&ok).unwrap();
+        assert_eq!(r.ack_seq, 12);
+        let missing = format!(r#"{{"token":"{t}","expires_at":1793000000000000}}"#);
+        assert!(serde_json::from_str::<ResumedV1>(&missing).is_err());
     }
 
     #[test]
@@ -125,6 +136,7 @@ mod tests {
         let r = ResumedV1 {
             token: SessionToken::from_random_bytes(&[9; 32]),
             expires_at: UnixMicros::new(1).unwrap(),
+            ack_seq: 7,
         };
         let dbg = format!("{r:?}");
         assert!(dbg.contains("redacted") && !dbg.contains(r.token.expose()));

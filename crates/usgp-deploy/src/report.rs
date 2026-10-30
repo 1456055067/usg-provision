@@ -89,6 +89,19 @@ impl Reporter {
         }
     }
 
+    /// Ends this reporter for a v2 job's hand-over to the v2 reporter (M4
+    /// plan WU-7a item 3): the last sequence number used, the state
+    /// reports not yet sent, and the reports delivered. A pending byte
+    /// progress report is dropped.
+    pub(crate) fn hand_off(&mut self) -> (u64, Vec<ProgressV1>, Vec<ProgressV1>) {
+        self.progress = None;
+        (
+            self.seq,
+            self.queue.drain(..).collect(),
+            std::mem::take(&mut self.sent),
+        )
+    }
+
     /// Queues a state report and tries once to send what is queued.
     pub(crate) fn state(
         &mut self,

@@ -835,12 +835,16 @@ fn wipe_authorisation_is_built_only_by_the_engine() {
         let text = std::fs::read_to_string(&p).unwrap();
         let n = text
             .matches("WipeAuthorisation::from_verified_plan(")
-            .count();
+            .count()
+            + text
+                .matches("WipeAuthorisation::from_verified_plan_v2(")
+                .count();
         if n > 0 {
             found.push((p.file_name().unwrap().to_string_lossy().into_owned(), n));
         }
     }
-    assert_eq!(found, vec![("engine.rs".to_owned(), 1)]);
+    // One v1 and one v2 call, both in the engine's PlanRef.
+    assert_eq!(found, vec![("engine.rs".to_owned(), 2)]);
 }
 
 #[test]

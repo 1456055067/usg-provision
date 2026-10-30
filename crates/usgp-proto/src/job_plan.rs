@@ -461,6 +461,70 @@ pub struct PlanExpectation<'a> {
     pub disk: &'a DiskDescriptorV1,
 }
 
+/// The image part of a verified plan (v1 or v2): what the verify and
+/// apply passes need, and nothing a caller can build itself.
+///
+/// The fields are private and the only constructors are
+/// [`VerifiedJobPlan::image`] and [`VerifiedJobPlanV2::image`], so holding
+/// one proves the plan and its image content manifest passed signature
+/// verification (M4 plan WU-7a item 2). Neither of these compiles outside
+/// this crate:
+///
+/// ```compile_fail
+/// # use usgp_proto::job_plan::VerifiedImageRef;
+/// # fn f(img: &usgp_proto::job_plan::PlanImageV1,
+/// #      m: &usgp_proto::content_manifest::ContentManifestV1,
+/// #      job: usgp_proto::JobId,
+/// #      retry: usgp_proto::job_plan::RetryPolicyV1) {
+/// let _ = VerifiedImageRef { job_id: job, image: img, manifest: m, retry };
+/// # }
+/// ```
+///
+/// ```compile_fail
+/// # use usgp_proto::job_plan::{JobPlanV2, VerifiedJobPlanV2};
+/// # use usgp_proto::content_manifest::{ContentManifestV1, ContentManifestV2};
+/// # fn f(plan: JobPlanV2, image: ContentManifestV1, agent: ContentManifestV2) {
+/// let _ = VerifiedJobPlanV2 { plan, image, drivers: Vec::new(), agent };
+/// # }
+/// ```
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-7 (Software, Firmware, and Information Integrity) -
+//   content is fetched and applied only against a verified manifest.
+// - SPEC: specs/preinstall-env.md#REQ-PE-016
+#[derive(Debug, Clone, Copy)]
+pub struct VerifiedImageRef<'a> {
+    job_id: JobId,
+    image: &'a PlanImageV1,
+    manifest: &'a ContentManifestV1,
+    retry: RetryPolicyV1,
+}
+
+impl<'a> VerifiedImageRef<'a> {
+    /// The job.
+    #[must_use]
+    pub const fn job_id(&self) -> JobId {
+        self.job_id
+    }
+
+    /// The plan's image entry (edition, sizes, digests).
+    #[must_use]
+    pub const fn image(&self) -> &'a PlanImageV1 {
+        self.image
+    }
+
+    /// The image's verified content manifest (chunk digests).
+    #[must_use]
+    pub const fn manifest(&self) -> &'a ContentManifestV1 {
+        self.manifest
+    }
+
+    /// The plan's retry policy.
+    #[must_use]
+    pub const fn retry(&self) -> RetryPolicyV1 {
+        self.retry
+    }
+}
+
 /// A job plan and its content manifest, both verified and bound to this
 /// device's session, job, nonce and disk. Only [`VerifiedJobPlan::verify`]
 /// builds one; `usgp-deploy` builds its wipe authorisation only from it.
@@ -537,6 +601,17 @@ impl VerifiedJobPlan {
     #[must_use]
     pub const fn content_manifest(&self) -> &ContentManifestV1 {
         &self.content
+    }
+
+    /// The verified image, for the verify and apply passes.
+    #[must_use]
+    pub const fn image(&self) -> VerifiedImageRef<'_> {
+        VerifiedImageRef {
+            job_id: self.plan.job_id,
+            image: &self.plan.image,
+            manifest: &self.content,
+            retry: self.plan.retry,
+        }
     }
 }
 
@@ -1051,6 +1126,17 @@ impl VerifiedJobPlanV2 {
     #[must_use]
     pub const fn content_manifest(&self) -> &ContentManifestV1 {
         &self.image
+    }
+
+    /// The verified image, for the verify and apply passes.
+    #[must_use]
+    pub const fn image(&self) -> VerifiedImageRef<'_> {
+        VerifiedImageRef {
+            job_id: self.plan.job_id,
+            image: &self.plan.image,
+            manifest: &self.image,
+            retry: self.plan.retry,
+        }
     }
 
     /// The driver archives' content manifests, in plan order.

@@ -40,7 +40,7 @@ use usgp_disk::uefi::BootVarName;
 use usgp_disk::{BlockDevice, DiskFacts};
 use usgp_image::apply::{ApplyRoot, ApplySink};
 use usgp_proto::disk::{FileSystem, PlanDiskV1};
-use usgp_wincfg::archive::ExtractSink;
+use usgp_wincfg::archive::{ExtractSink, ReadAt};
 
 /// What went wrong in a platform operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +332,61 @@ impl StagePath {
     }
 }
 
+/// One driver archive's file below the staging root:
+/// `$usgp-stage\arc\<i>.bin`, where `i` is the archive's 0-based position
+/// in the plan (M4 plan WU-7a item 4). Built only from that integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagedArchive {
+    index: u16,
+}
+
+impl StagedArchive {
+    /// The file of the archive at plan position `index`.
+    #[must_use]
+    pub const fn driver(index: u16) -> Self {
+        Self { index }
+    }
+
+    /// The archive's plan position.
+    #[must_use]
+    pub const fn index(self) -> u16 {
+        self.index
+    }
+
+    /// The path relative to the Windows volume root, `\`-separated.
+    #[must_use]
+    pub fn relative(self) -> String {
+        format!("{STAGE_ROOT}\\arc\\{}.bin", self.index)
+    }
+}
+
+/// A file being written in order. The engine passes only content whose
+/// chunk digests already matched the signed manifest.
+pub trait FileWriter {
+    /// Appends `data`.
+    ///
+    /// # Errors
+    ///
+    /// The I/O error.
+    fn append(&mut self, data: &[u8]) -> io::Result<()>;
+
+    /// Flushes everything written to the volume. Called once, after the
+    /// last [`FileWriter::append`].
+    ///
+    /// # Errors
+    ///
+    /// The I/O error.
+    fn finish(&mut self) -> io::Result<()>;
+}
+
+/// A staged archive file: written in order, then read back by position
+/// for extraction (M4 plan WU-7a item 4). The implementation keeps the
+/// file open without write sharing, so nothing else can change it between
+/// the verified write and the extraction.
+pub trait StagedFile: FileWriter + ReadAt {}
+
+impl<T: FileWriter + ReadAt + ?Sized> StagedFile for T {}
+
 /// A file in the post-setup folder `ProgramData\usgp\postsetup\` (M4
 /// plan §1.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,6 +567,40 @@ pub trait Platform {
     fn write_protected_file(&mut self, p: &TargetPath, bytes: &[u8]) -> Result<(), PlatformError> {
         let _ = (p, bytes);
         Err(not_provided("target file write"))
+    }
+
+    /// Creates the staged file of one driver archive, `at`, below the
+    /// staging root of the Windows volume (create-new; the platform
+    /// creates the staging root and `arc` folder). The returned file is
+    /// owned (it does not borrow the platform) and is closed when dropped;
+    /// [`Platform::remove_staging`] removes it with the rest of the root.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn stage_archive_file(
+        &mut self,
+        at: &StagedArchive,
+    ) -> Result<Box<dyn StagedFile>, PlatformError> {
+        let _ = at;
+        Err(not_provided("archive staging"))
+    }
+
+    /// Creates `p` on the Windows volume for writing in order, creating
+    /// its folders and applying [`TargetPath::protection`] (create-new: an
+    /// existing file is refused with `Io(io::ErrorKind::AlreadyExists)`
+    /// and left unchanged). Used for the agent package, which is written
+    /// chunk by chunk after each chunk is verified (M4 plan WU-7a item 4).
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn create_target_file(
+        &mut self,
+        p: &TargetPath,
+    ) -> Result<Box<dyn FileWriter + '_>, PlatformError> {
+        let _ = p;
+        Err(not_provided("target file create"))
     }
 
     /// The bytes of the running agent binary (copied to the post-setup

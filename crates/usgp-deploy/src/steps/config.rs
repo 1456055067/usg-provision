@@ -5,7 +5,9 @@
 //! 1. `ProgramData\usgp\postsetup\usgp-agent.exe`: the running agent
 //!    binary; its SHA-256 goes into `job.json`;
 //! 2. `ProgramData\usgp\postsetup\agent-package.zip`: the agent package,
-//!    re-verified chunk by chunk and as a whole against the plan;
+//!    written chunk by chunk, each chunk only after it matched the signed
+//!    manifest, then checked as a whole against the plan (WU-7a item 4:
+//!    never held in memory);
 //! 3. `ProgramData\usgp\postsetup\job.key`: the job private key generated
 //!    on the device at confirm (SYSTEM-only DACL);
 //! 4. `ProgramData\usgp\postsetup\job.json`: `PostSetupConfigV1`
@@ -45,7 +47,7 @@ use usgp_proto::{ErrorCode, FileName};
 use zeroize::Zeroizing;
 
 use super::{StepCtx, chunk_failure, local, platform_failure, time_check};
-use crate::content::VerifiedChunks;
+use crate::content::{StreamError, VerifiedChunks};
 use crate::error::{JobFailureV2, code, code_of};
 use crate::link::ServerLink;
 use crate::platform::{Platform, PlatformErrorKind, PostSetupFile, TargetPath};
@@ -115,7 +117,6 @@ pub fn place_config(
     plan: &JobPlanV2,
     agent_manifest: &ContentManifestV2,
     inputs: &PostSetupInputs<'_>,
-    max_agent_bytes: u64,
     platform: &mut dyn Platform,
     link: &mut dyn ServerLink,
 ) -> Result<(), JobFailureV2> {
@@ -153,8 +154,19 @@ pub fn place_config(
     drop(exe);
     time_check(STEP, ctx.watch)?;
 
-    // 2. The agent package, re-verified.
-    let pkg = {
+    // 2. The agent package, each chunk verified before it is written.
+    {
+        let target = TargetPath::PostSetup(PostSetupFile::AgentPackage);
+        let mut file = platform
+            .create_target_file(&target)
+            .map_err(|e| platform_failure(STEP, code_of(code::CONFIG_WRITE_FAILED), e))?;
+        let write_failed = |e: io::Error| {
+            local(
+                STEP,
+                code_of(code::CONFIG_WRITE_FAILED),
+                format!("the agent package could not be written ({})", e.kind()),
+            )
+        };
         let mut src = VerifiedChunks::for_archive(
             &mut *link,
             ctx.crypto,
@@ -164,16 +176,13 @@ pub fn place_config(
             agent_manifest,
         )
         .with_watch(ctx.watch);
-        src.read_all(max_agent_bytes)
-            .map_err(|c| chunk_failure(STEP, "agent package", c))?
-    };
-    write(
-        platform,
-        TargetPath::PostSetup(PostSetupFile::AgentPackage),
-        &pkg,
-        None,
-    )?;
-    drop(pkg);
+        src.stream_to(&mut |c| file.append(c))
+            .map_err(|e| match e {
+                StreamError::Chunk(c) => chunk_failure(STEP, "agent package", c),
+                StreamError::Write(e) => write_failed(e),
+            })?;
+        file.finish().map_err(write_failed)?;
+    }
     time_check(STEP, ctx.watch)?;
 
     // 3. The job key (SYSTEM only).

@@ -197,10 +197,17 @@ pub struct JobFailureV2 {
     /// Stable reason code, possibly with parameters
     /// (`driver_not_staged:<archive>:<inf>`).
     pub code: ErrorCode,
+    /// The files that failed (at most 32), for content failures in steps
+    /// 1 to 3.
+    pub files: Vec<ProgressItemV1>,
+    /// How many files failed (at least `files.len()`).
+    pub count: u32,
     /// Attempts made (1 if the failure is not retried).
     pub attempts: u32,
     /// Fixed words and numbers for the person and the operator.
     pub message: String,
+    /// `false` if the job failed before anything was written to the disk.
+    pub disk_written: bool,
 }
 
 impl JobFailureV2 {
@@ -215,20 +222,42 @@ impl JobFailureV2 {
             step,
             category,
             code,
+            files: Vec::new(),
+            count: 0,
             attempts: 1,
             message: screen_text(&message.into()),
+            // Steps 4 to 9 run after the disk was written.
+            disk_written: step.get() > StepV2::APPLY_IMAGE.get(),
+        }
+    }
+
+    /// A failure of steps 1 to 3 (shared with the v1 engine; the step
+    /// numbers are the same in both schemas).
+    pub(crate) fn from_v1(f: JobFailure) -> Self {
+        Self {
+            step: StepV2::new(f.step.get()).unwrap_or(StepV2::VERIFY_CONTENT),
+            category: f.category,
+            code: f.code,
+            files: f.files,
+            count: f.count,
+            attempts: f.attempts,
+            message: f.message,
+            disk_written: f.disk_written,
         }
     }
 
     /// The wire form for the v2 progress report.
     #[must_use]
     pub fn to_wire(&self) -> FailureV2 {
+        let max = usgp_proto::limits::MAX_FAILED_FILES;
+        let files: Vec<ProgressItemV1> = self.files.iter().take(max).cloned().collect();
+        let listed = u32::try_from(files.len()).unwrap_or(u32::MAX);
         FailureV2 {
             step: self.step,
             category: self.category,
             code: self.code.clone(),
-            files: Vec::new(),
-            count: 0,
+            count: self.count.max(listed),
+            files,
             attempts: self
                 .attempts
                 .clamp(1, usgp_proto::limits::MAX_REPORTED_ATTEMPTS),

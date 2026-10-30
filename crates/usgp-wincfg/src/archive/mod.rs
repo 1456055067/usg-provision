@@ -282,7 +282,21 @@ pub struct ArchiveReport {
     pub ignored_executables: u32,
 }
 
-/// Reads and fully decodes the archive, discarding content (server upload).
+/// What the archive must hold (M4 plan WU-7a item 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveMode {
+    /// A driver archive: at least one INF driver package whose catalogs
+    /// are present, or [`ArchiveError::NoInfPackages`] (REQ-DRV-006).
+    DriverPackages,
+    /// Any content (the agent package): the INF rule is skipped; every
+    /// other bound and check applies unchanged. INFs found are still
+    /// listed in the report.
+    Plain,
+}
+
+/// Reads and fully decodes a driver archive, discarding content (server
+/// upload). Same as [`validate_archive_mode`] with
+/// [`ArchiveMode::DriverPackages`].
 ///
 /// # Errors
 ///
@@ -292,10 +306,28 @@ pub fn validate_archive(
     len: u64,
     lim: &ArchiveLimits,
 ) -> Result<ArchiveReport, ArchiveError> {
-    extract_archive(src, len, lim, &mut NullSink)
+    validate_archive_mode(src, len, lim, ArchiveMode::DriverPackages)
 }
 
-/// Reads, decodes and passes every entry to `sink` (agent step 4).
+/// Reads and fully decodes the archive in `mode`, discarding content (the
+/// server's driver upload uses [`ArchiveMode::DriverPackages`], its agent
+/// package upload [`ArchiveMode::Plain`]).
+///
+/// # Errors
+///
+/// Any [`ArchiveError`]; the archive must then be marked refused.
+pub fn validate_archive_mode(
+    src: &dyn ReadAt,
+    len: u64,
+    lim: &ArchiveLimits,
+    mode: ArchiveMode,
+) -> Result<ArchiveReport, ArchiveError> {
+    extract_archive_mode(src, len, lim, mode, &mut NullSink)
+}
+
+/// Reads, decodes and passes every entry of a driver archive to `sink`
+/// (agent step 4). Same as [`extract_archive_mode`] with
+/// [`ArchiveMode::DriverPackages`].
 ///
 /// # Errors
 ///
@@ -307,6 +339,22 @@ pub fn extract_archive(
     lim: &ArchiveLimits,
     sink: &mut dyn ExtractSink,
 ) -> Result<ArchiveReport, ArchiveError> {
+    extract_archive_mode(src, len, lim, ArchiveMode::DriverPackages, sink)
+}
+
+/// Reads, decodes and passes every entry to `sink`, in `mode`.
+///
+/// # Errors
+///
+/// Any [`ArchiveError`]. On error the sink may hold partial output, which
+/// the caller must delete (module documentation).
+pub fn extract_archive_mode(
+    src: &dyn ReadAt,
+    len: u64,
+    lim: &ArchiveLimits,
+    mode: ArchiveMode,
+    sink: &mut dyn ExtractSink,
+) -> Result<ArchiveReport, ArchiveError> {
     if len > lim.max_archive_bytes {
         return Err(ArchiveError::LimitExceeded("archive_bytes"));
     }
@@ -314,8 +362,8 @@ pub fn extract_archive(
     let mut magic = [0u8; 4];
     input.read(0, &mut magic)?;
     match &magic {
-        b"MSCF" => cab::extract(&input, lim, sink),
-        b"PK\x03\x04" | b"PK\x05\x06" => zip::extract(&input, lim, sink),
+        b"MSCF" => cab::extract(&input, lim, mode, sink),
+        b"PK\x03\x04" | b"PK\x05\x06" => zip::extract(&input, lim, mode, sink),
         _ => Err(ArchiveError::UnknownFormat),
     }
 }
@@ -539,6 +587,7 @@ const EXEC_EXTS: &[&str] = &[
 pub(crate) struct Collector<'s> {
     sink: &'s mut dyn ExtractSink,
     names: NameSet,
+    mode: ArchiveMode,
     max_inf: u64,
     dirs: BTreeSet<String>,
     current: Option<Current>,
@@ -556,10 +605,16 @@ struct Current {
 }
 
 impl<'s> Collector<'s> {
-    pub(crate) fn new(sink: &'s mut dyn ExtractSink, names: NameSet, lim: &ArchiveLimits) -> Self {
+    pub(crate) fn new(
+        sink: &'s mut dyn ExtractSink,
+        names: NameSet,
+        lim: &ArchiveLimits,
+        mode: ArchiveMode,
+    ) -> Self {
         Self {
             sink,
             names,
+            mode,
             max_inf: lim.max_inf_bytes,
             dirs: BTreeSet::new(),
             current: None,
@@ -670,7 +725,7 @@ impl<'s> Collector<'s> {
                 infs.push(path);
             }
         }
-        if infs.is_empty() {
+        if infs.is_empty() && self.mode == ArchiveMode::DriverPackages {
             return Err(ArchiveError::NoInfPackages);
         }
         infs.sort();

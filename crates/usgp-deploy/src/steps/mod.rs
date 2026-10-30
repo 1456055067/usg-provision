@@ -38,7 +38,8 @@ use usgp_proto::{ErrorCode, JobId, codes};
 
 use crate::bootentry::{BootEntry, make_windows_first};
 use crate::clock::{Clock, TimeLimit, Watch};
-use crate::content::{ChunkError, ChunkErrorKind};
+use crate::content::{ChunkError, chunk_code};
+use crate::engine::{JobView, ViewEvent};
 use crate::error::{JobFailureV2, code, code_of};
 use crate::link::ServerLinkV2;
 use crate::platform::{FormattedVolume, Platform, PlatformError, PlatformErrorKind};
@@ -80,22 +81,7 @@ pub(crate) fn platform_failure(s: StepV2, c: ErrorCode, e: PlatformError) -> Job
 
 /// A content failure while re-verifying `what`.
 pub(crate) fn chunk_failure(s: StepV2, what: &str, c: ChunkError) -> JobFailureV2 {
-    let (category, code) = match c.kind {
-        ChunkErrorKind::Network => (FailureCategory::Network, code_of(code::SERVER_UNREACHABLE)),
-        ChunkErrorKind::Protocol => (FailureCategory::Network, code_of(code::SERVER_REFUSED)),
-        ChunkErrorKind::NotFound => (FailureCategory::Refused, code_of(code::CONTENT_NOT_FOUND)),
-        ChunkErrorKind::Refused => (FailureCategory::Refused, code_of(code::SERVER_REFUSED)),
-        ChunkErrorKind::ServerIntegrity => (FailureCategory::Integrity, codes::INTEGRITY_FAILED),
-        ChunkErrorKind::Digest => (FailureCategory::Integrity, codes::CHUNK_DIGEST_MISMATCH),
-        ChunkErrorKind::Length if c.attempts == 0 => (
-            FailureCategory::Refused,
-            code_of(code::AGENT_PACKAGE_INVALID),
-        ),
-        ChunkErrorKind::Length => (FailureCategory::Integrity, codes::CHUNK_DIGEST_MISMATCH),
-        ChunkErrorKind::NoDigest => (FailureCategory::Integrity, codes::CONTENT_MANIFEST_MISMATCH),
-        ChunkErrorKind::StepTimeout => (FailureCategory::Timeout, codes::STEP_TIMEOUT),
-        ChunkErrorKind::Stalled => (FailureCategory::Timeout, codes::STALLED),
-    };
+    let (category, code) = chunk_code(c.kind);
     let mut f = JobFailureV2::new(s, category, code, format!("{what}: {c}"));
     f.attempts = c.attempts.max(1);
     f
@@ -139,9 +125,6 @@ pub(crate) fn watch_for<'c>(
 pub struct TailConfig {
     /// Step 4 bounds.
     pub drivers: DriverStepConfig,
-    /// Largest agent package held in memory at step 5, in bytes; 0 means
-    /// the default of 2 GiB (`agent_package.max_bytes`, M4 plan §3.6).
-    pub max_agent_package_bytes: u64,
     /// Bounds for parsing firmware variables (step 6).
     pub uefi_limits: UefiLimits,
 }
@@ -155,7 +138,8 @@ pub struct AfterApply<'v> {
     pub windows: &'v FormattedVolume,
     /// The ESP partition as written (for the firmware boot option).
     pub esp_part: &'v Part,
-    /// The last progress sequence number sent in steps 1 to 3.
+    /// The last progress sequence number used in steps 1 to 3 (reports of
+    /// steps 4 to 6 continue from the next one).
     pub last_seq: u64,
 }
 
@@ -168,6 +152,13 @@ pub struct TailDone {
     pub boot: BootEntry,
     /// The reports the server acknowledged, in order.
     pub reports: Vec<ProgressV2>,
+}
+
+/// The platform, link and screen steps 4 to 6 use.
+pub(crate) struct TailIo<'x> {
+    pub(crate) platform: &'x mut dyn Platform,
+    pub(crate) link: &'x mut dyn ServerLinkV2,
+    pub(crate) view: &'x mut dyn JobView,
 }
 
 /// Runs steps 4 to 6 of a verified v2 plan.
@@ -197,7 +188,8 @@ impl<'a> PrebootTail<'a> {
     }
 
     /// Runs steps 4, 5 and 6 in the plan's order, stopping at the first
-    /// failure, which is reported `failed` (best effort) and returned.
+    /// failure, which is shown on `view`, reported `failed` (best effort)
+    /// and returned. Reports are numbered from `after.last_seq + 1`.
     ///
     /// # Errors
     ///
@@ -209,18 +201,37 @@ impl<'a> PrebootTail<'a> {
         inputs: &PostSetupInputs<'_>,
         platform: &mut dyn Platform,
         link: &mut dyn ServerLinkV2,
+        view: &mut dyn JobView,
+    ) -> Result<TailDone, JobFailureV2> {
+        let rep = ReporterV2::new(plan.plan().job_id, after.last_seq);
+        let io = TailIo {
+            platform,
+            link,
+            view,
+        };
+        self.run_with(plan, after, inputs, io, rep)
+    }
+
+    /// [`PrebootTail::run`] with the reporter steps 1 to 3 used.
+    pub(crate) fn run_with(
+        &self,
+        plan: &VerifiedJobPlanV2,
+        after: &AfterApply<'_>,
+        inputs: &PostSetupInputs<'_>,
+        mut io: TailIo<'_>,
+        mut rep: ReporterV2,
     ) -> Result<TailDone, JobFailureV2> {
         let p = plan.plan();
-        let mut rep = ReporterV2::new(p.job_id, after.last_seq);
-        match self.steps(plan, after, inputs, platform, link, &mut rep) {
+        match self.steps(plan, after, inputs, &mut io, &mut rep) {
             Ok(mut done) => {
                 done.reports = rep.delivered().to_vec();
                 Ok(done)
             }
             Err(f) => {
+                io.view.show(&ViewEvent::FailedV2(&f));
                 // Best effort: the device shows the failure either way.
                 let _ = rep.deliver(
-                    &mut *link,
+                    &mut *io.link,
                     self.clock,
                     &p.retry,
                     None,
@@ -236,10 +247,12 @@ impl<'a> PrebootTail<'a> {
         plan: &VerifiedJobPlanV2,
         after: &AfterApply<'_>,
         inputs: &PostSetupInputs<'_>,
-        platform: &mut dyn Platform,
-        link: &mut dyn ServerLinkV2,
+        io: &mut TailIo<'_>,
         rep: &mut ReporterV2,
     ) -> Result<TailDone, JobFailureV2> {
+        let platform: &mut dyn Platform = &mut *io.platform;
+        let link: &mut dyn ServerLinkV2 = &mut *io.link;
+        let view: &mut dyn JobView = &mut *io.view;
         let p = plan.plan();
         let mut drivers = None;
         let mut boot = None;
@@ -252,6 +265,7 @@ impl<'a> PrebootTail<'a> {
             let s = entry.step;
             let stall = (s != StepV2::MAKE_BOOTABLE_RESTART).then_some(p.stall_timeout_s);
             let watch = watch_for(self.clock, Some(entry.timeout_s), stall);
+            view.show(&ViewEvent::StepStartedV2(s));
             rep.state(&mut *link, s, ProgressEvent::StepStarted);
             let ctx = StepCtx {
                 crypto: self.crypto,
@@ -276,22 +290,19 @@ impl<'a> PrebootTail<'a> {
                         &mut *link,
                     )?);
                     rep.state(&mut *link, s, ProgressEvent::StepCompleted);
+                    view.show(&ViewEvent::StepCompletedV2(s));
                 }
                 StepKindV2::PlaceConfig => {
-                    let max = match self.config.max_agent_package_bytes {
-                        0 => 2 << 30,
-                        n => n,
-                    };
                     config::place_config(
                         &ctx,
                         p,
                         plan.agent_manifest(),
                         inputs,
-                        max,
                         platform,
                         &mut *link,
                     )?;
                     rep.state(&mut *link, s, ProgressEvent::StepCompleted);
+                    view.show(&ViewEvent::StepCompletedV2(s));
                 }
                 _ => {
                     boot = Some(self.make_bootable(s, after, platform, &watch)?);
@@ -304,7 +315,7 @@ impl<'a> PrebootTail<'a> {
                         Some(&watch),
                         Must::event(s, ProgressEvent::StepCompleted),
                     ) {
-                        Ok(_) => {}
+                        Ok(_) => view.show(&ViewEvent::StepCompletedV2(s)),
                         Err(e) => {
                             let mut f = JobFailureV2::new(
                                 s,

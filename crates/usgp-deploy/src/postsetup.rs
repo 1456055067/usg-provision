@@ -4,30 +4,41 @@
 //! Windows Setup starts the agent in `postsetup` mode from
 //! `SetupComplete.cmd` as SYSTEM. [`PostSetupRunner::run`]:
 //!
-//! 1. reads `job.json` and checks, before acting:
+//! 1. reads `job.json` and `job.key` with minimal checks only: both
+//!    parse, and the key loads (M4 plan WU-7a item 9);
+//! 2. re-contacts the server: challenge, then the challenge signed with
+//!    the job key, which gives the link a job-scoped token and the
+//!    server's last accepted sequence number (`ack_seq`; reports continue
+//!    from the next one). Transient failures are retried until the resume
+//!    deadline (the network may come up late);
+//! 3. only then checks, before acting, and reports a failure to the
+//!    server with the token:
 //!    - the plan signature again, with the plan key in `job.json`;
 //!    - that the plan is this job's;
 //!    - that `job.key` is the key the plan names (`job_key_mismatch`);
 //!    - that the agent package's SHA-256 is the plan's
-//!      (`agent_digest_mismatch`);
-//! 2. re-contacts the server: challenge, then the challenge signed with
-//!    the job key, which gives the link a job-scoped token. Transient
-//!    failures are retried until the step 7 deadline (the network may come
-//!    up late);
-//! 3. step 7 `windows_setup`: writes the tags; if the plan has an escrow
+//!      (`agent_digest_mismatch`), re-hashed by streaming from the file;
+//! 4. step 7 `windows_setup`: writes the tags; if the plan has an escrow
 //!    key, **escrow first, then set** (§1.3): generate the password with
 //!    the FIPS DRBG into locked memory, seal it to the escrow key, post
 //!    it, and only after the server's acknowledgement set it on the
-//!    built-in Administrator (RID 500) and confirm. If the escrow fails
-//!    the password is never set and the account stays disabled (fail
-//!    secure). Then the Panther answer file is deleted and its absence
-//!    checked;
-//! 4. step 8 `install_agent`: the package is re-hashed, extracted with the
-//!    bounded archive reader, `agent.json` parsed, and the installer run
+//!    built-in Administrator (RID 500) and confirm (retried until the step
+//!    7 deadline; `escrow_confirm_failed` if it never succeeds). If the
+//!    escrow fails the password is never set and the account stays
+//!    disabled (fail secure). Then the Panther answer file is deleted and
+//!    its absence checked;
+//! 5. step 8 `install_agent`: the package is re-hashed and extracted from
+//!    the same open file with the bounded archive reader in
+//!    [`ArchiveMode::Plain`], `agent.json` parsed, and the installer run
 //!    (argument vector, no shell, cleared environment, timeout). The exit
 //!    code must be in the success list; 3010 is recorded as
 //!    `restart_pending`, and the runner never restarts;
-//! 5. step 9 `report_ready`: `succeeded` delivered and acknowledged.
+//! 6. step 9 `report_ready`: `succeeded` delivered and acknowledged.
+//!
+//! Only an unreadable `job.json` or `job.key`, or a server that cannot be
+//! reached or refuses the resume, leaves the failure on the device alone
+//! (the server's deadline sweep then fails the job): no credential exists
+//! in those cases.
 //!
 //! On every exit, `job.key`, the answer file and our `SetupComplete.cmd`
 //! are deleted; the script's own second line removes the folder. A
@@ -55,11 +66,13 @@
 // - DECISION: docs/decisions/0024, 0025
 
 use std::fmt;
+use std::io;
 use std::time::Duration;
 
+use usgp_common::Sha256Digest;
 use usgp_crypto::{
-    CryptoProvider, EscrowContext, EscrowPublicKey, SigningKey, VerifyingKey, random_password,
-    sign_typed,
+    CryptoProvider, EscrowContext, EscrowPublicKey, PASSWORD_LEN, SigningKey, VerifyingKey,
+    random_password, sign_typed,
 };
 use usgp_proto::agent_package::InstallerKind;
 use usgp_proto::envelope::PayloadType;
@@ -72,7 +85,7 @@ use usgp_proto::{
     AgentPackageManifestV1, B64Bytes, ErrorCode, EscrowConfirmV1, EscrowSubmitV1, InstallerArg,
     JobId, RelPath, ResumeChallengeV1, ResumeRequestV1, codes,
 };
-use usgp_wincfg::archive::{ArchiveError, ArchiveLimits, ExtractSink, extract_archive};
+use usgp_wincfg::archive::{ArchiveLimits, ArchiveMode, ExtractSink, ReadAt, extract_archive_mode};
 use zeroize::Zeroizing;
 
 use crate::clock::{Clock, Watch, backoff};
@@ -80,14 +93,14 @@ use crate::error::{JobFailureV2, code, code_of, code_with};
 use crate::link::{LinkError, ProgressLinkV2};
 use crate::plan::PinnedKey;
 use crate::platform::PlatformError;
-use crate::report_v2::{Must, POSTSETUP_SEQ_BASE, ReporterV2};
+use crate::report_v2::{Must, ReporterV2};
 use crate::steps::{local, platform_failure, time_check, watch_for};
 
 /// Largest `job.key` read, in bytes (a P-384 PKCS#8 is far smaller).
 const MAX_JOB_KEY_BYTES: u64 = 16 * 1024;
 
-/// Generated password length (M4 plan §1.3: 24 characters, 144 bits).
-pub const PASSWORD_LEN: usize = 24;
+/// Block size for re-hashing the agent package from its file.
+const HASH_BLOCK: usize = 1 << 20;
 
 /// The exit code with which an installer asks for a restart (M4 plan
 /// §1.7); accepted only if in the success list, and never acted on.
@@ -144,6 +157,24 @@ pub enum InstallOutcome {
     TimedOut,
 }
 
+/// A file opened for reading by position, and its length.
+pub struct OpenedFile {
+    /// The file. The platform opens it without write or delete sharing,
+    /// so its content cannot change while it is open (the runner hashes
+    /// and then extracts the same open file).
+    pub reader: Box<dyn ReadAt>,
+    /// Its length in bytes.
+    pub len: u64,
+}
+
+impl fmt::Debug for OpenedFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenedFile")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What the runner needs from the installed Windows. The agent (WU-10)
 /// implements it on `usgp-winapi`; tests use a directory tree.
 pub trait PostSetupPlatform {
@@ -153,6 +184,14 @@ pub trait PostSetupPlatform {
     ///
     /// [`PlatformError`].
     fn read_file(&mut self, f: RunnerFile, max: u64) -> Result<Zeroizing<Vec<u8>>, PlatformError>;
+
+    /// Opens `f` for reading by position (the agent package; M4 plan WU-7a
+    /// item 4: never read whole into memory).
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn open_file(&mut self, f: RunnerFile) -> Result<OpenedFile, PlatformError>;
 
     /// Deletes `f`; succeeds if it is absent.
     ///
@@ -230,12 +269,13 @@ pub trait ResumeLink: ProgressLinkV2 {
     fn challenge(&mut self, job: JobId) -> Result<ResumeChallengeV1, LinkError>;
 
     /// `POST /v1/device/jobs/{job}/resume`; on success the link keeps the
-    /// token for later calls.
+    /// token for later calls and returns the response's `ack_seq`, the
+    /// last sequence number the server accepted for the job.
     ///
     /// # Errors
     ///
     /// [`LinkError`].
-    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<(), LinkError>;
+    fn resume(&mut self, job: JobId, req: &ResumeRequestV1) -> Result<u64, LinkError>;
 
     /// `POST /v1/device/jobs/{job}/escrow` (201 on commit).
     ///
@@ -255,17 +295,31 @@ pub trait ResumeLink: ProgressLinkV2 {
 /// Runner settings that are not in the signed plan.
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
-    /// Bounds for extracting the agent package.
+    /// Bounds for extracting the agent package (the M4 plan §1.5 limits;
+    /// `max_archive_bytes` also bounds the file re-hashed).
     pub archive_limits: ArchiveLimits,
-    /// Largest agent package read, in bytes (`agent_package.max_bytes`).
-    pub max_agent_package_bytes: u64,
+    /// Retry delays for the resume, which runs before the plan is
+    /// verified (so the plan's own policy is not used yet).
+    pub resume_retry: RetryPolicyV1,
+    /// How long the runner waits for the network and the resume, in
+    /// seconds.
+    pub resume_timeout_s: u32,
 }
 
+/// [project rule] The resume runs before the plan is verified (WU-7a item
+/// 9), so its deadline cannot come from the plan: the default is the
+/// `windows_setup` step default of M4 plan §3.6 (14400 s), and the delays
+/// the M3 report defaults.
 impl Default for RunnerConfig {
     fn default() -> Self {
         Self {
             archive_limits: ArchiveLimits::default(),
-            max_agent_package_bytes: 2 << 30,
+            resume_retry: RetryPolicyV1 {
+                attempts: 3,
+                base_ms: 2000,
+                max_ms: 60_000,
+            },
+            resume_timeout_s: 14_400,
         }
     }
 }
@@ -298,9 +352,10 @@ impl fmt::Debug for PostSetupRunner<'_> {
     }
 }
 
-/// The checked inputs.
-struct Loaded {
-    plan: JobPlanV2,
+/// `job.json` and `job.key`, parsed but not yet checked against each
+/// other or the plan signature.
+struct Read {
+    config: PostSetupConfigV1,
     job_key: SigningKey,
 }
 
@@ -387,20 +442,15 @@ impl<'a> PostSetupRunner<'a> {
         result
     }
 
-    fn load(&self, platform: &mut dyn PostSetupPlatform) -> Result<Loaded, JobFailureV2> {
+    /// Step 1 of the order (WU-7a item 9): `job.json` parses and
+    /// `job.key` loads. Nothing else is checked before the resume.
+    fn read_inputs(&self, platform: &mut dyn PostSetupPlatform) -> Result<Read, JobFailureV2> {
         let max = u64::try_from(MAX_POSTSETUP_CONFIG_BYTES).unwrap_or(u64::MAX);
         let json = platform
             .read_file(RunnerFile::JobJson, max)
             .map_err(|e| invalid(format!("job.json could not be read: {e}")))?;
         let config = PostSetupConfigV1::from_json(&json)
             .map_err(|e| invalid(format!("job.json is invalid: {e}")))?;
-        let plan_key = VerifyingKey::from_spki_pem(config.plan_key_pem.as_bytes())
-            .map_err(|_| invalid("job.json plan key is invalid"))?;
-        let plan = JobPlanV2::open(&config.plan, &PinnedKey::new(plan_key))
-            .map_err(|e| invalid(format!("the job plan does not verify: {e}")))?;
-        if plan.job_id != config.job_id {
-            return Err(invalid("job.json names another job"));
-        }
         let der = platform
             .read_file(RunnerFile::JobKey, MAX_JOB_KEY_BYTES)
             .map_err(|e| invalid(format!("job.key could not be read: {e}")))?;
@@ -413,7 +463,25 @@ impl<'a> PostSetupRunner<'a> {
             )
         })?;
         drop(der);
-        if job_key.key_id().0 != plan.job_key_id {
+        Ok(Read { config, job_key })
+    }
+
+    /// Step 3 of the order, after the resume: the plan signature, the job,
+    /// the job key id and the agent package digest.
+    fn verify_inputs(
+        &self,
+        platform: &mut dyn PostSetupPlatform,
+        read: &Read,
+    ) -> Result<JobPlanV2, JobFailureV2> {
+        let config = &read.config;
+        let plan_key = VerifyingKey::from_spki_pem(config.plan_key_pem.as_bytes())
+            .map_err(|_| invalid("job.json plan key is invalid"))?;
+        let plan = JobPlanV2::open(&config.plan, &PinnedKey::new(plan_key))
+            .map_err(|e| invalid(format!("the job plan does not verify: {e}")))?;
+        if plan.job_id != config.job_id {
+            return Err(invalid("job.json names another job"));
+        }
+        if read.job_key.key_id().0 != plan.job_key_id {
             return Err(JobFailureV2::new(
                 StepV2::WINDOWS_SETUP,
                 FailureCategory::Integrity,
@@ -422,23 +490,37 @@ impl<'a> PostSetupRunner<'a> {
             ));
         }
         self.check_agent_package(platform, &plan, StepV2::WINDOWS_SETUP)?;
-        Ok(Loaded { plan, job_key })
+        Ok(plan)
     }
 
-    /// Reads the agent package and checks its whole-file SHA-256.
+    /// Opens the agent package and checks its whole-file SHA-256, read in
+    /// blocks from the file. Returns the open file for extraction.
     fn check_agent_package(
         &self,
         platform: &mut dyn PostSetupPlatform,
         plan: &JobPlanV2,
         s: StepV2,
-    ) -> Result<Zeroizing<Vec<u8>>, JobFailureV2> {
+    ) -> Result<OpenedFile, JobFailureV2> {
         let pkg = platform
-            .read_file(
-                RunnerFile::AgentPackage,
-                self.config.max_agent_package_bytes,
-            )
+            .open_file(RunnerFile::AgentPackage)
             .map_err(|e| platform_failure(s, codes::AGENT_DIGEST_MISMATCH, e))?;
-        if self.crypto.sha256(&pkg) != plan.agent.content_sha256 {
+        if pkg.len > self.config.archive_limits.max_archive_bytes {
+            return Err(JobFailureV2::new(
+                s,
+                FailureCategory::Refused,
+                code_of(code::AGENT_PACKAGE_INVALID),
+                "the agent package is larger than the archive limit",
+            ));
+        }
+        let digest = self.hash_file(&pkg).map_err(|e| {
+            JobFailureV2::new(
+                s,
+                FailureCategory::Local,
+                codes::AGENT_DIGEST_MISMATCH,
+                format!("the agent package could not be read ({})", e.kind()),
+            )
+        })?;
+        if digest != plan.agent.content_sha256 {
             return Err(JobFailureV2::new(
                 s,
                 FailureCategory::Integrity,
@@ -447,6 +529,24 @@ impl<'a> PostSetupRunner<'a> {
             ));
         }
         Ok(pkg)
+    }
+
+    /// SHA-256 of the whole file, read in [`HASH_BLOCK`] pieces.
+    fn hash_file(&self, f: &OpenedFile) -> io::Result<Sha256Digest> {
+        let mut h = self.crypto.sha256_hasher();
+        let mut buf = vec![0u8; HASH_BLOCK];
+        let mut off: u64 = 0;
+        while off < f.len {
+            let left = f.len.saturating_sub(off);
+            let n = usize::try_from(left).map_or(HASH_BLOCK, |l| l.min(HASH_BLOCK));
+            let b = buf
+                .get_mut(..n)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            f.reader.read_exact_at(off, b)?;
+            h.update(b);
+            off = off.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        }
+        Ok(h.finish())
     }
 
     /// Calls `f` until it succeeds or fails for good. Transient failures
@@ -480,18 +580,22 @@ impl<'a> PostSetupRunner<'a> {
     }
 
     fn steps(&self, s: &mut Session<'_>) -> Result<Ready, JobFailureV2> {
-        let Loaded { plan, job_key } = self.load(&mut *s.platform)?;
-        s.retry = plan.retry;
-        let job = plan.job_id;
-
-        // ---- Step 7: resume, tags, escrow then set, answer file. ----
         let st = StepV2::WINDOWS_SETUP;
-        let watch = watch_for(self.clock, plan.timeout_s(st), None);
-        self.resume(s, job, &job_key, &watch)?;
-        drop(job_key);
-        let mut rep = ReporterV2::new(job, POSTSETUP_SEQ_BASE);
+        // 1. Minimal checks; 2. resume; 3. the full checks (WU-7a item 9).
+        let read = self.read_inputs(&mut *s.platform)?;
+        let job = read.config.job_id;
+        s.retry = self.config.resume_retry;
+        let resume_watch = watch_for(self.clock, Some(self.config.resume_timeout_s), None);
+        let ack_seq = self.resume(s, job, &read.job_key, &resume_watch)?;
+        let mut rep = ReporterV2::new(job, ack_seq);
         rep.state(&mut *s.link, st, ProgressEvent::StepStarted);
         s.rep = Some(rep);
+        let plan = self.verify_inputs(&mut *s.platform, &read)?;
+        drop(read);
+        s.retry = plan.retry;
+
+        // ---- Step 7: tags, escrow then set, answer file. ----
+        let watch = watch_for(self.clock, plan.timeout_s(st), None);
 
         let tags_json = serde_json::to_string(&plan.tags).map_err(|_| {
             local(
@@ -592,14 +696,15 @@ impl<'a> PostSetupRunner<'a> {
         }
     }
 
-    /// Challenge, sign with the job key, resume.
+    /// Challenge, sign with the job key, resume. Returns the server's
+    /// `ack_seq`.
     fn resume(
         &self,
         s: &mut Session<'_>,
         job: JobId,
         key: &SigningKey,
         watch: &Watch<'_>,
-    ) -> Result<(), JobFailureV2> {
+    ) -> Result<u64, JobFailureV2> {
         let st = StepV2::WINDOWS_SETUP;
         let retry = s.retry;
         let link = &mut *s.link;
@@ -705,12 +810,18 @@ impl<'a> PostSetupRunner<'a> {
         };
         let retry = s.retry;
         let link = &mut *s.link;
-        // 1 and 2: post, and wait for the server's commit.
+        // 1 and 2: post, and wait for the server's commit. A refusal is
+        // `escrow_refused`; a server never reached is `server_unreachable`
+        // (WU-7a item 10).
         self.retrying(&retry, watch, false, || link.submit_escrow(job, &body))
             .map_err(|e| {
                 link_failure(
                     st,
-                    codes::ESCROW_REFUSED,
+                    if e.is_transient() {
+                        code_of(code::SERVER_UNREACHABLE)
+                    } else {
+                        codes::ESCROW_REFUSED
+                    },
                     e,
                     "the server did not store the escrowed password; it was not set",
                 )
@@ -722,11 +833,14 @@ impl<'a> PostSetupRunner<'a> {
                     set: true,
                     code: None,
                 };
-                self.retrying(&retry, watch, false, || link.confirm_escrow(job, &ok))
+                // 4: retried until the step 7 deadline. The password is set
+                // and escrowed either way; the server row stays `received`
+                // ("possibly applied") if this never succeeds.
+                self.retrying(&retry, watch, true, || link.confirm_escrow(job, &ok))
                     .map_err(|e| {
                         link_failure(
                             st,
-                            codes::ESCROW_REFUSED,
+                            codes::ESCROW_CONFIRM_FAILED,
                             e,
                             "the server did not accept the password confirmation",
                         )
@@ -763,25 +877,22 @@ impl<'a> PostSetupRunner<'a> {
             )
         };
         let pkg = self.check_agent_package(&mut *s.platform, plan, st)?;
-        let len = u64::try_from(pkg.len()).unwrap_or(u64::MAX);
         let mut tee = {
             let mut sink = s
                 .platform
                 .agent_sink()
                 .map_err(|e| platform_failure(st, code_of(code::AGENT_PACKAGE_INVALID), e))?;
             let mut tee = Tee::new(&mut *sink);
-            match extract_archive(&pkg.as_slice(), len, &self.config.archive_limits, &mut tee) {
-                // The reader's driver-package rule (REQ-DRV-006) is checked
-                // last, after every entry was decoded, checked and written;
-                // an agent package holds no INF, so that refusal alone is
-                // the expected result here.
-                Ok(_) | Err(ArchiveError::NoInfPackages) => {}
-                Err(e) => {
-                    return Err(invalid(format!(
-                        "the agent package could not be extracted: {e}"
-                    )));
-                }
-            }
+            // `Plain`: an agent package holds no INF; every other bound
+            // applies (WU-7a item 8).
+            extract_archive_mode(
+                &*pkg.reader,
+                pkg.len,
+                &self.config.archive_limits,
+                ArchiveMode::Plain,
+                &mut tee,
+            )
+            .map_err(|e| invalid(format!("the agent package could not be extracted: {e}")))?;
             tee.finish()
         };
         drop(pkg);

@@ -10,8 +10,10 @@
 //!   `succeeded` or `failed`) is delivered with retries, after everything
 //!   queued before it.
 //!
-//! The post-setup runner starts its sequence at [`POSTSETUP_SEQ_BASE`]
-//! (see there).
+//! Numbering continues from the last number used: in Windows PE from steps
+//! 1 to 3, and in the post-setup runner from the server's `ack_seq` in the
+//! resume response (M4 plan WU-7a item 5; the server is the authority, so
+//! a lost Windows PE report cannot cause a gap or a collision).
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: AU-12 (Audit Record Generation, basis) - every step
@@ -30,15 +32,6 @@ use usgp_proto::progress::{
 
 use crate::clock::{Clock, Watch, backoff};
 use crate::link::{LinkError, ProgressLinkV2};
-
-/// First sequence number the post-setup runner uses, minus one.
-///
-/// [project rule] The plan says the sequence continues across the restart
-/// (`ProgressV2::seq`), but nothing carries the last Windows PE number to
-/// the runner, and `job.json` is written before step 6 reports. Windows PE
-/// sends far fewer than 2^40 reports, so starting the runner above it keeps
-/// the sequence strictly increasing for the server.
-pub const POSTSETUP_SEQ_BASE: u64 = 1 << 40;
 
 /// Design bound on queued state reports (a job has at most 20).
 const MAX_QUEUED: usize = 32;
@@ -89,6 +82,27 @@ impl ReporterV2 {
             seq: after,
             queue: VecDeque::new(),
             sent: Vec::new(),
+        }
+    }
+
+    /// Reports for `job`, numbered from `after + 1`, with state reports of
+    /// steps 1 to 3 still to send (`pending`, sent first) and those already
+    /// delivered (`sent`).
+    pub(crate) fn with_pending(
+        job: JobId,
+        after: u64,
+        pending: Vec<ProgressV2>,
+        sent: Vec<ProgressV2>,
+    ) -> Self {
+        let mut queue: VecDeque<ProgressV2> = pending.into();
+        while queue.len() > MAX_QUEUED {
+            queue.pop_front();
+        }
+        Self {
+            job,
+            seq: after,
+            queue,
+            sent,
         }
     }
 

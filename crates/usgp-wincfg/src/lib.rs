@@ -6,3 +6,12 @@
 // Parses untrusted input: indexing and slicing that can panic are denied
 // (CLAUDE.md, Engineering Rules: parsers never panic on input).
 #![deny(clippy::indexing_slicing)]
+
+pub mod archive;
+pub mod dism;
+pub mod unattend;
+
+pub use archive::{
+    ArchiveError, ArchiveKind, ArchiveLimits, ArchiveReport, ExtractSink, ReadAt, RelPath,
+    extract_archive, validate_archive,
+};

@@ -64,6 +64,17 @@ closed_enum!(
         /// [`crate::boot_policy::BootPolicyV1`] JSON, signed with the
         /// boot-policy key (M3 plan section 3.6).
         BootPolicyV1 => "application/vnd.usgp.boot-policy.v1+json",
+        /// [`crate::job_plan::JobPlanV2`] JSON, signed with the plan key
+        /// (M4 plan WU-4).
+        JobPlanV2 => "application/vnd.usgp.job-plan.v2+json",
+        /// The resume proof `job_id (16 bytes) || nonce (32 bytes)`,
+        /// signed by the device's job key ([`crate::resume`]; M4 plan
+        /// section 3.1). Never carried in a manifest envelope.
+        ResumeV1 => "application/vnd.usgp.resume.v1",
+        /// An agent package ZIP, signed (detached) by a registered
+        /// agent-package signer key (M4 plan section 1.7). Never carried in
+        /// a manifest envelope.
+        AgentPackageV1 => "application/vnd.usgp.agent-package.v1+zip",
     }
 );
 

@@ -117,4 +117,25 @@ pub enum CryptoError {
         /// Why the CRL was refused.
         reason: &'static str,
     },
+
+    /// An escrow input was refused before decryption (wrong key id, bad
+    /// field length, bad account name). Never carries secret bytes.
+    #[error("escrow refused: {reason}")]
+    Escrow {
+        /// Why the input was refused.
+        reason: &'static str,
+    },
+
+    /// AEAD authentication failed. No detail is given on purpose.
+    #[error("decryption failed")]
+    DecryptionFailed,
+
+    /// A requested password length is outside the accepted range.
+    #[error("password length must be between {min} and {max}")]
+    PasswordLength {
+        /// Shortest accepted length.
+        min: usize,
+        /// Longest accepted length.
+        max: usize,
+    },
 }

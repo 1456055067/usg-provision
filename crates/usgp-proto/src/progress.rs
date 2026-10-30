@@ -10,6 +10,10 @@
 //! need the job's history (sequence numbers, step order, `succeeded` only
 //! after step 4) are the server's (`usgp-api`), using
 //! [`JobState::can_become`] and [`Step::next`].
+//!
+//! M4 (M4 plan WU-4): progress schema 2 for v2 jobs, with the nine steps
+//! of REQ-SEQ-002 ([`StepV2`], [`StepKindV2`]), [`ProgressV2`] and
+//! [`FailureV2`]. The v1 types are unchanged and stay for v1 jobs.
 
 // COMPLIANCE MAPPING:
 // - NIST 800-53: SI-10 (Information Input Validation) - closed value sets,
@@ -206,6 +210,12 @@ closed_enum!(
         Image => "image",
         /// Image metadata.
         Metadata => "metadata",
+        /// A driver archive (M4).
+        DriverArchive => "driver_archive",
+        /// The agent package (M4).
+        AgentPackage => "agent_package",
+        /// The answer file (M4).
+        AnswerFile => "answer_file",
     }
 );
 
@@ -271,6 +281,16 @@ pub enum ProgressDataError {
     /// The failure names a different step from the report.
     #[error("the failure's step differs from the report's step")]
     FailureStepMismatch,
+    /// `schema` is not [`PROGRESS_SCHEMA_V2`] (v2 reports only).
+    #[error("progress schema must be 2")]
+    BadSchema,
+    /// A `succeeded` event on a step other than the last (v2 reports
+    /// only; REQ-SEQ-006).
+    #[error("succeeded may be reported only on step 9")]
+    SucceededBeforeLastStep,
+    /// `restart_pending` on anything but step 8 `step_completed`.
+    #[error("restart_pending is allowed only on step 8 step_completed")]
+    RestartPendingMisplaced,
 }
 
 #[derive(serde::Deserialize)]
@@ -445,6 +465,343 @@ pub struct ProgressAckV1 {
     pub job_state: JobState,
 }
 
+// ---------------------------------------------------------------------------
+// M4: progress schema 2, nine steps (M4 plan WU-4, section 0 item 4)
+// ---------------------------------------------------------------------------
+
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-10 (Information Input Validation) - closed step set,
+//   self-consistency of each v2 report.
+// - NIST 800-53: AU-12 (Audit Record Generation, basis) - steps 1 to 9
+//   are the units the server audits (REQ-SEQ-007).
+// - SPEC: specs/workflow.md#REQ-SEQ-002 (nine steps in order),
+//   #REQ-SEQ-006 (success only after the last step), #REQ-SEQ-007
+
+/// The progress schema of v2 jobs.
+pub const PROGRESS_SCHEMA_V2: u32 = 2;
+
+closed_enum!(
+    /// What a v2 step does (REQ-SEQ-002; M4 plan section 1.1).
+    StepKindV2, "step kind" {
+        /// Step 1: download and verify all content (image, driver
+        /// archives, agent package).
+        VerifyContent => "verify_content",
+        /// Step 2: wipe, partition and format.
+        PartitionFormat => "partition_format",
+        /// Step 3: apply the image.
+        ApplyImage => "apply_image",
+        /// Step 4: add drivers to the applied image.
+        AddDrivers => "add_drivers",
+        /// Step 5: place the answer file and post-setup files.
+        PlaceConfig => "place_config",
+        /// Step 6: make the disk bootable and restart.
+        MakeBootableRestart => "make_bootable_restart",
+        /// Step 7: Windows setup, tags, administrator password.
+        WindowsSetup => "windows_setup",
+        /// Step 8: install the management agent.
+        InstallAgent => "install_agent",
+        /// Step 9: report the endpoint ready.
+        ReportReady => "report_ready",
+    }
+);
+
+/// A v2 job step, 1 to 9 (JSON integer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
+pub struct StepV2(u8);
+
+/// A step number outside 1 to 9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("step must be 1 to 9")]
+pub struct BadStepV2;
+
+impl StepV2 {
+    /// Step 1, verify content.
+    pub const VERIFY_CONTENT: Self = Self(1);
+    /// Step 2, partition and format.
+    pub const PARTITION_FORMAT: Self = Self(2);
+    /// Step 3, apply the image.
+    pub const APPLY_IMAGE: Self = Self(3);
+    /// Step 4, add drivers.
+    pub const ADD_DRIVERS: Self = Self(4);
+    /// Step 5, place configuration.
+    pub const PLACE_CONFIG: Self = Self(5);
+    /// Step 6, make bootable and restart.
+    pub const MAKE_BOOTABLE_RESTART: Self = Self(6);
+    /// Step 7, Windows setup.
+    pub const WINDOWS_SETUP: Self = Self(7);
+    /// Step 8, install the agent.
+    pub const INSTALL_AGENT: Self = Self(8);
+    /// Step 9, report ready.
+    pub const REPORT_READY: Self = Self(9);
+    /// The last step.
+    pub const LAST: Self = Self::REPORT_READY;
+    /// All steps in order.
+    pub const ALL: [Self; 9] = [
+        Self::VERIFY_CONTENT,
+        Self::PARTITION_FORMAT,
+        Self::APPLY_IMAGE,
+        Self::ADD_DRIVERS,
+        Self::PLACE_CONFIG,
+        Self::MAKE_BOOTABLE_RESTART,
+        Self::WINDOWS_SETUP,
+        Self::INSTALL_AGENT,
+        Self::REPORT_READY,
+    ];
+
+    /// The step with this number.
+    ///
+    /// # Errors
+    ///
+    /// [`BadStepV2`] outside 1 to 9.
+    pub const fn new(n: u8) -> Result<Self, BadStepV2> {
+        if n >= 1 && n <= 9 {
+            Ok(Self(n))
+        } else {
+            Err(BadStepV2)
+        }
+    }
+
+    /// The number, 1 to 9.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    /// What the step does.
+    #[must_use]
+    pub const fn kind(self) -> StepKindV2 {
+        match self.0 {
+            1 => StepKindV2::VerifyContent,
+            2 => StepKindV2::PartitionFormat,
+            3 => StepKindV2::ApplyImage,
+            4 => StepKindV2::AddDrivers,
+            5 => StepKindV2::PlaceConfig,
+            6 => StepKindV2::MakeBootableRestart,
+            7 => StepKindV2::WindowsSetup,
+            8 => StepKindV2::InstallAgent,
+            _ => StepKindV2::ReportReady,
+        }
+    }
+
+    /// The step after this one, or `None` after step 9.
+    #[must_use]
+    pub const fn next(self) -> Option<Self> {
+        if self.0 < 9 {
+            Some(Self(self.0 + 1))
+        } else {
+            None
+        }
+    }
+
+    /// `true` for steps 7 to 9, which run in the installed Windows and
+    /// report with the resume token, not the session token (M4 plan
+    /// section 3.1).
+    #[must_use]
+    pub const fn runs_after_restart(self) -> bool {
+        self.0 >= 7
+    }
+}
+
+impl fmt::Display for StepV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.0, self.kind())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StepV2 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let n = u8::deserialize(d)?;
+        Self::new(n).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailureV2Wire {
+    step: StepV2,
+    category: FailureCategory,
+    code: ErrorCode,
+    #[serde(default)]
+    files: Vec<ProgressItemV1>,
+    count: u32,
+    attempts: u32,
+}
+
+/// A v2 failure: as [`FailureV1`], for steps 1 to 9.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "FailureV2Wire")]
+pub struct FailureV2 {
+    /// Step that failed.
+    pub step: StepV2,
+    /// Category.
+    pub category: FailureCategory,
+    /// Reason code (for example `driver_not_staged:<archive>:<inf>`).
+    pub code: ErrorCode,
+    /// Files that failed (at most [`MAX_FAILED_FILES`]).
+    pub files: Vec<ProgressItemV1>,
+    /// How many files failed (at least `files.len()`).
+    pub count: u32,
+    /// Attempts made (1 to [`MAX_REPORTED_ATTEMPTS`]).
+    pub attempts: u32,
+}
+
+impl TryFrom<FailureV2Wire> for FailureV2 {
+    type Error = ProgressDataError;
+
+    fn try_from(w: FailureV2Wire) -> Result<Self, Self::Error> {
+        let f = Self {
+            step: w.step,
+            category: w.category,
+            code: w.code,
+            files: w.files,
+            count: w.count,
+            attempts: w.attempts,
+        };
+        f.validate()?;
+        Ok(f)
+    }
+}
+
+impl FailureV2 {
+    /// Checks the bounds (as [`FailureV1::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// [`ProgressDataError`].
+    pub fn validate(&self) -> Result<(), ProgressDataError> {
+        if self.files.len() > MAX_FAILED_FILES {
+            return Err(ProgressDataError::TooManyFiles);
+        }
+        if usize::try_from(self.count).is_ok_and(|c| c < self.files.len()) {
+            return Err(ProgressDataError::CountBelowFiles);
+        }
+        if self.attempts == 0 || self.attempts > MAX_REPORTED_ATTEMPTS {
+            return Err(ProgressDataError::BadAttempts);
+        }
+        Ok(())
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressV2Wire {
+    schema: u32,
+    seq: u64,
+    step: StepV2,
+    event: ProgressEvent,
+    #[serde(default)]
+    bytes_done: Option<u64>,
+    #[serde(default)]
+    bytes_total: Option<u64>,
+    #[serde(default)]
+    item: Option<ProgressItemV1>,
+    #[serde(default)]
+    layout: Option<LayoutReportV1>,
+    #[serde(default)]
+    restart_pending: Option<bool>,
+    #[serde(default)]
+    failure: Option<FailureV2>,
+}
+
+/// A v2 progress report (schema 2; M4 plan section 3.1). Steps 1 to 6
+/// are sent with the session token, steps 7 to 9 with the resume token
+/// (the server enforces which).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "ProgressV2Wire")]
+pub struct ProgressV2 {
+    /// Always [`PROGRESS_SCHEMA_V2`].
+    pub schema: u32,
+    /// Strictly increasing per job, from 1 (continues across the
+    /// restart).
+    pub seq: u64,
+    /// Current step.
+    pub step: StepV2,
+    /// What happened.
+    pub event: ProgressEvent,
+    /// Bytes done in the step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_done: Option<u64>,
+    /// Bytes the step will handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    /// File being fetched or written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<ProgressItemV1>,
+    /// The layout written (after step 2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutReportV1>,
+    /// The agent installer asked for a restart (exit 3010), which the
+    /// runner never performs; only on step 8 `step_completed` (M4 plan
+    /// section 1.7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_pending: Option<bool>,
+    /// The failure, on and only on a `failed` event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureV2>,
+}
+
+impl TryFrom<ProgressV2Wire> for ProgressV2 {
+    type Error = ProgressDataError;
+
+    fn try_from(w: ProgressV2Wire) -> Result<Self, Self::Error> {
+        let p = Self {
+            schema: w.schema,
+            seq: w.seq,
+            step: w.step,
+            event: w.event,
+            bytes_done: w.bytes_done,
+            bytes_total: w.bytes_total,
+            item: w.item,
+            layout: w.layout,
+            restart_pending: w.restart_pending,
+            failure: w.failure,
+        };
+        p.validate()?;
+        Ok(p)
+    }
+}
+
+impl ProgressV2 {
+    /// Checks what one report can say about itself.
+    ///
+    /// # Errors
+    ///
+    /// [`ProgressDataError`].
+    pub fn validate(&self) -> Result<(), ProgressDataError> {
+        if self.schema != PROGRESS_SCHEMA_V2 {
+            return Err(ProgressDataError::BadSchema);
+        }
+        if self.seq == 0 {
+            return Err(ProgressDataError::BadSeq);
+        }
+        if let (Some(done), Some(total)) = (self.bytes_done, self.bytes_total)
+            && done > total
+        {
+            return Err(ProgressDataError::BytesOverTotal);
+        }
+        if self.event == ProgressEvent::Succeeded && self.step != StepV2::LAST {
+            return Err(ProgressDataError::SucceededBeforeLastStep);
+        }
+        if self.restart_pending.is_some()
+            && !(self.step == StepV2::INSTALL_AGENT && self.event == ProgressEvent::StepCompleted)
+        {
+            return Err(ProgressDataError::RestartPendingMisplaced);
+        }
+        match (&self.failure, self.event == ProgressEvent::Failed) {
+            (Some(f), true) => {
+                f.validate()?;
+                if f.step != self.step {
+                    return Err(ProgressDataError::FailureStepMismatch);
+                }
+            }
+            (None, false) => {}
+            _ => return Err(ProgressDataError::FailureMismatch),
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +864,74 @@ mod tests {
         for c in FailureCategory::ALL {
             assert_eq!(c.may_retry(), *c == FailureCategory::Network);
         }
+    }
+
+    #[test]
+    fn steps_v2() {
+        assert!(StepV2::new(0).is_err());
+        assert!(StepV2::new(10).is_err());
+        let kinds: Vec<_> = StepV2::ALL.iter().map(|s| s.kind().as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "verify_content",
+                "partition_format",
+                "apply_image",
+                "add_drivers",
+                "place_config",
+                "make_bootable_restart",
+                "windows_setup",
+                "install_agent",
+                "report_ready"
+            ]
+        );
+        let all: Vec<_> = StepKindV2::ALL.to_vec();
+        let by_step: Vec<_> = StepV2::ALL.iter().map(|s| s.kind()).collect();
+        assert_eq!(all, by_step);
+        for (i, s) in StepV2::ALL.iter().enumerate() {
+            assert_eq!(usize::from(s.get()), i + 1);
+            assert_eq!(s.runs_after_restart(), s.get() >= 7);
+        }
+        assert_eq!(StepV2::INSTALL_AGENT.next(), Some(StepV2::REPORT_READY));
+        assert_eq!(StepV2::REPORT_READY.next(), None);
+        assert!(serde_json::from_str::<StepV2>("10").is_err());
+        assert_eq!(serde_json::from_str::<StepV2>("9").unwrap(), StepV2::LAST);
+    }
+
+    fn v2(json: &str) -> Result<ProgressV2, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    #[test]
+    fn progress_v2_rules() {
+        let ok = v2(r#"{"schema":2,"seq":1,"step":7,"event":"step_started"}"#).unwrap();
+        assert_eq!(ok.step, StepV2::WINDOWS_SETUP);
+        let back = serde_json::to_string(&ok).unwrap();
+        assert_eq!(v2(&back).unwrap(), ok);
+        // Schema 1 or missing schema refused.
+        assert!(v2(r#"{"schema":1,"seq":1,"step":1,"event":"step_started"}"#).is_err());
+        assert!(v2(r#"{"seq":1,"step":1,"event":"step_started"}"#).is_err());
+        // Succeeded only on step 9.
+        assert!(v2(r#"{"schema":2,"seq":5,"step":6,"event":"succeeded"}"#).is_err());
+        assert!(v2(r#"{"schema":2,"seq":5,"step":9,"event":"succeeded"}"#).is_ok());
+        // restart_pending only on step 8 step_completed.
+        assert!(
+            v2(r#"{"schema":2,"seq":5,"step":8,"event":"step_completed","restart_pending":true}"#)
+                .is_ok()
+        );
+        assert!(
+            v2(r#"{"schema":2,"seq":5,"step":9,"event":"step_completed","restart_pending":true}"#)
+                .is_err()
+        );
+        // Failures, with M4 codes and roles.
+        let f = r#"{"schema":2,"seq":3,"step":4,"event":"failed","failure":{"step":4,"category":"local","code":"driver_not_staged:abc:x.inf","files":[{"role":"driver_archive","name":"net.zip"}],"count":1,"attempts":1}}"#;
+        assert_eq!(
+            v2(f).unwrap().failure.unwrap().code.base(),
+            "driver_not_staged"
+        );
+        let wrong_step = f.replace(r#""failure":{"step":4"#, r#""failure":{"step":5"#);
+        assert!(v2(&wrong_step).is_err());
+        assert!(v2(r#"{"schema":2,"seq":3,"step":4,"event":"failed"}"#).is_err());
+        assert!(v2(r#"{"schema":2,"seq":3,"step":4,"event":"progress","x":1}"#).is_err());
     }
 }

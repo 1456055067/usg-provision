@@ -29,6 +29,9 @@
 //! - [`fsquery`] and [`manifest`]: read-only file metadata and the
 //!   canonical tree manifest (`examples/tree_manifest.rs`).
 //!
+//! - [`acl`], [`account`] and [`memlock`] (M4): a SYSTEM-only protected
+//!   DACL, the built-in Administrator (RID 500) and a locked page for its
+//!   password (topic 23 §20, §30, §31);
 //! - [`format`] (with the OS-neutral [`diskpart`]): formatting one new
 //!   volume with DiskPart, shared by the agent and the VHD tests;
 //! - [`fs`]: the tree writer behind `winsink::WinSink` (feature `sink`,
@@ -59,6 +62,10 @@ mod privscope;
 pub mod parse;
 
 #[cfg(any(windows, test))]
+pub mod account;
+#[cfg(any(windows, test))]
+pub mod acl;
+#[cfg(any(windows, test))]
 pub mod diskpart;
 #[cfg(any(windows, test))]
 pub mod fsvalues;
@@ -87,6 +94,8 @@ pub mod fs;
 pub mod fsquery;
 #[cfg(windows)]
 pub mod manifest;
+#[cfg(windows)]
+pub mod memlock;
 #[cfg(windows)]
 pub mod net;
 #[cfg(windows)]

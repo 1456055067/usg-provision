@@ -1086,12 +1086,15 @@ version = "0.0.0"
 dependencies = [
  "usgp-image",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
 name = "usgp-wincfg"
 version = "0.0.0"
 dependencies = [
+ "quick-xml",
+ "thiserror",
  "usgp-common",
 ]
 

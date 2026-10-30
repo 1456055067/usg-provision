@@ -28,6 +28,18 @@
 //! - [`Note`]: an operator note on a code or refusal; 1 to 200 Unicode
 //!   scalar values, no control characters.
 //!
+//! M4 (M4 plan sections 1.5 to 1.7):
+//!
+//! - [`Tag`]: 1 to 128 Unicode scalar values, no control characters.
+//! - [`RelPath`]: a relative path inside an archive, `/`-separated, with
+//!   the archive reader's name rules (no traversal, no device names).
+//! - [`ServiceName`]: 1 to 256 Unicode scalar values; no `/`, `\` or
+//!   control characters.
+//! - [`InstallerArg`]: 0 to 1024 Unicode scalar values; no control
+//!   characters and no `{{`.
+//! - [`UrlPath`]: an absolute URL path of unreserved characters
+//!   (RFC 3986 §2.3) and `/`, no empty, `.` or `..` segment.
+//!
 //! "Printable ASCII" means U+0020 to U+007E.
 //!
 //! "Control character" means a character in the Unicode general category
@@ -50,10 +62,12 @@
 
 use std::fmt;
 
+use crate::limits::MAX_AGENT_ARG_CHARS;
 use crate::limits::{
     MAX_AGENT_VERSION_BYTES, MAX_DESCRIPTION_CHARS, MAX_DISK_TEXT_CHARS, MAX_DISPLAY_NAME_CHARS,
     MAX_FILE_NAME_BYTES, MAX_ITEM_NAME_CHARS, MAX_NOTE_CHARS, MAX_PARTITION_LABEL_CHARS,
-    MAX_WIM_TEXT_CHARS,
+    MAX_REL_PATH_BYTES, MAX_REL_PATH_DEPTH, MAX_REL_PATH_SEGMENT_UNITS, MAX_SERVICE_NAME_CHARS,
+    MAX_TAG_CHARS, MAX_URL_PATH_BYTES, MAX_WIM_TEXT_CHARS,
 };
 
 /// Why a name was rejected. The text is never echoed.
@@ -336,6 +350,173 @@ text_type!(
     "a note (1-200 characters, no control characters)"
 );
 
+text_type!(
+    /// A provisioning tag (REQ-CFG-009): 1 to 128 Unicode scalar values,
+    /// no control characters (M4 plan section 1.6).
+    Tag,
+    |s| check_chars(s, 1, MAX_TAG_CHARS),
+    "a tag (1-128 characters, no control characters)"
+);
+
+text_type!(
+    /// A relative path inside a driver or agent archive (M4 plan section
+    /// 1.5): 1 to 1024 bytes, `/`-separated, at most 32 levels; each
+    /// segment non-empty, not `.` or `..`, at most 255 UTF-16 units, no
+    /// `\ : * ? " < > |` or control characters, no trailing dot or space,
+    /// and not a Windows device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9,
+    /// with any extension).
+    RelPath,
+    check_rel_path,
+    "a relative archive path"
+);
+
+text_type!(
+    /// A Windows service name to check after the agent install (M4 plan
+    /// section 1.7): 1 to 256 Unicode scalar values; no `/`, `\` or
+    /// control characters.
+    ServiceName,
+    check_service_name,
+    "a service name (1-256 characters, no '/', '\\' or control characters)"
+);
+
+text_type!(
+    /// One agent installer argument (M4 plan section 1.7): 0 to 1024
+    /// Unicode scalar values, no control characters, and no `{{` (no
+    /// template reference can reach a command line).
+    InstallerArg,
+    check_installer_arg,
+    "an installer argument (up to 1024 characters, no control characters, no '{{')"
+);
+
+text_type!(
+    /// An absolute URL path (RFC 3986 §3.3) of unreserved characters
+    /// (§2.3) and `/`: at most 256 bytes, starts with `/`, no empty, `.`
+    /// or `..` segment.
+    UrlPath,
+    check_url_path,
+    "an absolute URL path"
+);
+
+fn is_device_name(seg: &str) -> bool {
+    let stem = seg.split('.').next().unwrap_or(seg).trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => {
+            let b = upper.as_bytes();
+            b.len() == 4
+                && (b.starts_with(b"COM") || b.starts_with(b"LPT"))
+                && b.get(3).is_some_and(|d| (b'1'..=b'9').contains(d))
+        }
+    }
+}
+
+fn check_rel_path(s: &str) -> Result<(), NameError> {
+    if s.is_empty() {
+        return Err(NameError::Empty);
+    }
+    if s.len() > MAX_REL_PATH_BYTES {
+        return Err(NameError::TooLong {
+            len: s.len(),
+            max: MAX_REL_PATH_BYTES,
+            unit: "bytes",
+        });
+    }
+    if let Some(position) = s
+        .chars()
+        .position(|c| c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err(NameError::InvalidCharacter { position });
+    }
+    let depth = s.split('/').count();
+    if depth > MAX_REL_PATH_DEPTH {
+        return Err(NameError::TooLong {
+            len: depth,
+            max: MAX_REL_PATH_DEPTH,
+            unit: "levels",
+        });
+    }
+    for seg in s.split('/') {
+        if seg.is_empty() {
+            return Err(NameError::Empty);
+        }
+        if seg == "." || seg == ".." || is_device_name(seg) {
+            return Err(NameError::Reserved);
+        }
+        if seg.ends_with('.') || seg.ends_with(' ') {
+            return Err(NameError::Reserved);
+        }
+        let units = seg.encode_utf16().count();
+        if units > MAX_REL_PATH_SEGMENT_UNITS {
+            return Err(NameError::TooLong {
+                len: units,
+                max: MAX_REL_PATH_SEGMENT_UNITS,
+                unit: "UTF-16 units",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_service_name(s: &str) -> Result<(), NameError> {
+    check_chars(s, 1, MAX_SERVICE_NAME_CHARS)?;
+    if let Some(position) = s.chars().position(|c| c == '/' || c == '\\') {
+        return Err(NameError::InvalidCharacter { position });
+    }
+    Ok(())
+}
+
+fn check_installer_arg(s: &str) -> Result<(), NameError> {
+    check_chars(s, 0, MAX_AGENT_ARG_CHARS)?;
+    if let Some(byte) = s.find("{{") {
+        let position = s.get(..byte).map_or(0, |p| p.chars().count());
+        return Err(NameError::InvalidCharacter { position });
+    }
+    Ok(())
+}
+
+fn check_url_path(s: &str) -> Result<(), NameError> {
+    if s.is_empty() {
+        return Err(NameError::Empty);
+    }
+    if s.len() > MAX_URL_PATH_BYTES {
+        return Err(NameError::TooLong {
+            len: s.len(),
+            max: MAX_URL_PATH_BYTES,
+            unit: "bytes",
+        });
+    }
+    if let Some(position) = s
+        .chars()
+        .position(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | '/')))
+    {
+        return Err(NameError::InvalidCharacter { position });
+    }
+    let Some(rest) = s.strip_prefix('/') else {
+        return Err(NameError::InvalidCharacter { position: 0 });
+    };
+    for seg in rest.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err(NameError::Reserved);
+        }
+    }
+    Ok(())
+}
+
+impl RelPath {
+    /// `true` if the last segment ends with `ext` (ASCII case-insensitive,
+    /// `ext` given with its dot, for example `".inf"`).
+    #[must_use]
+    pub fn has_extension(&self, ext: &str) -> bool {
+        let n = self.0.len();
+        n > ext.len()
+            && self
+                .0
+                .get(n - ext.len()..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(ext))
+    }
+}
+
 impl DiskText {
     /// Builds disk text from what a device reports: each character that
     /// is not printable ASCII becomes `?`, and only the first 64
@@ -578,6 +759,46 @@ mod tests {
         assert_eq!(l.as_str().chars().count(), 32);
         assert!(l.as_str().starts_with("Rec?é"));
         assert!(PartitionLabel::new(l.as_str()).is_ok());
+    }
+
+    #[test]
+    fn m4_text_types() {
+        assert!(Tag::new("site:hq").is_ok());
+        assert!(Tag::new("").is_err());
+        assert!(Tag::new("a\nb").is_err());
+        assert!(Tag::new("x".repeat(129)).is_err());
+
+        for ok in ["a.inf", "x64/Net/e1d.inf", "dir with space/file.INF"] {
+            assert!(RelPath::new(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "/a", "a/", "a//b", "./a", "a/../b", "..", "a\\b", "c:x", "CON", "nul.txt",
+            "Com1.inf", "lpt9", "a./b", "a /b", "a\u{0}b", "a*b",
+        ] {
+            assert!(RelPath::new(bad).is_err(), "{bad:?}");
+        }
+        assert!(RelPath::new("com0").is_ok());
+        assert!(RelPath::new(["a"; 33].join("/")).is_err());
+        assert!(RelPath::new(["a"; 32].join("/")).is_ok());
+        assert!(RelPath::new("x".repeat(256)).is_err());
+        assert!(RelPath::new("x".repeat(1025)).is_err());
+        let p = RelPath::new("drv/E1D.Inf").unwrap();
+        assert!(p.has_extension(".inf") && !p.has_extension(".exe"));
+        assert!(!RelPath::new("inf").unwrap().has_extension(".inf"));
+
+        assert!(ServiceName::new("agentsvc").is_ok());
+        assert!(ServiceName::new("a/b").is_err());
+        assert!(ServiceName::new("").is_err());
+
+        assert!(InstallerArg::new("").is_ok());
+        assert!(InstallerArg::new("/quiet").is_ok());
+        assert!(InstallerArg::new("X={{computer_name}}").is_err());
+        assert!(InstallerArg::new("a\tb").is_err());
+
+        assert!(UrlPath::new("/v1/device/jobs/abc-1/resume").is_ok());
+        for bad in ["", "v1", "/", "/a//b", "/a/../b", "/a?b", "/a b", "/a/"] {
+            assert!(UrlPath::new(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

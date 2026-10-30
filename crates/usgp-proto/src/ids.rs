@@ -189,6 +189,17 @@ uuid_id!(
     BootStopId,
     "BootStopId"
 );
+uuid_id!(
+    /// A driver archive record (M4 plan section 3.5; the id is kept when
+    /// the archive is replaced, REQ-DRV-003).
+    DriverArchiveId,
+    "DriverArchiveId"
+);
+uuid_id!(
+    /// An agent package record (M4 plan section 3.5).
+    AgentPackageId,
+    "AgentPackageId"
+);
 
 /// A UTC timestamp in microseconds since the Unix epoch (JSON integer).
 /// Negative values are refused.

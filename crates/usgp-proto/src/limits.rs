@@ -154,3 +154,69 @@ pub const MAX_REPORT_INTERVAL_S: u32 = 3600;
 
 /// Most failed attempts reported for one step (project limit).
 pub const MAX_REPORTED_ATTEMPTS: u32 = 10_000;
+
+// ---------------------------------------------------------------------------
+// M4: configuration, drivers, post-setup and escrow (M4 plan WU-4)
+// ---------------------------------------------------------------------------
+
+/// Largest answer file carried in a v2 job plan (M4 plan section 1.6 and
+/// 3.6: `answer_file.max_bytes`, 1 MiB).
+pub const MAX_ANSWER_FILE_BYTES: usize = 1024 * 1024;
+
+/// Most driver archives in one package or plan (M4 plan section 3.2:
+/// `archive_ids` at most 64).
+pub const MAX_PLAN_DRIVERS: usize = 64;
+
+/// Most INF packages listed for one driver archive (project limit; the
+/// plan bounds the archive's entries at 100 000 but not its INF count).
+pub const MAX_ARCHIVE_INFS: usize = 4096;
+
+/// Longest relative path inside an archive, in bytes (M4 plan section
+/// 1.5: name at most 1 024 bytes).
+pub const MAX_REL_PATH_BYTES: usize = 1024;
+
+/// Most levels in a relative path (M4 plan section 1.5).
+pub const MAX_REL_PATH_DEPTH: usize = 32;
+
+/// Longest path segment, in UTF-16 code units (M4 plan section 1.5).
+pub const MAX_REL_PATH_SEGMENT_UNITS: usize = 255;
+
+/// Most tags per package or plan (M4 plan section 1.6).
+pub const MAX_TAGS: usize = 64;
+
+/// Longest tag, in Unicode scalar values (M4 plan section 1.6).
+pub const MAX_TAG_CHARS: usize = 128;
+
+/// Longest URL path carried in a plan (project limit).
+pub const MAX_URL_PATH_BYTES: usize = 256;
+
+/// Largest escrow ciphertext, in bytes (M4 plan section 3.1).
+pub const MAX_ESCROW_CT_BYTES: usize = 512;
+
+/// Most installer arguments in an agent package manifest (plan 1.7).
+pub const MAX_AGENT_ARGS: usize = 32;
+
+/// Longest installer argument, in Unicode scalar values (plan 1.7).
+pub const MAX_AGENT_ARG_CHARS: usize = 1024;
+
+/// Most accepted installer exit codes (project limit).
+pub const MAX_AGENT_EXIT_CODES: usize = 32;
+
+/// Longest Windows service name, in Unicode scalar values (project limit).
+pub const MAX_SERVICE_NAME_CHARS: usize = 256;
+
+/// Largest `agent.json` accepted (project limit).
+pub const MAX_AGENT_MANIFEST_BYTES: usize = 64 * 1024;
+
+/// Largest post-setup `job.json` accepted: one plan envelope plus the
+/// trust anchors and framing (project limit).
+pub const MAX_POSTSETUP_CONFIG_BYTES: usize = MAX_ENVELOPE_BYTES + 1024 * 1024;
+
+/// Largest PEM text (trust anchors or the plan key) in `job.json`
+/// (project limit).
+pub const MAX_POSTSETUP_PEM_BYTES: usize = 256 * 1024;
+
+/// Largest v2 confirm response the agent parses: the plan, the image
+/// manifest, and the driver and agent manifests (project limit; each
+/// envelope is also bounded by [`MAX_ENVELOPE_BYTES`]).
+pub const MAX_CONFIRM_V2_RESPONSE_BYTES: usize = 4 * MAX_ENVELOPE_BYTES;

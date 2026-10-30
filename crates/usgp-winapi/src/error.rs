@@ -68,6 +68,25 @@ pub enum WinApiError {
         /// Why.
         reason: &'static str,
     },
+    /// A local-account call (`NetUserGetInfo`, `NetUserSetInfo`) failed
+    /// with this `NET_API_STATUS` (topic 23 §30.1: the return value is the
+    /// error). `NERR_PasswordTooShort` means "policy rejected" (§30.1).
+    NetApi {
+        /// What was being done.
+        op: &'static str,
+        /// The status value.
+        code: u32,
+    },
+    /// Memory could not be locked, even after raising the working-set
+    /// minimum as topic 23 §31 describes (OPEN-WAPI-24). The secret is not
+    /// placed in unlocked memory: the caller fails closed.
+    MemoryNotLocked {
+        /// OS error code of the last attempt, if any.
+        os_code: Option<i32>,
+    },
+    /// An unlock found pages no longer locked (`ERROR_NOT_LOCKED`): the
+    /// lock silently failed or was undone (topic 23 §31 [reading]).
+    LockLost,
 }
 
 impl WinApiError {
@@ -106,6 +125,11 @@ impl fmt::Display for WinApiError {
                 "short name could not be set on the target volume (OS code {os_code:?})"
             ),
             Self::Refused { reason } => write!(f, "refused: {reason}"),
+            Self::NetApi { op, code } => write!(f, "{op} failed: status {code}"),
+            Self::MemoryNotLocked { os_code } => {
+                write!(f, "memory could not be locked (OS code {os_code:?})")
+            }
+            Self::LockLost => f.write_str("locked memory was found unlocked"),
         }
     }
 }

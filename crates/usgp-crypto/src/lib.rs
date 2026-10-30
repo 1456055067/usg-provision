@@ -15,7 +15,8 @@
 //! constant-time comparison ([`hmac`]) and a blocking TLS client for the
 //! pre-boot agent ([`tls::BlockingClientTls`]). The `test-pki` feature adds a
 //! test certificate hierarchy ([`test_pki`]); release builds never enable
-//! it. AEAD is deferred to M4 (plan M2 section 1.2). See
+//! it. M4 adds administrator-password escrow (ECDH P-384, HKDF-SHA-384,
+//! AES-256-GCM; [`escrow`]) and random passwords ([`rand`]). See
 //! docs/ARCHITECTURE.md.
 
 // COMPLIANCE MAPPING:
@@ -29,6 +30,7 @@ pub mod crl;
 pub mod digest;
 pub mod envelope;
 pub mod error;
+pub mod escrow;
 pub mod hmac;
 pub mod pem;
 pub mod rand;
@@ -42,8 +44,9 @@ pub use crl::{CrlFacts, CrlNumber, crl_facts};
 pub use digest::{DigestAlgorithm, LegacySha1Hasher, Sha1Digest, Sha256Hasher};
 pub use envelope::{sign_typed, verify_typed};
 pub use error::CryptoError;
+pub use escrow::{EscrowContext, EscrowKey, EscrowPublicKey, SealedV1, escrow_open, escrow_seal};
 pub use hmac::{HmacKey, HmacTag, ct_eq, hmac_sha256};
-pub use rand::fill_random;
+pub use rand::{PASSWORD_ALPHABET, fill_random, random_password};
 pub use sign::{KeyId, SIGNATURE_ALGORITHM, SigningKey, VerifyingKey, verify_signing_input};
 pub use usgp_common::Sha256Digest;
 pub use x509::PeerCertificate;
@@ -87,6 +90,35 @@ pub trait CryptoProvider: Send + Sync + 'static {
     /// [`CryptoError::Random`] if the DRBG fails.
     fn fill_random(&self, buf: &mut [u8]) -> Result<(), CryptoError> {
         rand::fill_random(buf)
+    }
+
+    /// Seals an escrowed secret to the server's escrow key; see
+    /// [`escrow::escrow_seal`].
+    ///
+    /// # Errors
+    ///
+    /// As [`escrow::escrow_seal`].
+    fn escrow_seal(
+        &self,
+        pk: &EscrowPublicKey,
+        ctx: &EscrowContext<'_>,
+        plaintext: &[u8],
+    ) -> Result<SealedV1, CryptoError> {
+        escrow::escrow_seal(pk, ctx, plaintext)
+    }
+
+    /// Opens an escrowed secret; see [`escrow::escrow_open`].
+    ///
+    /// # Errors
+    ///
+    /// As [`escrow::escrow_open`].
+    fn escrow_open(
+        &self,
+        sk: &EscrowKey,
+        ctx: &EscrowContext<'_>,
+        sealed: &SealedV1,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError> {
+        escrow::escrow_open(sk, ctx, sealed)
     }
 }
 

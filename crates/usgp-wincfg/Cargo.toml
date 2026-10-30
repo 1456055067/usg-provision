@@ -8,6 +8,18 @@ publish.workspace = true
 
 [dependencies]
 usgp-common.workspace = true
+quick-xml.workspace = true
+thiserror.workspace = true
+
+[features]
+# `archive::testkit`: test-only ZIP and cabinet writers for other crates'
+# tests (plan WU-2).
+testkit = []
+
+[dev-dependencies]
+# Differential inflate tests only (plan §4, impl-notes-wu0; deny.toml
+# restricts miniz_oxide to this crate). Never a normal dependency.
+miniz_oxide = "0.8"
 
 [lints]
 workspace = true

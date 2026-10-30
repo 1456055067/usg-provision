@@ -347,6 +347,49 @@ pub mod codes {
         /// The boot-policy list failed its signature, boot-service or
         /// generation check; the last good list is kept.
         BOOT_POLICY_REJECTED = "boot_policy_rejected";
+
+        // M4 confirm (M4 plan section 3.1).
+        /// 409 base: `unresolved_value:<name>`: a template reference has
+        /// no value; no job is created and nothing is wiped (REQ-CFG-004).
+        UNRESOLVED_VALUE = "unresolved_value";
+
+        // M4 agent-side failures (M4 plan section 3.4; progress v2). A
+        // parameter, where the plan names one, follows after `:`.
+        /// Base: `driver_extract_refused:<archive>:<reason>`.
+        DRIVER_EXTRACT_REFUSED = "driver_extract_refused";
+        /// Base: `driver_add_failed:<archive>:<exit>`.
+        DRIVER_ADD_FAILED = "driver_add_failed";
+        /// Base: `driver_not_staged:<archive>:<inf>` (fail closed,
+        /// decision 0025 item 4).
+        DRIVER_NOT_STAGED = "driver_not_staged";
+        /// The driver staging folder could not be removed, or its removal
+        /// not verified.
+        STAGING_NOT_REMOVED = "staging_not_removed";
+        /// An answer file already exists at the path the agent writes.
+        ANSWER_FILE_EXISTS = "answer_file_exists";
+        /// A `SetupComplete.cmd` already exists at the path the agent
+        /// writes.
+        SETUPCOMPLETE_EXISTS = "setupcomplete_exists";
+        /// The post-setup configuration failed its checks.
+        POSTSETUP_CONFIG_INVALID = "postsetup_config_invalid";
+        /// The job key on disk is not the one the plan names.
+        JOB_KEY_MISMATCH = "job_key_mismatch";
+        /// The server refused the resume proof.
+        RESUME_REFUSED = "resume_refused";
+        /// The server refused the escrow submission.
+        ESCROW_REFUSED = "escrow_refused";
+        /// Base: `admin_password_set_failed:<win32>`.
+        ADMIN_PASSWORD_SET_FAILED = "admin_password_set_failed";
+        /// The tags could not be written.
+        TAGS_WRITE_FAILED = "tags_write_failed";
+        /// The agent package's SHA-256 is not the plan's.
+        AGENT_DIGEST_MISMATCH = "agent_digest_mismatch";
+        /// Base: `agent_install_failed:<exit>`.
+        AGENT_INSTALL_FAILED = "agent_install_failed";
+        /// The agent installer ran past its timeout.
+        AGENT_INSTALL_TIMEOUT = "agent_install_timeout";
+        /// The named agent service was not running in time.
+        AGENT_SERVICE_NOT_RUNNING = "agent_service_not_running";
     }
 }
 

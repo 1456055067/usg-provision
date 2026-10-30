@@ -50,22 +50,28 @@
 use usgp_common::Sha256Digest;
 
 use crate::SignedManifestError;
+use crate::b64::{B64Bytes, P384Spki};
 use crate::content_manifest::ContentManifestV1;
 use crate::device::{AgentNonce, MacList};
 use crate::disk::{DiskDescriptorV1, PlanDiskV1};
 use crate::envelope::{PayloadType, SignatureVerifier, SignedEnvelopeV1};
 use crate::error_code::{ErrorCode, codes};
+use crate::ids::{AgentPackageId, DriverArchiveId};
 use crate::ids::{BootServiceId, JobId, PackageId, SessionId, UnixMicros};
+use crate::limits::{MAX_ANSWER_FILE_BYTES, MAX_ARCHIVE_INFS, MAX_PLAN_DRIVERS, MAX_TAGS};
 use crate::limits::{
     MAX_CONTENT_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_REPORT_INTERVAL_S, MAX_RETRY_ATTEMPTS,
     MAX_RETRY_DELAY_MS, MAX_STEP_TIMEOUT_S,
 };
-use crate::names::{EditionIndex, WimText};
-use crate::progress::{FailureCategory, Step, StepKind};
+use crate::names::{EditionIndex, RelPath, Tag, UrlPath, WimText};
+use crate::progress::{FailureCategory, Step, StepKind, StepKindV2, StepV2};
 use crate::status::ContentKind;
 
-/// The only plan schema version.
+/// The v1 plan schema version.
 pub const SCHEMA_V1: u32 = 1;
+
+/// The v2 plan schema version (M4).
+pub const SCHEMA_V2: u32 = 2;
 
 /// The device the plan is for.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -397,6 +403,18 @@ pub enum PlanError {
     /// plan; the text names the field.
     #[error("content manifest does not match the job plan: {0}")]
     ContentMismatch(&'static str),
+    /// v2: the plan's `job_key_id` is not the key this agent generated.
+    #[error("job plan names another job key")]
+    JobKeyMismatch,
+    /// v2: the escrow key id is not the SHA-256 of the escrow key.
+    #[error("job plan escrow key id does not match its key")]
+    EscrowKeyIdMismatch,
+    /// v2: the answer file's SHA-256 is not the one the plan states.
+    #[error("job plan answer file does not match its digest")]
+    AnswerFileDigest,
+    /// v2: the number of driver manifests is not the plan's.
+    #[error("driver manifests do not match the job plan's driver list")]
+    DriverManifestCount,
 }
 
 impl PlanError {
@@ -416,9 +434,12 @@ impl PlanError {
             | Self::JobMismatch
             | Self::PackageMismatch
             | Self::DiskMismatch => codes::PLAN_BINDING_MISMATCH,
-            Self::ContentManifest(_) | Self::ContentManifestDigest | Self::ContentMismatch(_) => {
-                codes::CONTENT_MANIFEST_MISMATCH
-            }
+            Self::JobKeyMismatch => codes::JOB_KEY_MISMATCH,
+            Self::EscrowKeyIdMismatch | Self::AnswerFileDigest => codes::PLAN_BINDING_MISMATCH,
+            Self::ContentManifest(_)
+            | Self::ContentManifestDigest
+            | Self::ContentMismatch(_)
+            | Self::DriverManifestCount => codes::CONTENT_MANIFEST_MISMATCH,
         }
     }
 }
@@ -520,8 +541,11 @@ impl VerifiedJobPlan {
 }
 
 fn check_content(plan: &JobPlanV1, content: &ContentManifestV1) -> Result<(), PlanError> {
+    check_image(&plan.image, content)
+}
+
+fn check_image(img: &PlanImageV1, content: &ContentManifestV1) -> Result<(), PlanError> {
     use PlanError::ContentMismatch;
-    let img = &plan.image;
     if content.kind != ContentKind::Image {
         return Err(ContentMismatch("kind"));
     }
@@ -544,4 +568,494 @@ fn check_content(plan: &JobPlanV1, content: &ContentManifestV1) -> Result<(), Pl
         return Err(ContentMismatch("total_bytes"));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Job plan, version 2 (M4 plan WU-4)
+// ---------------------------------------------------------------------------
+//
+// The server issues only v2 plans from M4 on; `JobPlanV1` stays so that
+// stored v1 plans still decode. A v2 plan adds the nine steps of
+// REQ-SEQ-002, the rendered answer file, the driver archives with their
+// INF lists, the agent package, the tags, the escrow public key, the id of
+// the device-generated job key and the post-setup resume path. It still
+// carries no secret: the answer file is linted to hold none, and only
+// public keys and key ids appear (M4 plan section 0 item 1).
+
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SI-7, SI-7(6) - signed plan; answer file, driver and
+//   agent content bound by SHA-256 and signed manifests.
+// - NIST 800-53: SC-23 (Session Authenticity) - plan bound to the agent's
+//   nonce and to the job key the agent generated (job_key_id).
+// - NIST 800-53: SC-12 (Cryptographic Key Establishment and Management) -
+//   escrow public key and key id; job key id.
+// - NIST 800-53: SI-10 - strict parse; every list and text bounded.
+// - SPEC: specs/workflow.md#REQ-SEQ-002 (nine steps)
+// - SPEC: specs/configuration.md#REQ-CFG-004 (values resolved before any
+//   disk write), #REQ-CFG-009 (tags)
+// - SPEC: specs/drivers.md#REQ-DRV-006 (INF list)
+// - SPEC: specs/agent-handoff.md#REQ-AGT-001 (agent always installed)
+// - DECISION: docs/decisions/0024, 0025 items 1 and 2
+// - FIPS 186-5 (ECDSA P-384), FIPS 180-4 (SHA-256), RFC 5480 (SPKI)
+
+/// One v2 step and its timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanStepV2 {
+    /// Step number.
+    pub step: StepV2,
+    /// What it does; must match the number.
+    pub kind: StepKindV2,
+    /// Timeout in seconds (1 to [`MAX_STEP_TIMEOUT_S`]).
+    pub timeout_s: u32,
+}
+
+/// The rendered answer file (M4 plan section 1.6): written by the agent
+/// at step 5 to `\Windows\Panther\unattend.xml` after it checks the
+/// SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAnswerFileV2 {
+    /// SHA-256 of the bytes.
+    pub sha256: Sha256Digest,
+    /// The bytes (1 byte to [`MAX_ANSWER_FILE_BYTES`]), padded base64.
+    pub b64: B64Bytes<1, MAX_ANSWER_FILE_BYTES>,
+}
+
+/// One driver archive to add at step 4, in order (M4 plan section 1.4).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDriverV2 {
+    /// The driver archive record.
+    pub archive_id: DriverArchiveId,
+    /// SHA-256 of the archive file.
+    pub content_sha256: Sha256Digest,
+    /// SHA-256 of its signed content manifest's payload.
+    pub content_manifest_sha256: Sha256Digest,
+    /// The INF packages the archive holds (relative paths, each ending in
+    /// `.inf`; 1 to [`MAX_ARCHIVE_INFS`]); every one must be staged.
+    pub infs: Vec<RelPath>,
+}
+
+/// The agent package installed at step 8 (M4 plan section 1.7).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAgentV2 {
+    /// The agent package record.
+    pub agent_package_id: AgentPackageId,
+    /// SHA-256 of the package file (the whole file is re-hashed before
+    /// use).
+    pub content_sha256: Sha256Digest,
+    /// SHA-256 of its signed content manifest's payload.
+    pub content_manifest_sha256: Sha256Digest,
+}
+
+closed_enum!(
+    /// The account whose password is escrowed (decision 0025 item 2: the
+    /// built-in Administrator, located by RID 500, never by name).
+    EscrowAccount, "escrow account" {
+        /// The built-in Administrator account.
+        Administrator => "administrator",
+    }
+);
+
+/// The escrow public key (M4 plan section 1.3). Present only when the
+/// package's `admin_password` mode is `generate_and_escrow`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanEscrowV2 {
+    /// SHA-256 of `spki_b64`'s DER.
+    pub key_id: Sha256Digest,
+    /// The server's ECDH P-384 escrow public key.
+    pub spki_b64: P384Spki,
+    /// The account.
+    pub account: EscrowAccount,
+}
+
+/// Where the post-setup runner re-contacts the server (M4 plan section
+/// 3.1).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanPostSetupV2 {
+    /// URL path of the resume route on the device listener; the
+    /// challenge route is this path plus `/challenge`.
+    pub resume_url_path: UrlPath,
+}
+
+/// Job plan, version 2 (M4 plan WU-4). Payload type
+/// `application/vnd.usgp.job-plan.v2+json`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobPlanV2 {
+    /// Always [`SCHEMA_V2`].
+    pub schema: u32,
+    /// Job.
+    pub job_id: JobId,
+    /// Session that confirmed it.
+    pub session_id: SessionId,
+    /// Boot service the session came through.
+    pub boot_service_id: BootServiceId,
+    /// When the plan was signed (not checked on the device).
+    pub issued_at_us: UnixMicros,
+    /// Key id (SHA-256 of the SPKI DER) of the plan key.
+    pub key_id: Sha256Digest,
+    /// The nonce from the agent's confirm request.
+    pub agent_nonce: AgentNonce,
+    /// Device.
+    pub device: PlanDeviceV1,
+    /// Package.
+    pub package: PlanPackageV1,
+    /// Image edition.
+    pub image: PlanImageV1,
+    /// Disk.
+    pub disk: PlanDiskV1,
+    /// Layout sizes.
+    pub layout_policy: LayoutPolicyV1,
+    /// Wipe authorisation record.
+    pub wipe: PlanWipeV1,
+    /// The nine steps in order.
+    pub steps: Vec<PlanStepV2>,
+    /// Retry policy.
+    pub retry: RetryPolicyV1,
+    /// Seconds without progress before the job is stalled.
+    pub stall_timeout_s: u32,
+    /// Seconds between progress reports.
+    pub report_interval_s: u32,
+    /// The rendered answer file.
+    pub answer_file: PlanAnswerFileV2,
+    /// Driver archives in the order they are added (0 to
+    /// [`MAX_PLAN_DRIVERS`]).
+    pub drivers: Vec<PlanDriverV2>,
+    /// The agent package.
+    pub agent: PlanAgentV2,
+    /// Tags (0 to [`MAX_TAGS`]).
+    pub tags: Vec<Tag>,
+    /// The escrow key, or `None` when no password is set.
+    pub escrow: Option<PlanEscrowV2>,
+    /// Key id (SHA-256 of the SPKI DER) of the device's job key, as sent
+    /// in the confirm request.
+    pub job_key_id: Sha256Digest,
+    /// Post-setup contact.
+    pub postsetup: PlanPostSetupV2,
+}
+
+impl JobPlanV2 {
+    /// Checks every rule a v2 plan must meet beyond its types (the v1
+    /// rules, the nine steps, and the M4 lists). Digest relations need a
+    /// hash function and are checked by [`VerifiedJobPlanV2::verify`].
+    ///
+    /// # Errors
+    ///
+    /// [`SignedManifestError::UnsupportedSchema`] or
+    /// [`SignedManifestError::Invalid`] naming the first rule broken.
+    pub fn validate(&self) -> Result<(), SignedManifestError> {
+        use SignedManifestError::Invalid;
+        if self.schema != SCHEMA_V2 {
+            return Err(SignedManifestError::UnsupportedSchema(self.schema));
+        }
+        if self.package.revision == 0 {
+            return Err(Invalid("package.revision must be at least 1"));
+        }
+        if self.image.size == 0 || self.image.size > MAX_CONTENT_BYTES {
+            return Err(Invalid("image.size must be 1 byte to 1 TiB"));
+        }
+        if self.disk.validate().is_err() {
+            return Err(Invalid("disk geometry is invalid"));
+        }
+        if !self.layout_policy.is_standard() {
+            return Err(Invalid("layout_policy is not the fixed layout"));
+        }
+        if self.disk.size_bytes < self.layout_policy.min_disk_bytes {
+            return Err(Invalid("disk is below layout_policy.min_disk_bytes"));
+        }
+        if self.wipe.audit_seq == 0 {
+            return Err(Invalid("wipe.audit_seq must be at least 1"));
+        }
+        let steps_ok = self.steps.len() == StepV2::ALL.len()
+            && self.steps.iter().zip(StepV2::ALL).all(|(s, want)| {
+                s.step == want
+                    && s.kind == want.kind()
+                    && s.timeout_s >= 1
+                    && s.timeout_s <= MAX_STEP_TIMEOUT_S
+            });
+        if !steps_ok {
+            return Err(Invalid(
+                "steps must be steps 1 to 9 in order with matching kinds and timeouts of 1 s to 7 days",
+            ));
+        }
+        let r = self.retry;
+        if r.attempts == 0
+            || r.attempts > MAX_RETRY_ATTEMPTS
+            || r.base_ms == 0
+            || r.base_ms > r.max_ms
+            || r.max_ms > MAX_RETRY_DELAY_MS
+        {
+            return Err(Invalid(
+                "retry must have 1 to 100 attempts and 1 ms <= base_ms <= max_ms <= 1 hour",
+            ));
+        }
+        if self.stall_timeout_s == 0 || self.stall_timeout_s > MAX_STEP_TIMEOUT_S {
+            return Err(Invalid("stall_timeout_s must be 1 s to 7 days"));
+        }
+        if self.report_interval_s == 0 || self.report_interval_s > MAX_REPORT_INTERVAL_S {
+            return Err(Invalid("report_interval_s must be 1 s to 1 hour"));
+        }
+        if self.drivers.len() > MAX_PLAN_DRIVERS {
+            return Err(Invalid("drivers must list at most 64 archives"));
+        }
+        for (i, d) in self.drivers.iter().enumerate() {
+            if self
+                .drivers
+                .iter()
+                .take(i)
+                .any(|o| o.archive_id == d.archive_id)
+            {
+                return Err(Invalid("drivers must not list an archive twice"));
+            }
+            if d.infs.is_empty() || d.infs.len() > MAX_ARCHIVE_INFS {
+                return Err(Invalid("drivers[].infs must list 1 to 4096 INF paths"));
+            }
+            if !d.infs.iter().all(|p| p.has_extension(".inf")) {
+                return Err(Invalid("drivers[].infs entries must end in .inf"));
+            }
+        }
+        if self.tags.len() > MAX_TAGS {
+            return Err(Invalid("tags must list at most 64 tags"));
+        }
+        Ok(())
+    }
+
+    /// The timeout of `step`, in seconds.
+    #[must_use]
+    pub fn timeout_s(&self, step: StepV2) -> Option<u32> {
+        self.steps
+            .iter()
+            .find(|s| s.step == step)
+            .map(|s| s.timeout_s)
+    }
+
+    /// The exact bytes to sign: compact JSON in field order.
+    ///
+    /// # Errors
+    ///
+    /// As [`JobPlanV2::validate`]; [`SignedManifestError::TooLarge`].
+    pub fn to_payload(&self) -> Result<Vec<u8>, SignedManifestError> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(SignedManifestError::Json)?;
+        if bytes.len() > MAX_MANIFEST_PAYLOAD_BYTES {
+            return Err(SignedManifestError::TooLarge { len: bytes.len() });
+        }
+        Ok(bytes)
+    }
+
+    /// Parses and validates payload bytes. Use only on bytes whose
+    /// signature has been verified, or on the server's own stored copy.
+    ///
+    /// # Errors
+    ///
+    /// [`SignedManifestError::TooLarge`] before parsing;
+    /// [`SignedManifestError::Json`]; or as [`JobPlanV2::validate`].
+    pub fn from_payload(bytes: &[u8]) -> Result<Self, SignedManifestError> {
+        if bytes.len() > MAX_MANIFEST_PAYLOAD_BYTES {
+            return Err(SignedManifestError::TooLarge { len: bytes.len() });
+        }
+        let p: Self = serde_json::from_slice(bytes).map_err(SignedManifestError::Json)?;
+        p.validate()?;
+        Ok(p)
+    }
+
+    /// Verifies the envelope (payload type `job-plan.v2` and a trusted
+    /// plan-key signature), then parses and validates, then checks that
+    /// `key_id` is the key that verified it.
+    ///
+    /// # Errors
+    ///
+    /// [`SignedManifestError::Envelope`] if verification fails (nothing is
+    /// parsed); otherwise as [`JobPlanV2::from_payload`], or
+    /// [`SignedManifestError::KeyIdMismatch`].
+    pub fn open(
+        envelope: &SignedEnvelopeV1,
+        verifier: &dyn SignatureVerifier,
+    ) -> Result<Self, SignedManifestError> {
+        let verified = envelope.verified_payload(PayloadType::JobPlanV2, verifier)?;
+        let p = Self::from_payload(verified.bytes)?;
+        if p.key_id != verified.key_id {
+            return Err(SignedManifestError::KeyIdMismatch);
+        }
+        Ok(p)
+    }
+}
+
+/// What the agent expects a v2 plan to say: the v1 expectations plus the
+/// id of the job key it generated.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanExpectationV2<'a> {
+    /// The v1 checks (nonce, session, job, package, disk).
+    pub base: PlanExpectation<'a>,
+    /// SHA-256 of the job key's SPKI DER sent in the confirm request.
+    pub job_key_id: Sha256Digest,
+}
+
+/// The signed content manifests that come with a v2 plan.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanContentV2<'a> {
+    /// The image's manifest.
+    pub image: &'a SignedEnvelopeV1,
+    /// One manifest per driver archive, in plan order.
+    pub drivers: &'a [SignedEnvelopeV1],
+    /// The agent package's manifest.
+    pub agent: &'a SignedEnvelopeV1,
+}
+
+/// A v2 plan and its content manifests, all verified and bound to this
+/// device's session, job, nonce, disk and job key. Only
+/// [`VerifiedJobPlanV2::verify`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedJobPlanV2 {
+    plan: JobPlanV2,
+    image: ContentManifestV1,
+    drivers: Vec<ContentManifestV1>,
+    agent: ContentManifestV1,
+}
+
+impl VerifiedJobPlanV2 {
+    /// Runs the v1 checks 1 to 6 on a v2 plan, then:
+    ///
+    /// 7. `job_key_id` is the agent's job key;
+    /// 8. the escrow key id is the SHA-256 of the escrow key, and the
+    ///    answer file's SHA-256 is the plan's;
+    /// 9. each driver and the agent manifest: signature with the content
+    ///    key, SHA-256 of the payload against the plan, parse, and the
+    ///    file SHA-256 against the plan.
+    ///
+    /// It stops at the first failure.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError`] naming the check that failed.
+    pub fn verify(
+        plan_envelope: &SignedEnvelopeV1,
+        plan_keys: &dyn SignatureVerifier,
+        content: &PlanContentV2<'_>,
+        content_keys: &dyn SignatureVerifier,
+        sha256: &dyn Fn(&[u8]) -> Sha256Digest,
+        expect: &PlanExpectationV2<'_>,
+    ) -> Result<Self, PlanError> {
+        let base = &expect.base;
+        // 1 and 2.
+        let plan = JobPlanV2::open(plan_envelope, plan_keys).map_err(PlanError::Plan)?;
+        // 3.
+        if plan.agent_nonce != *base.agent_nonce {
+            return Err(PlanError::NonceMismatch);
+        }
+        // 4.
+        if plan.session_id != base.session_id {
+            return Err(PlanError::SessionMismatch);
+        }
+        if plan.job_id != base.job_id {
+            return Err(PlanError::JobMismatch);
+        }
+        if plan.package.id != base.package_id || plan.package.revision != base.package_revision {
+            return Err(PlanError::PackageMismatch);
+        }
+        // 5.
+        if !plan.disk.matches(base.disk) {
+            return Err(PlanError::DiskMismatch);
+        }
+        // 6.
+        let image = open_manifest(
+            content.image,
+            content_keys,
+            sha256,
+            &plan.image.content_manifest_sha256,
+        )?;
+        check_image(&plan.image, &image)?;
+        // 7.
+        if plan.job_key_id != expect.job_key_id {
+            return Err(PlanError::JobKeyMismatch);
+        }
+        // 8.
+        if let Some(e) = &plan.escrow
+            && sha256(e.spki_b64.as_der()) != e.key_id
+        {
+            return Err(PlanError::EscrowKeyIdMismatch);
+        }
+        if sha256(plan.answer_file.b64.as_bytes()) != plan.answer_file.sha256 {
+            return Err(PlanError::AnswerFileDigest);
+        }
+        // 9.
+        if content.drivers.len() != plan.drivers.len() {
+            return Err(PlanError::DriverManifestCount);
+        }
+        let mut drivers = Vec::with_capacity(plan.drivers.len());
+        for (env, d) in content.drivers.iter().zip(&plan.drivers) {
+            let m = open_manifest(env, content_keys, sha256, &d.content_manifest_sha256)?;
+            if m.sha256 != d.content_sha256 {
+                return Err(PlanError::ContentMismatch("drivers[].content_sha256"));
+            }
+            drivers.push(m);
+        }
+        let agent = open_manifest(
+            content.agent,
+            content_keys,
+            sha256,
+            &plan.agent.content_manifest_sha256,
+        )?;
+        if agent.sha256 != plan.agent.content_sha256 {
+            return Err(PlanError::ContentMismatch("agent.content_sha256"));
+        }
+        Ok(Self {
+            plan,
+            image,
+            drivers,
+            agent,
+        })
+    }
+
+    /// The plan.
+    #[must_use]
+    pub const fn plan(&self) -> &JobPlanV2 {
+        &self.plan
+    }
+
+    /// The image's content manifest.
+    #[must_use]
+    pub const fn content_manifest(&self) -> &ContentManifestV1 {
+        &self.image
+    }
+
+    /// The driver archives' content manifests, in plan order.
+    #[must_use]
+    pub fn driver_manifests(&self) -> &[ContentManifestV1] {
+        &self.drivers
+    }
+
+    /// The agent package's content manifest.
+    #[must_use]
+    pub const fn agent_manifest(&self) -> &ContentManifestV1 {
+        &self.agent
+    }
+}
+
+/// Signature first, then the digest of the exact payload, then parse and
+/// the key id.
+fn open_manifest(
+    env: &SignedEnvelopeV1,
+    keys: &dyn SignatureVerifier,
+    sha256: &dyn Fn(&[u8]) -> Sha256Digest,
+    want: &Sha256Digest,
+) -> Result<ContentManifestV1, PlanError> {
+    let verified = env
+        .verified_payload(PayloadType::ContentManifestV1, keys)
+        .map_err(|e| PlanError::ContentManifest(e.into()))?;
+    if sha256(verified.bytes) != *want {
+        return Err(PlanError::ContentManifestDigest);
+    }
+    let m = ContentManifestV1::from_payload(verified.bytes).map_err(PlanError::ContentManifest)?;
+    if m.key_id != verified.key_id {
+        return Err(PlanError::ContentManifest(
+            SignedManifestError::KeyIdMismatch,
+        ));
+    }
+    Ok(m)
 }

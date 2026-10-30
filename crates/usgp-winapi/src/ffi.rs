@@ -1631,6 +1631,386 @@ pub(crate) fn update_attributes(file: &File, f: impl FnOnce(u32) -> u32) -> io::
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Well-known SIDs (topic 23 §30.2)
+// ---------------------------------------------------------------------------
+
+use windows_sys::Win32::Security::{PSID, WELL_KNOWN_SID_TYPE};
+
+/// `CreateWellKnownSid(kind, domain, out, &size)` into an owned buffer of
+/// `SECURITY_MAX_SID_SIZE` bytes (value from windows-sys, OPEN-WAPI-22).
+/// Returns the bytes used, as reported in `*cbSid` (§30.2). `domain` is
+/// null or a SID that outlives the call.
+fn create_well_known_sid(kind: WELL_KNOWN_SID_TYPE, domain: PSID) -> io::Result<Vec<u8>> {
+    use windows_sys::Win32::Security::{CreateWellKnownSid, SECURITY_MAX_SID_SIZE};
+
+    let cap = usize::try_from(SECURITY_MAX_SID_SIZE)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SID size"))?;
+    let mut buf = AlignedBuf::new(cap);
+    let mut size = SECURITY_MAX_SID_SIZE;
+    // SAFETY: `buf` is a live, writable, 8-byte-aligned allocation of
+    // `size` bytes; `size` is a valid in/out parameter; `domain` is null
+    // or a SID the caller keeps alive for the call (documented above).
+    let ok = unsafe { CreateWellKnownSid(kind, domain, buf.as_mut_ptr(), &mut size) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let used = usize::try_from(size).unwrap_or(usize::MAX);
+    let bytes = buf.to_bytes();
+    bytes
+        .get(..used)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "SID size out of range"))
+}
+
+/// The local-system SID (`WinLocalSystemSid`, value from windows-sys).
+/// `DomainSid` is null: the type is not domain-relative.
+pub(crate) fn local_system_sid() -> io::Result<Vec<u8>> {
+    use windows_sys::Win32::Security::WinLocalSystemSid;
+    create_well_known_sid(WinLocalSystemSid, ptr::null_mut())
+}
+
+// ---------------------------------------------------------------------------
+// Local accounts (topic 23 §30)
+// ---------------------------------------------------------------------------
+
+use windows_sys::Win32::Security::Authentication::Identity::LSA_HANDLE;
+
+/// Closes an LSA policy handle exactly once (`LsaClose`, §30.2).
+struct LsaPolicy(LSA_HANDLE);
+
+impl Drop for LsaPolicy {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Security::Authentication::Identity::LsaClose;
+        // SAFETY: the handle came from a successful `LsaOpenPolicy` and is
+        // closed only here.
+        unsafe { LsaClose(self.0) };
+    }
+}
+
+/// Frees an LSA-allocated buffer exactly once (`LsaFreeMemory`, §30.2).
+struct LsaBuffer(*mut c_void);
+
+impl Drop for LsaBuffer {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Security::Authentication::Identity::LsaFreeMemory;
+        if !self.0.is_null() {
+            // SAFETY: the pointer came from `LsaQueryInformationPolicy` and
+            // is freed only here.
+            unsafe { LsaFreeMemory(self.0) };
+        }
+    }
+}
+
+/// An `NTSTATUS` failure as an `io::Error`, through
+/// `LsaNtStatusToWinError` (§30.2).
+fn lsa_error(status: windows_sys::Win32::Foundation::NTSTATUS) -> io::Error {
+    use windows_sys::Win32::Security::Authentication::Identity::LsaNtStatusToWinError;
+    // SAFETY: a pure conversion of a status value; no pointers.
+    let code = unsafe { LsaNtStatusToWinError(status) };
+    match i32::try_from(code) {
+        Ok(c) => io::Error::from_raw_os_error(c),
+        Err(_) => io::Error::other("LSA call failed"),
+    }
+}
+
+/// The SID of the built-in Administrator: the local account-domain SID
+/// (`LsaQueryInformationPolicy`, `PolicyAccountDomainInformation`) with
+/// RID 500, formed by `CreateWellKnownSid(WinAccountAdministratorSid,
+/// domain SID)` (§30.2: passing the account-domain SID explicitly rather
+/// than relying on what null resolves to on a domain-joined machine).
+/// The caller checks the result's shape (`crate::account`).
+pub(crate) fn administrator_sid() -> io::Result<Vec<u8>> {
+    use windows_sys::Win32::Security::Authentication::Identity::{
+        LSA_OBJECT_ATTRIBUTES, LsaOpenPolicy, LsaQueryInformationPolicy,
+        POLICY_ACCOUNT_DOMAIN_INFO, POLICY_VIEW_LOCAL_INFORMATION, PolicyAccountDomainInformation,
+    };
+    use windows_sys::Win32::Security::WinAccountAdministratorSid;
+
+    // §30.2: the object attributes are unused and must be zeroed.
+    let attrs = LSA_OBJECT_ATTRIBUTES::default();
+    let access = u32::try_from(POLICY_VIEW_LOCAL_INFORMATION)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "policy access"))?;
+    let mut handle: LSA_HANDLE = 0;
+    // SAFETY: `SystemName` null means the local system (§30.2); `attrs` is
+    // a zeroed structure that outlives the call; `handle` is a valid out
+    // parameter. The handle is owned by `LsaPolicy` on success only.
+    let status = unsafe { LsaOpenPolicy(ptr::null(), &attrs, access, &mut handle) };
+    if status != 0 {
+        return Err(lsa_error(status));
+    }
+    let policy = LsaPolicy(handle);
+    let mut raw: *mut c_void = ptr::null_mut();
+    // SAFETY: `policy.0` is an open policy handle with
+    // POLICY_VIEW_LOCAL_INFORMATION; `raw` is a valid out parameter. The
+    // returned buffer is owned by `LsaBuffer` and freed once.
+    let status =
+        unsafe { LsaQueryInformationPolicy(policy.0, PolicyAccountDomainInformation, &mut raw) };
+    let info_buf = LsaBuffer(raw);
+    if status != 0 {
+        return Err(lsa_error(status));
+    }
+    if info_buf.0.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no account domain",
+        ));
+    }
+    // SAFETY: on success the buffer is a POLICY_ACCOUNT_DOMAIN_INFO
+    // allocated by LSA (§30.2), suitably aligned for it, live until
+    // `info_buf` is dropped at the end of this function; only the
+    // `DomainSid` pointer member is read, by copy.
+    let domain = unsafe { (*info_buf.0.cast::<POLICY_ACCOUNT_DOMAIN_INFO>()).DomainSid };
+    if domain.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no account-domain SID",
+        ));
+    }
+    // `domain` points into `info_buf`, which outlives this call.
+    let sid = create_well_known_sid(WinAccountAdministratorSid, domain);
+    drop(info_buf);
+    drop(policy);
+    sid
+}
+
+/// Largest account or domain name accepted from `LookupAccountSidW`
+/// (UTF-16 units, NUL included). Account names are at most 20
+/// characters (§30.1); domain names are computer or domain names.
+const MAX_LOOKUP_UNITS: u32 = 512;
+
+/// `LookupAccountSidW(NULL, sid, ...)`: the account name (UTF-16 without
+/// NUL) and the `SID_NAME_USE` value (§30.2). `sid` must already have
+/// passed the caller's shape check. Retries once with the sizes the call
+/// reports, up to [`MAX_LOOKUP_UNITS`].
+pub(crate) fn lookup_account_sid(sid: &[u8]) -> io::Result<(Vec<u16>, i32)> {
+    use windows_sys::Win32::Security::LookupAccountSidW;
+
+    // The SID is copied into an aligned, owned buffer that the API only
+    // reads.
+    let mut sid_buf = AlignedBuf::from_bytes(sid);
+    let mut cch_name: u32 = 64;
+    let mut cch_dom: u32 = 64;
+    for _ in 0..2 {
+        let mut name = vec![0u16; usize::try_from(cch_name).unwrap_or(0)];
+        let mut dom = vec![0u16; usize::try_from(cch_dom).unwrap_or(0)];
+        let mut n = cch_name;
+        let mut d = cch_dom;
+        let mut use_: i32 = 0;
+        // SAFETY: `sid_buf` holds the checked SID and outlives the call;
+        // `name` and `dom` are live buffers of exactly `n` and `d` units;
+        // all other arguments are valid out parameters. Null system name
+        // means the local system (§30.2).
+        let ok = unsafe {
+            LookupAccountSidW(
+                ptr::null(),
+                sid_buf.as_mut_ptr(),
+                name.as_mut_ptr(),
+                &mut n,
+                dom.as_mut_ptr(),
+                &mut d,
+                &mut use_,
+            )
+        };
+        if ok != 0 {
+            return Ok((until_nul(&name)?, use_));
+        }
+        let e = io::Error::last_os_error();
+        // §30.2 [reading]: a too-small buffer reports the size needed,
+        // NUL included; the usual error is ERROR_INSUFFICIENT_BUFFER.
+        if !is_os_error(&e, ERROR_INSUFFICIENT_BUFFER)
+            || n > MAX_LOOKUP_UNITS
+            || d > MAX_LOOKUP_UNITS
+            || (n <= cch_name && d <= cch_dom)
+        {
+            return Err(e);
+        }
+        cch_name = n.max(cch_name);
+        cch_dom = d.max(cch_dom);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "account name keeps growing",
+    ))
+}
+
+/// A failed `NetUser*` call: the `NET_API_STATUS` value (§30.1: the
+/// return value is the error; `GetLastError` is not used).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NetStatus(pub(crate) u32);
+
+/// Frees a `NetUserGetInfo` buffer exactly once.
+struct NetBuffer(*mut u8);
+
+impl Drop for NetBuffer {
+    fn drop(&mut self) {
+        use windows_sys::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
+        if !self.0.is_null() {
+            // SAFETY: the pointer came from `NetUserGetInfo` and is freed
+            // only here.
+            unsafe { NetApiBufferFree(self.0.cast()) };
+        }
+    }
+}
+
+/// The account's current flags (`usri1_flags` of `NetUserGetInfo` level
+/// 1). `name` is NUL-terminated.
+// POAM: `NetUserGetInfo` and `NetApiBufferFree` are not summarised in
+// topic 23 §30; they are used only because OPEN-WAPI-21's reading says to
+// read the current flags before a level-1008 write. Spec request in
+// impl-notes-wu5.md.
+pub(crate) fn net_user_flags(name: &[u16]) -> Result<u32, NetStatus> {
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NERR_Success, NetUserGetInfo, USER_INFO_1,
+    };
+    if check_wide(name).is_err() {
+        return Err(NetStatus(ERROR_INVALID_PARAMETER_CODE));
+    }
+    let mut raw: *mut u8 = ptr::null_mut();
+    // SAFETY: null server name means the local computer; `name` is a
+    // checked NUL-terminated string; `raw` is a valid out parameter. The
+    // returned buffer is owned by `NetBuffer` and freed once.
+    let rc = unsafe { NetUserGetInfo(ptr::null(), name.as_ptr(), 1, &mut raw) };
+    let buf = NetBuffer(raw);
+    if rc != NERR_Success {
+        return Err(NetStatus(rc));
+    }
+    if buf.0.is_null() {
+        return Err(NetStatus(ERROR_INVALID_PARAMETER_CODE));
+    }
+    // SAFETY: on success the buffer holds one USER_INFO_1 allocated by the
+    // system, aligned for it and live until `buf` drops; only the plain
+    // integer `usri1_flags` is read, by copy. No string member is read.
+    let flags = unsafe { (*buf.0.cast::<USER_INFO_1>()).usri1_flags };
+    Ok(flags)
+}
+
+/// `ERROR_INVALID_PARAMETER` as a `NetStatus` for refusals made before
+/// the call.
+const ERROR_INVALID_PARAMETER_CODE: u32 = windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+/// `NetUserSetInfo(NULL, name, 1008, {flags}, NULL)` (§30.1). `name` is
+/// NUL-terminated. The caller keeps `UF_SCRIPT` set (§30.1).
+pub(crate) fn net_user_set_flags(name: &[u16], flags: u32) -> Result<(), NetStatus> {
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NERR_Success, NetUserSetInfo, USER_INFO_1008,
+    };
+    if check_wide(name).is_err() {
+        return Err(NetStatus(ERROR_INVALID_PARAMETER_CODE));
+    }
+    let info = USER_INFO_1008 {
+        usri1008_flags: flags,
+    };
+    // SAFETY: null server name means the local computer (nothing leaves
+    // the machine, §30.1); `name` is checked; `info` is a live
+    // USER_INFO_1008 for level 1008 that outlives the call and is only
+    // read; `parm_err` may be null (§30.1).
+    let rc = unsafe {
+        NetUserSetInfo(
+            ptr::null(),
+            name.as_ptr(),
+            1008,
+            (&raw const info).cast(),
+            ptr::null_mut(),
+        )
+    };
+    if rc == NERR_Success {
+        Ok(())
+    } else {
+        Err(NetStatus(rc))
+    }
+}
+
+/// `NetUserSetInfo(NULL, name, 1003, {password}, NULL)` (§30.1). Both
+/// strings are NUL-terminated. `password` is the caller's (locked) memory;
+/// the call keeps no reference to it and wiping it is the caller's job
+/// (§30.1 [reading]).
+pub(crate) fn net_user_set_password(name: &[u16], password: &[u16]) -> Result<(), NetStatus> {
+    use windows_sys::Win32::NetworkManagement::NetManagement::{
+        NERR_Success, NetUserSetInfo, USER_INFO_1003,
+    };
+    if check_wide(name).is_err() || check_wide(password).is_err() {
+        return Err(NetStatus(ERROR_INVALID_PARAMETER_CODE));
+    }
+    // The member is declared `PWSTR`; the call only reads the string
+    // (level 1003 is an input structure, §30.1).
+    let info = USER_INFO_1003 {
+        usri1003_password: password.as_ptr().cast_mut(),
+    };
+    // SAFETY: as in `net_user_set_flags`; `info.usri1003_password` points
+    // to the checked NUL-terminated `password`, which outlives the call
+    // and is not written through the pointer.
+    let rc = unsafe {
+        NetUserSetInfo(
+            ptr::null(),
+            name.as_ptr(),
+            1003,
+            (&raw const info).cast(),
+            ptr::null_mut(),
+        )
+    };
+    if rc == NERR_Success {
+        Ok(())
+    } else {
+        Err(NetStatus(rc))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Locking memory pages (topic 23 §31)
+// ---------------------------------------------------------------------------
+
+/// The page size (`dwPageSize` of `GetNativeSystemInfo`, §16).
+pub(crate) fn page_size() -> u32 {
+    use windows_sys::Win32::System::SystemInformation::{GetNativeSystemInfo, SYSTEM_INFO};
+    let mut si = SYSTEM_INFO::default();
+    // SAFETY: `si` is a live SYSTEM_INFO the function fills; it cannot fail.
+    unsafe { GetNativeSystemInfo(&mut si) };
+    si.dwPageSize
+}
+
+/// `VirtualLock` over exactly the memory of `region` (§31). The memory
+/// is a live Rust allocation, so every page in the range is committed.
+pub(crate) fn virtual_lock(region: &[u16]) -> io::Result<()> {
+    use windows_sys::Win32::System::Memory::VirtualLock;
+    // SAFETY: the range is `region`'s own memory, live and committed for
+    // the call; locking does not read or write it.
+    let ok = unsafe { VirtualLock(region.as_ptr().cast(), size_of_val(region)) };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// `VirtualUnlock` over exactly the memory of `region` (§31).
+pub(crate) fn virtual_unlock(region: &[u16]) -> io::Result<()> {
+    use windows_sys::Win32::System::Memory::VirtualUnlock;
+    // SAFETY: as in `virtual_lock`; unlocking does not read or write the
+    // memory.
+    let ok = unsafe { VirtualUnlock(region.as_ptr().cast(), size_of_val(region)) };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// `SetProcessWorkingSetSize(GetCurrentProcess(), min, max)` (§31). The
+/// pseudo handle has full access to the process (§26), so it carries
+/// `PROCESS_SET_QUOTA`.
+pub(crate) fn set_working_set(min: usize, max: usize) -> io::Result<()> {
+    use windows_sys::Win32::System::Threading::SetProcessWorkingSetSize;
+    // SAFETY: `GetCurrentProcess` returns a pseudo handle that need not be
+    // closed (§26); the sizes are plain values checked by the caller.
+    let ok = unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), min, max) };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

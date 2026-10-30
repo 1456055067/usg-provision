@@ -10,7 +10,16 @@ publish.workspace = true
 # windows-link, no C) is used by this crate only; deny.toml enforces it.
 # On other targets the crate is empty.
 [target.'cfg(windows)'.dependencies]
-windows-sys.workspace = true
+# M4 WU-5 features (decision 0019; additive to the workspace list):
+# NetUserSetInfo/NetUserGetInfo (topic 23 §30.1), the LSA account-domain
+# query (§30.2), VirtualLock/VirtualUnlock (§31).
+windows-sys = { workspace = true, features = [
+  "Win32_NetworkManagement_NetManagement",
+  "Win32_Security_Authentication_Identity",
+  "Win32_System_Memory",
+] }
+# memlock.rs wipes the locked page. Pure Rust.
+zeroize.workspace = true
 # Only for the tree_manifest example (SHA-256 through the FIPS provider,
 # decision 0001). Optional, so the agent's use of this crate never pulls it.
 usgp-crypto = { workspace = true, optional = true }

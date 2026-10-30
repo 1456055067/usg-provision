@@ -55,6 +55,7 @@ use std::fmt;
 use base64ct::{Base64, Base64UrlUnpadded, Encoding};
 use zeroize::Zeroizing;
 
+use crate::b64::P384Spki;
 use crate::disk::{Bus, DiskDescriptorV1, DiskToken};
 use crate::envelope::{EnvelopeError, SignedEnvelopeV1};
 use crate::error_code::ErrorCode;
@@ -64,6 +65,7 @@ use crate::limits::{
     MAX_AUTH_CODE_INPUT_BYTES, MAX_CONFIRM_RESPONSE_BYTES, MAX_MACS, MAX_OFFERED_PACKAGES,
     MAX_REFUSED_DISKS,
 };
+use crate::limits::{MAX_CONFIRM_V2_RESPONSE_BYTES, MAX_PLAN_DRIVERS};
 use crate::names::{AgentVersion, Description, DisplayName};
 
 pub use crate::limits::MAX_DEVICE_JSON_BYTES;
@@ -1152,6 +1154,9 @@ pub enum ConfirmedError {
     /// An envelope failed its own checks.
     #[error(transparent)]
     Envelope(#[from] EnvelopeError),
+    /// More driver manifests than [`MAX_PLAN_DRIVERS`] (v2).
+    #[error("confirm response lists more than {MAX_PLAN_DRIVERS} driver manifests")]
+    TooManyDrivers,
 }
 
 /// `201` response to [`ConfirmV1`]: the job and its signed plan and
@@ -1179,6 +1184,95 @@ impl ConfirmedV1 {
             return Err(ConfirmedError::TooLarge { len: bytes.len() });
         }
         serde_json::from_slice(bytes).map_err(ConfirmedError::Json)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M4: confirm with the job key (M4 plan section 3.1; decision 0025 item 1)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmV2Wire {
+    package_id: PackageId,
+    revision: u64,
+    disk_token: DiskToken,
+    confirm: WipeConfirmation,
+    agent_nonce: AgentNonce,
+    job_key_spki_b64: P384Spki,
+}
+
+/// `POST /v1/device/session/confirm` body from an M4 agent: as
+/// [`ConfirmV1`], plus the public half of the job key the agent generated
+/// (the private half never leaves the device). The v2 plan echoes its key
+/// id as `job_key_id`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "ConfirmV2Wire")]
+pub struct ConfirmV2 {
+    /// Chosen package.
+    pub package_id: PackageId,
+    /// Its revision.
+    pub revision: u64,
+    /// Chosen disk.
+    pub disk_token: DiskToken,
+    /// Always `wipe-disk`.
+    pub confirm: WipeConfirmation,
+    /// Fresh nonce the plan must carry back.
+    pub agent_nonce: AgentNonce,
+    /// The job key's public half (P-384 SPKI DER, padded base64).
+    pub job_key_spki_b64: P384Spki,
+}
+
+impl TryFrom<ConfirmV2Wire> for ConfirmV2 {
+    type Error = DeviceDataError;
+
+    fn try_from(w: ConfirmV2Wire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            package_id: w.package_id,
+            revision: revision(w.revision)?,
+            disk_token: w.disk_token,
+            confirm: w.confirm,
+            agent_nonce: w.agent_nonce,
+            job_key_spki_b64: w.job_key_spki_b64,
+        })
+    }
+}
+
+/// `201` response to [`ConfirmV2`]: the job, its signed v2 plan, and the
+/// signed content manifests of the image, each driver archive (plan
+/// order) and the agent package. Holding it says nothing about the
+/// signatures; see [`crate::job_plan::VerifiedJobPlanV2::verify`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmedV2 {
+    /// The new job.
+    pub job_id: JobId,
+    /// Signed [`crate::job_plan::JobPlanV2`].
+    pub plan: SignedEnvelopeV1,
+    /// Signed content manifest of the image.
+    pub content_manifest: SignedEnvelopeV1,
+    /// Signed content manifests of the driver archives (at most
+    /// [`MAX_PLAN_DRIVERS`]).
+    pub driver_manifests: Vec<SignedEnvelopeV1>,
+    /// Signed content manifest of the agent package.
+    pub agent_manifest: SignedEnvelopeV1,
+}
+
+impl ConfirmedV2 {
+    /// Parses the response after checking its size and the driver count.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfirmedError`].
+    pub fn from_json(bytes: &[u8]) -> Result<Self, ConfirmedError> {
+        if bytes.len() > MAX_CONFIRM_V2_RESPONSE_BYTES {
+            return Err(ConfirmedError::TooLarge { len: bytes.len() });
+        }
+        let c: Self = serde_json::from_slice(bytes).map_err(ConfirmedError::Json)?;
+        if c.driver_manifests.len() > MAX_PLAN_DRIVERS {
+            return Err(ConfirmedError::TooManyDrivers);
+        }
+        Ok(c)
     }
 }
 

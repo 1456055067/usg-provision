@@ -60,6 +60,12 @@ OPEN items: OPEN-DISK-5, OPEN-TGT-3, OPEN-UBM-2, OPEN-WAPI-1 to 3,
 OPEN-SMB-1. Spec request SR-6 (2026-10-28; AUDITED 2026-10-28 after
 fixes CR-SR6-001 to 008) added topic 24 (reparse data and security
 descriptors) with OPEN-RPSD-1 to 4, which stay open.
+Spec run M4 (2026-10-29) moved CFG-1, CFG-2, DRV-1, SEQ-1 and AGT-1 to
+`DRAFT` (`specs/configuration.md`, `specs/drivers.md`,
+`specs/workflow.md`, `specs/agent-handoff.md`), added REQ-OS-012 and
+013 (install and refresh part of OS-1), and summarised topics 10, 12
+and 25 (ZIP and cabinet; called "topic 19" in the M4 spec request). All
+M4 text was audited 2026-10-29 (cleanroom/audits/2026-10-29-spec-m4.md); topic 25 AUDITED after the CR-M4 re-check.
 
 Priority is for a **Windows client (10/11 Enterprise) first** release.
 For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64
@@ -134,7 +140,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| DRV-1 | Driver packages (ZIP or CAB archives) can be attached to a deployment and are applied during both bare-metal installs and refreshes. | `specs/drivers.md` | P1 | NOT SPECCED | SRC-003, SRC-004 |
+| DRV-1 | Driver packages (ZIP or CAB archives) can be attached to a deployment and are applied during both bare-metal installs and refreshes. | `specs/drivers.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-DRV-001 to 011; OPEN: 006, 007, 010) | SRC-001, SRC-003, SRC-004, DEC-0010, DEC-0011, DEC-0018, DEC-0021 |
 | DRV-2 | Storage controller (e.g. RAID) drivers can be loaded in the preinstallation environment so that disks become visible. | `specs/drivers.md` | P2 | NOT SPECCED | SRC-004, SRC-006 |
 | DRV-3 | Settings can vary by device chassis type. | `specs/drivers.md` | P3 | NOT SPECCED | SRC-007 |
 
@@ -149,8 +155,8 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| CFG-1 | A deployment carries a Windows unattended-setup answer file, into which per-device values (such as computer name) are substituted at install time. | `specs/configuration.md` | P1 | NOT SPECCED | SRC-001, SRC-004 |
-| CFG-2 | A deployment sets computer name, domain/OU, time zone, local administrator password, and descriptive tags. | `specs/configuration.md` | P1 | NOT SPECCED | SRC-001, SRC-004 |
+| CFG-1 | A deployment carries a Windows unattended-setup answer file, into which per-device values (such as computer name) are substituted at install time. | `specs/configuration.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-CFG-001 to 004, 011, 012; OPEN: 002, 004) | SRC-001, SRC-004, DEC-0010, DEC-0011 |
+| CFG-2 | A deployment sets computer name, domain/OU, time zone, local administrator password, and descriptive tags. | `specs/configuration.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-CFG-005 to 010; OPEN: 010) | SRC-001, SRC-004, SRC-009, DEC-0011, DEC-0018 |
 | CFG-3 | Computer names come from operator-defined templates (including substrings such as the last N characters of a device value) or are entered at the device within operator-set restrictions. | `specs/configuration.md` | P2 | NOT SPECCED | SRC-004, SRC-006, SRC-007 |
 | CFG-4 | Operators can define extra key/value prompts answered at the device during install. | `specs/configuration.md` | P2 | NOT SPECCED | SRC-006, SRC-007 |
 
@@ -167,7 +173,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| SEQ-1 | The install proceeds as an ordered, automated workflow from boot to first OS logon-ready state, with generous step timeouts. | `specs/workflow.md` | P1 | NOT SPECCED | SRC-001, SRC-004, SRC-006 |
+| SEQ-1 | The install proceeds as an ordered, automated workflow from boot to first OS logon-ready state, with generous step timeouts. | `specs/workflow.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-SEQ-001 to 008) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-009, DEC-0018 |
 | SEQ-2 | Operators can add custom scripts (including PowerShell) that run in the preinstallation environment or the installed OS, with their output logged. | `specs/workflow.md` | P2 | NOT SPECCED | SRC-001, SRC-004, SRC-006, SRC-007 |
 | SEQ-3 | Operators can insert optional reboots and calls to external web services into the workflow. | `specs/workflow.md` | P2 | NOT SPECCED | SRC-004, SRC-007 |
 | SEQ-4 | Provisioning can require a confirmation code entered at the device before it proceeds. | `specs/workflow.md` | P2 | NOT SPECCED | SRC-004, SRC-006 |
@@ -176,7 +182,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| AGT-1 | The management agent is installed as part of the build, so the device finishes as a managed endpoint. | `specs/agent-handoff.md` | P1 | NOT SPECCED | SRC-001, SRC-002 |
+| AGT-1 | The management agent is installed as part of the build, so the device finishes as a managed endpoint. | `specs/agent-handoff.md` | P1 | AUDITED (M4, 2026-10-29, clean-room audit 2026-10-29; REQ-AGT-001 to 006; OPEN: 003, 004) | SRC-001, SRC-002, SRC-004, SRC-006, SRC-009, DEC-0011, DEC-0018 |
 | AGT-2 | Patches, applications, and policies are applied as part of, or immediately after, the build. | `specs/agent-handoff.md` | P2 | NOT SPECCED | SRC-001, SRC-002, SRC-010 |
 
 ### TGT — Target identification and selection
@@ -239,7 +245,7 @@ a decision.
 
 | ID | Capability (behavioural) | Spec file | Priority | Status | Sources |
 |----|--------------------------|-----------|----------|--------|---------|
-| OS-1 | Windows 10 and Windows 11 can be installed on bare metal and refreshed. | `specs/os-support.md` | P1 | AUDITED (partial; image-content part, M2: REQ-OS-001 to 011; M2 scope Windows 11 Enterprise x64 by DEC-0009; 004, 005 AUDITED for M2 (DEC-0013 item 3; post-M2 OPEN-OS-2, OPEN-IMG-F1); 011 AUDITED (unknown facts in M2, DEC-0013, CR-516); OPEN: 003, 006, 010 in part. Install and refresh not specced) | SRC-004, SRC-005, SRC-058, SRC-064, SRC-065, SRC-066, SRC-067, DEC-0009, DEC-0013 |
+| OS-1 | Windows 10 and Windows 11 can be installed on bare metal and refreshed. | `specs/os-support.md` | P1 | AUDITED (partial; image-content part, M2: REQ-OS-001 to 011; M2 scope Windows 11 Enterprise x64 by DEC-0009; 004, 005 AUDITED for M2 (DEC-0013 item 3; post-M2 OPEN-OS-2, OPEN-IMG-F1); 011 AUDITED (unknown facts in M2, DEC-0013, CR-516); OPEN: 003, 006, 010 in part. M4 install and refresh part: AUDITED 2026-10-29, REQ-OS-012 (OPEN: Windows 10 needs an owner decision against DEC-0009), 013) | SRC-004, SRC-005, SRC-058, SRC-064, SRC-065, SRC-066, SRC-067, DEC-0009, DEC-0013 |
 | OS-2 | Linux distributions (Red Hat Enterprise Linux, CentOS, Debian, Ubuntu, Rocky Linux, AlmaLinux) can be installed and refreshed. | `specs/os-support.md` | P3 | NOT SPECCED | SRC-005, SRC-006 |
 | OS-3 | Cloud-hosted virtual machines (Microsoft Azure) are supported. | `specs/os-support.md` | P3 | NOT SPECCED | SRC-004 |
 
@@ -401,6 +407,9 @@ decide.
    Codecs are topic 20.
 10. Windows unattended setup answer files and configuration passes
     (Microsoft Learn unattend reference). For CFG-1, CFG-2, CFG-3, CFG-4.
+    **Summarised: `specs/standards/unattend.md`** (M4, AUDITED 2026-10-29;
+    passes, search and cache locations, the M4 settings, secrets;
+    OPEN-UNATT-1 to 4).
 11. Windows PE: building from the Windows ADK, adding drivers, startup
     scripts, and its licensing/redistribution constraints (Microsoft Learn).
     For PE-1, PE-2, PE-3, DRV-2. **Summarised: `specs/standards/winpe.md`**
@@ -414,7 +423,8 @@ decide.
     Shutdown to §5.2, and §11 (DiskPart scripted commands), with
     OPEN-WINPE-2 to 4, which stay open; AUDITED 2026-10-29).
 12. Offline driver injection (DISM driver servicing; INF/CAB packaging).
-    For DRV-1, DRV-2.
+    For DRV-1, DRV-2. **Summarised: `specs/standards/offline-drivers.md`**
+    (M4, AUDITED 2026-10-29; OPEN-DRVS-1 to 3).
 13. Offline domain join provisioning (Microsoft Learn `djoin` documentation).
     For DOM-1, DOM-3, RELAY-4. The summary must state what provisioning
     data the open mechanism places on the device.
@@ -507,3 +517,7 @@ decide.
     marks OPEN-RPSD-2 and 3 settled for the drive-letter form, and
     replaces "refused until decided" in §5 and §10 with the
     [project rule, DEC-0022] re-base rule of topic 9 §13).
+25. ZIP and cabinet archives (PKWARE APPNOTE; Microsoft Cabinet format;
+    [MS-MCI] MSZIP; RFC 1951). For DRV-1. Called "topic 19" in the M4
+    spec request. **Summarised: `specs/standards/zip-cab.md`** (M4,
+    AUDITED 2026-10-29; OPEN-ARC-1 to 3 and OPEN-ARC-LIC).

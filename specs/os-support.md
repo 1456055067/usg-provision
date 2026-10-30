@@ -5,8 +5,8 @@ approved; CR-511 applied in finalisation). REQ-OS-004 and REQ-OS-005
 (M2) AUDITED 2026-10-27 after the decisions 0012-0015 check.
 REQ-OS-011 (CR-516) AUDITED 2026-10-27 after the diff check, text
 unchanged. OPEN: REQ-OS-003, 006, 010 (in part). REQ range in use:
-`REQ-OS-001` to `REQ-OS-011`. Installing and refreshing devices are
-later milestones and have no REQs here (see "Later sections").
+`REQ-OS-001` to `REQ-OS-013`. Spec run M4 (2026-10-29) added
+REQ-OS-012 (OPEN) and 013 (AUDITED 2026-10-29) for the install and refresh part.
 
 ## Purpose
 
@@ -224,12 +224,41 @@ fact (REQ-OS-005).
 - Status: AUDITED (M2; how facts are learned after M2 is
   `specs/os-images.md` OPEN-IMG-F1)
 
-## Later sections (no REQs in M2)
+### REQ-OS-012: Windows 10 and Windows 11 installs
 
-- **Bare-metal install of Windows 11** (OS-1, install part):
-  partitioning, applying the image, configuration and first start. Specs
-  in DISK, SEQ, CFG, AGT for later milestones.
-- **Refresh of a managed Windows device** (OS-1 refresh part, RFR-1).
+The product installs both Windows 10 and Windows 11 client systems on
+bare metal, and refreshes devices running them.
+
+- Priority: MUST (product capability)
+- Source: SRC-004 (bare-metal provisioning for Windows 10 and Windows
+  11, with refresh, from the first cloud release in 2022)
+- Standards: none
+- Status: OPEN (for usg-provision: DEC-0009, REQ-OS-001 and REQ-OS-007
+  still refuse Windows 10 images. Whether M4 accepts Windows 10, which
+  Microsoft no longer supports except LTSC and Extended Security Updates
+  (SRC-065), needs an owner decision.)
+
+### REQ-OS-013: One package, both install paths
+
+A package that installs Windows on bare metal can also be used to
+refresh a managed device, with the same drivers and configuration
+(`specs/drivers.md` REQ-DRV-005, `specs/configuration.md` REQ-CFG-012).
+
+- Priority: SHOULD
+- Source: SRC-004 (packages can be deployed as refreshes; drivers and
+  administrator password applied on refresh after fixes)
+- Standards: none
+- Status: AUDITED (refresh itself is RFR-1, P2, not specced; user-state
+  migration during refresh is RFR-2)
+
+## Later sections
+
+- **Bare-metal install** (OS-1, install part): specced in M3 and M4 in
+  `specs/disk.md`, `specs/preinstall-env.md`, `specs/workflow.md`,
+  `specs/configuration.md`, `specs/drivers.md` and
+  `specs/agent-handoff.md`.
+- **Refresh of a managed Windows device** (RFR-1): not specced; see
+  REQ-OS-013.
 - **Windows 10, other editions and other architectures**: after M2, by
   later decision (DEC-0009).
 - **Linux** (OS-2) and **cloud-hosted VMs** (OS-3).

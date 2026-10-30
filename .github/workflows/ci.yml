@@ -599,8 +599,13 @@ jobs:
           $after = SectorHash $sent $n
           $plain = @((Get-Content -LiteralPath $log) -replace '\x1b\[[0-9;]*m', '')
           $bad = @()
+          # A test's own child processes (fsutil, icacls) can print on its
+          # "test <name> ... " line before "ok", so require the line to
+          # exist and not end in ignored or FAILED; pass or fail overall
+          # comes from $status, checked above.
           foreach ($t in ($env:VHD_TESTS -split '\s+' | Where-Object { $_ })) {
-            if (-not ($plain -match "^test $t \.\.\. ok$")) { $bad += $t }
+            $start = @($plain | Where-Object { $_ -match "^test $t \.\.\. " })
+            if (-not $start.Count -or ($start | Where-Object { $_ -match '(ignored|FAILED)$' })) { $bad += $t }
           }
           $wapi = @($plain | Where-Object { $_ -match '^OPEN-WAPI-7 ' })
           $obs = @($plain | Where-Object { $_ -match 'GPT-OBS-001' })

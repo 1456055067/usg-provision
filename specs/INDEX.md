@@ -65,7 +65,8 @@ Spec run M4 (2026-10-29) moved CFG-1, CFG-2, DRV-1, SEQ-1 and AGT-1 to
 `specs/workflow.md`, `specs/agent-handoff.md`), added REQ-OS-012 and
 013 (install and refresh part of OS-1), and summarised topics 10, 12
 and 25 (ZIP and cabinet; called "topic 19" in the M4 spec request). All
-M4 text was audited 2026-10-29 (cleanroom/audits/2026-10-29-spec-m4.md); topic 25 AUDITED after the CR-M4 re-check.
+M4 text was audited 2026-10-29 (cleanroom/audits/2026-10-29-spec-m4.md); topic
+25 AUDITED after the CR-M4 re-check.
 
 Priority is for a **Windows client (10/11 Enterprise) first** release.
 For M2, DEC-0009 narrows image content to Windows 11 Enterprise x64

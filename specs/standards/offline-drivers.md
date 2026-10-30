@@ -1,6 +1,7 @@
 # Offline driver injection (standards topic 12)
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN items remain OPEN).
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
+items remain OPEN).
 
 Summary of Microsoft's public documentation of Windows driver packages
 and adding them to an offline Windows image, in the researcher's own

@@ -1,6 +1,7 @@
 # ZIP and cabinet archives (standards topic 25; the M4 spec request's "topic 19")
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, re-check after CR-M4-002 and 005 fixes). OPEN-ARC-LIC and other OPEN items stay OPEN.
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, re-check
+after CR-M4-002 and 005 fixes). OPEN-ARC-LIC and other OPEN items stay OPEN.
 
 What a bounded, safe reader of driver archives needs from the public
 format documents, in the researcher's own words. INDEX topic 19 is

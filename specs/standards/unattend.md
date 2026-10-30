@@ -1,6 +1,7 @@
 # Windows answer files and configuration passes (standards topic 10)
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN items remain OPEN).
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
+items remain OPEN).
 
 Summary of Microsoft's public documentation of Windows unattended setup,
 in the researcher's own words. Setting and path names are Microsoft's

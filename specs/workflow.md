@@ -1,6 +1,7 @@
 # Install workflow (SEQ-1)
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN items remain OPEN). REQ
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
+items remain OPEN). REQ
 range in use: `REQ-SEQ-001` to `REQ-SEQ-008`. SEQ-2 (custom scripts),
 SEQ-3 (optional reboots, web-service calls) and SEQ-4 (confirmation code)
 are not specced.

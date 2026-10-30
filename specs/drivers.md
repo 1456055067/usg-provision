@@ -1,6 +1,7 @@
 # Drivers (DRV-1)
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN items remain OPEN). REQ
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
+items remain OPEN). REQ
 range in use: `REQ-DRV-001` to `REQ-DRV-011`. DRV-2 (storage drivers in
 the preinstall environment) and DRV-3 (settings by chassis type) are not
 specced.

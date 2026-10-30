@@ -1,6 +1,7 @@
 # Configuration and answer files (CFG-1, CFG-2)
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN items remain OPEN). REQ
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
+items remain OPEN). REQ
 range in use: `REQ-CFG-001` to `REQ-CFG-012`. CFG-3 (name templates and
 names entered at the device) and CFG-4 (prompts answered at the device)
 are not specced.

@@ -1,6 +1,7 @@
 # Management agent hand-off (AGT-1)
 
-Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN items remain OPEN). REQ
+Status: AUDITED (spec run M4, 2026-10-29; clean-room audit 2026-10-29, OPEN
+items remain OPEN). REQ
 range in use: `REQ-AGT-001` to `REQ-AGT-006`. AGT-2 (patches,
 applications, policies) is not specced.
 

@@ -392,6 +392,12 @@ Microsoft facts, not product behaviour.
     on a directory (NORMAL, or another value) remains the open question
     this raises; nothing was observed about it. (Note AUDITED
     2026-10-29, CR-R5.)
+  - [observed, project CI run 40974183608] On an NTFS directory with
+    DIRECTORY|ARCHIVE (`0x30`) after a named-stream write,
+    `SetFileInformationByHandle` `FileBasicInfo` with attributes
+    `NORMAL` (`0x80`) succeeded and the directory then read back
+    DIRECTORY only (`0x10`). One OS build; status remains OPEN,
+    observed, not documented. (Note AUDITED 2026-10-29, CR-R5.)
 - **OPEN-WAPI-13** (SR-7, AUDITED): the handle access and open flags
   that `FSCTL_GET_REPARSE_POINT` needs, the largest output buffer, and
   its errors for a file without a reparse point or a buffer that is
@@ -806,6 +812,17 @@ and self-relative descriptors: topic 24 §7 to §9.
     flags work only with `SetNamedSecurityInfo`, without saying which.
     `BACKUP_SECURITY_INFORMATION` (all parts) is not available before
     Windows 8 and Windows Server 2012.
+  - [observed, project CI run 40974183608] A file's DACL (not
+    protected, three explicit ACEs) was set with `SetSecurityInfo` and
+    `UNPROTECTED_DACL_SECURITY_INFORMATION` under a parent with three
+    inheritable ACEs. It read back with the auto-inherited control flag
+    and the parent's three entries appended as inherited entries
+    (owner and group omitted):
+    `D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;BU)` became
+    `D:AI(A;;FA;;;BA)(A;;FA;;;SY)(A;;0x1200a9;;;BU)(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)`.
+    Consistent with the documented meaning of "unprotected" above. One
+    OS build; not documentation. OPEN-WAPI-7 (`SetKernelObjectSecurity`)
+    is not addressed by this run. (Note AUDITED 2026-10-29, CR-R5.)
 - **Checking a descriptor.**
   - `IsValidSecurityDescriptor` checks the parts that are present. It
     does **not** check that any given part is present, and does
@@ -896,7 +913,9 @@ Pages: "SetFileInformationByHandle function",
   directory (**OPEN-WAPI-12**). **[reading, unconfirmed; not to be
   relied on]** The description speaks of a file only, and a directory
   always carries the directory attribute, so "alone" may not hold for
-  one.
+  one. [observed, project CI run 40974183608] On one OS build `NORMAL`
+  set on a directory was accepted and cleared ARCHIVE (§12); still
+  not documented. (Note AUDITED 2026-10-29, CR-R5.)
 - `READONLY` is not honoured on directories.
 
 ## 23. Backup, restore and security privileges (SR-3c item 4; AUDITED)

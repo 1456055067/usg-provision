@@ -729,7 +729,7 @@ fn parse_security(b: &[u8], l: &MetadataLimits) -> Result<(Vec<Vec<u8>>, usize),
         let d = b.get(at..end).ok_or(trunc("security descriptor"))?;
         // M-01, M-14: bounded (inside the block) and a well-formed
         // self-relative descriptor (topic 24 §9). The bytes are kept and
-        // written exactly as stored (PS is not normalised).
+        // passed to the sink exactly as stored (PS is not normalised).
         check_descriptor(d).map_err(|what| MetadataError::SecurityDescriptor { what })?;
         descriptors.push(d.to_vec());
         at = end;

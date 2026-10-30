@@ -10,7 +10,10 @@
 //!
 //! The descriptors in the tree are real ones read from the new volume
 //! (the testkit's synthetic descriptors are not valid Windows
-//! descriptors). A relative link, a re-based absolute link and a
+//! descriptors), and realistic: an unprotected descriptor already carries
+//! its parent's inheritable entries as inherited entries, because
+//! `SetSecurityInfo` merges them into an unprotected DACL (topic 23 §20,
+//! CI run 40974183608; POAM-62). A relative link, a re-based absolute link and a
 //! re-based junction are read back and compared byte for byte. On a
 //! volume with 8.3 generation disabled a short name is still set
 //! (OPEN-WAPI-9, observed in CI run 40958577980).
@@ -135,52 +138,105 @@ fn require_env() {
     );
 }
 
-/// Descriptors read from Windows: index 0 from a directory, 1 from a
-/// file, 2 from a file whose DACL was made protected (`icacls
-/// /inheritance:r` keeps no inherited entries). Returns them with the SDDL
-/// of the first two.
-fn real_descriptors(root: &Path) -> (Vec<Vec<u8>>, String, String) {
-    let d = root.join("sd-probe-dir");
-    let f = root.join("sd-probe.txt");
-    let g = root.join("sd-probe-protected.txt");
-    std::fs::create_dir(&d).expect("probe dir");
-    std::fs::write(&f, b"p").expect("probe file");
-    std::fs::write(&g, b"p").expect("probe file");
-    // Grant explicit access to two example SIDs, then drop inheritance so
-    // the DACL is protected. S-1-5-32-544 and S-1-5-18 are example SIDs
-    // used as test data; the test does not rely on what they mean, only
-    // that the runner's account keeps access (CR-RV1-002).
+/// Descriptors read from Windows (index into `sds`) and their SDDL.
+struct Descriptors {
+    /// 0: a directory with a protected DACL of inheritable entries
+    /// (`(OI)(CI)`); 1: a file created under it, so unprotected and
+    /// auto-inherited with the parent's entries as inherited (ID) entries,
+    /// plus one explicit entry; 2: a file with a protected DACL of explicit
+    /// entries only.
+    sds: Vec<Vec<u8>>,
+    dir_sddl: String,
+    file_sddl: String,
+    protected_sddl: String,
+}
+
+fn icacls(p: &Path, args: &[&str]) {
     let st = Command::new("icacls")
-        .arg(&g)
-        .args([
+        .arg(p)
+        .args(args)
+        .status()
+        .expect("icacls");
+    assert!(st.success(), "icacls {args:?}");
+}
+
+/// Realistic descriptors (round 7): every unprotected descriptor already
+/// carries, as inherited entries, what its parent's stored descriptor
+/// gives it, because Windows itself made it under that parent. Applied
+/// under a directory with descriptor 0, descriptor 1 is expected to read
+/// back unchanged: `SetSecurityInfo` merges the parent's inheritable
+/// entries into an unprotected DACL (topic 23 §20; CI run 40974183608).
+/// S-1-5-32-544, S-1-5-18 and S-1-5-32-545 are example SIDs used as test
+/// data; the test does not rely on what they mean, only that the runner's
+/// account keeps access (CR-RV1-002).
+fn real_descriptors(root: &Path) -> Descriptors {
+    let d = root.join("sd-probe-dir");
+    std::fs::create_dir(&d).expect("probe dir");
+    icacls(
+        &d,
+        &[
+            "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "/inheritance:r",
+        ],
+    );
+    let f = d.join("sd-probe.txt");
+    std::fs::write(&f, b"p").expect("probe file");
+    icacls(&f, &["/grant", "*S-1-5-32-545:(RX)"]);
+    let g = root.join("sd-probe-protected.txt");
+    std::fs::write(&g, b"p").expect("probe file");
+    icacls(
+        &g,
+        &[
             "/grant:r",
             "*S-1-5-32-544:F",
             "/grant:r",
             "*S-1-5-18:F",
             "/inheritance:r",
-        ])
-        .status()
-        .expect("icacls");
-    assert!(st.success(), "icacls");
+        ],
+    );
     let sds = vec![
         fsquery::security_descriptor(&d).expect("dir descriptor"),
         fsquery::security_descriptor(&f).expect("file descriptor"),
         fsquery::security_descriptor(&g).expect("protected descriptor"),
     ];
     assert_ne!(
+        control(&sds[0]) & DACL_PROTECTED,
+        0,
+        "probe dir DACL is protected"
+    );
+    assert_eq!(
+        control(&sds[1]) & DACL_PROTECTED,
+        0,
+        "probe file DACL is unprotected"
+    );
+    assert_ne!(
         control(&sds[2]) & DACL_PROTECTED,
         0,
         "probe DACL is protected"
     );
-    let sddl = (
-        fsquery::sddl(&d).expect("dir sddl"),
-        fsquery::sddl(&f).expect("file sddl"),
+    let out = Descriptors {
+        dir_sddl: fsquery::sddl(&d).expect("dir sddl"),
+        file_sddl: fsquery::sddl(&f).expect("file sddl"),
+        protected_sddl: fsquery::sddl(&g).expect("protected sddl"),
+        sds,
+    };
+    assert!(
+        out.file_sddl.contains(";ID;"),
+        "probe file carries inherited entries: {}",
+        out.file_sddl
+    );
+    println!(
+        "real descriptors: dir {}, file {}, protected {}",
+        out.dir_sddl, out.file_sddl, out.protected_sddl
     );
     for p in [&f, &g] {
         std::fs::remove_file(p).expect("remove probe");
     }
     std::fs::remove_dir(&d).expect("remove probe dir");
-    (sds, sddl.0, sddl.1)
+    out
 }
 
 /// MS-DTYP control bits compared (topic 24 §9): DACL protected and DACL
@@ -224,7 +280,12 @@ fn synthetic_wim_applies_to_a_vhd_volume() {
         .status()
         .expect("fsutil");
     assert!(st.success(), "enable 8dot3 names on the test volume");
-    let (sds, dir_sddl, file_sddl) = real_descriptors(&root);
+    let Descriptors {
+        sds,
+        dir_sddl,
+        file_sddl,
+        protected_sddl,
+    } = real_descriptors(&root);
 
     let linked = b"three names, one file\n".to_vec();
     let comp = b"compressible ".repeat(50);
@@ -354,10 +415,19 @@ fn synthetic_wim_applies_to_a_vhd_volume() {
             "{p}"
         );
         assert_eq!(value(&r.sha256), sha(data), "{p}");
-        if p != "ro.txt" {
-            assert_eq!(value(&r.sddl), file_sddl, "{p}");
-        }
+        // Every file's parent is a directory applied with descriptor 0,
+        // so the unprotected descriptor 1 reads back as stored.
+        let want = if p == "ro.txt" {
+            &protected_sddl
+        } else {
+            &file_sddl
+        };
+        assert_eq!(&value(&r.sddl), want, "{p}");
     }
+    println!(
+        "OPEN-WAPI-7 inheritance: stored {file_sddl}, applied {}",
+        value(&row("readme-long-name.txt").sddl)
+    );
     // OPEN-WAPI-7: the stored "protected" and "auto-inherited" DACL bits
     // after SetSecurityInfo, compared explicitly and printed for the
     // report.
@@ -529,7 +599,7 @@ fn links_and_junctions_are_applied_byte_for_byte() {
     let vol = VhdVolume::create("link").expect("VHD volume");
     let root = vol.root();
     let l = vol.letter.letter();
-    let (sds, _, _) = real_descriptors(&root);
+    let sds = real_descriptors(&root).sds;
     // Stored as captured from C: with RP_FIX: `\??\C:\target-dir` and
     // `C:\target.txt`, marked 0 at +92 (re-base); the relative link is
     // copied.
@@ -634,7 +704,7 @@ fn short_names_set_with_8dot3_generation_disabled() {
         .status()
         .expect("fsutil");
     assert!(st.success(), "disable 8dot3 names on the test volume");
-    let (sds, _, _) = real_descriptors(&root);
+    let sds = real_descriptors(&root).sds;
     let mut spec = TreeSpec::new(vec![
         NodeSpec::file("readme-long-name.txt", b"x")
             .short("README~1.TXT")
@@ -681,4 +751,82 @@ fn probe_normal_on_directory_with_named_stream() {
     drop(w);
     let after = attrs();
     println!("OPEN-WAPI-12 probe: before {before}, set NORMAL -> {outcome}, after {after}");
+}
+
+/// CI probe (round 7, OPEN-WAPI-7): the same unprotected descriptor with
+/// no inherited (ID) entries, as in CI run 40974183608, written under a
+/// directory with inheritable entries once with `SetKernelObjectSecurity`
+/// on the writer's backup-semantics handle (topic 23 §20; testkit probe)
+/// and once through the product path (`SetSecurityInfo`). Records only;
+/// asserts nothing beyond its setup. The stored SDDL is the source file's
+/// with its "protected" and "auto-inherited" DACL flags removed, matching
+/// the two control bits cleared in the bytes.
+#[test]
+#[ignore = "needs administrator rights and USGP_WIN_VHD=1; run by the windows-agent CI job with --ignored"]
+fn probe_descriptor_verbatim_write() {
+    require_env();
+    let vol = VhdVolume::create("sdprobe").expect("VHD volume");
+    let root = vol.root();
+    // Example SIDs as test data (CR-RV1-002).
+    let parent = root.join("inherit-parent");
+    std::fs::create_dir(&parent).expect("parent");
+    icacls(
+        &parent,
+        &[
+            "/grant:r",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "/grant:r",
+            "*S-1-5-32-545:(OI)(CI)(RX)",
+            "/inheritance:r",
+        ],
+    );
+    let src = root.join("sd-source.txt");
+    std::fs::write(&src, b"s").expect("source");
+    icacls(
+        &src,
+        &[
+            "/grant:r",
+            "*S-1-5-32-544:F",
+            "/grant:r",
+            "*S-1-5-18:F",
+            "/grant:r",
+            "*S-1-5-32-545:(RX)",
+            "/inheritance:r",
+        ],
+    );
+    let mut sd = fsquery::security_descriptor(&src).expect("source descriptor");
+    let src_sddl = fsquery::sddl(&src).expect("source sddl");
+    let c = control(&sd) & !(DACL_PROTECTED | DACL_AUTO_INHERITED);
+    sd.get_mut(2..4)
+        .expect("control word")
+        .copy_from_slice(&c.to_le_bytes());
+    assert_eq!(control(&sd) & (DACL_PROTECTED | DACL_AUTO_INHERITED), 0);
+    let stored = src_sddl
+        .replacen("D:PAI", "D:", 1)
+        .replacen("D:P", "D:", 1)
+        .replacen("D:AI", "D:", 1);
+    for n in ["kernel.txt", "product.txt"] {
+        std::fs::write(parent.join(n), b"p").expect("probe file");
+    }
+    let mut w = TreeWriter::new(&root).expect("writer");
+    let kernel = match w.probe_set_kernel_object_security(&["inherit-parent", "kernel.txt"], &sd) {
+        Ok(Ok(())) => "Ok".to_owned(),
+        Ok(Err(e)) => format!("Err(raw OS code {:?}: {e})", e.raw_os_error()),
+        Err(e) => format!("Err(writer: {e})"),
+    };
+    let product = w.set_security(&["inherit-parent", "product.txt"], &sd);
+    drop(w);
+    let read =
+        |n: &str| fsquery::sddl(&parent.join(n)).unwrap_or_else(|e| format!("unreadable ({e})"));
+    let product = match product {
+        Ok(()) => read("product.txt"),
+        Err(e) => format!("set failed ({e})"),
+    };
+    println!(
+        "OPEN-WAPI-7 probe: SetKernelObjectSecurity -> {kernel}, applied {}; \
+         SetSecurityInfo applied {product}; stored {stored} (from {src_sddl})",
+        read("kernel.txt")
+    );
 }

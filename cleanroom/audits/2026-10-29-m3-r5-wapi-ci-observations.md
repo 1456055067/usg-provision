@@ -49,3 +49,12 @@ Not marked AUDITED. The OPEN-WAPI-11 note and the CI-WAPI-1 row are pending CR-R
 - CR-R5-004 and CR-R5-005 are resolved. The OPEN-WAPI-11 and 12 notes and the CI-WAPI-1 row are marked AUDITED. All items stay OPEN. No contamination.
 
 Final verdict: PASS. Open findings: BLOCKER 0, MAJOR 0, MINOR 0.
+
+## Re-check 4 (2026-10-29): run 40974183608
+- The run's head SHA is 0503a22, matching the row (the run itself concluded failure). Runner image windows-2025-vs2026, version 20261021.278.1.
+- §12 OPEN-WAPI-12 and §22: the log line "OPEN-WAPI-12 probe: before 0x30, set NORMAL -> Ok, after 0x10" backs the notes. The test probe_normal_on_directory_with_named_stream (winsink.rs line 661) writes a named stream on the directory and then sends 0x80 through the raw basic-information set. Backed. The status correctly stays OPEN, observed, not documented.
+- §20: the panic at winsink.rs:358 (readme-long-name.txt) shows the applied value as left, `D:AI(...)` plus three ID entries, and the stored value as right, three explicit entries. The direction in the note is correct. ffi.rs set_file_security picks UNPROTECTED_DACL_SECURITY_INFORMATION when SE_DACL_PROTECTED is clear and calls SetSecurityInfo. Backed.
+- INFO CR-R5-006: "a parent with three inheritable ACEs" is inferred from the three inherited entries, not logged. That inference is sound, so no change is required.
+- The three notes and the CI-WAPI-1 extension are marked AUDITED. No vendor material and no contamination.
+
+Final verdict: PASS. Open findings: BLOCKER 0, MAJOR 0, MINOR 0, INFO 1.

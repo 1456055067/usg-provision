@@ -1409,9 +1409,14 @@ fn checked_descriptor(sd: &[u8]) -> io::Result<(AlignedBuf, crate::parse::Descri
 /// for file-system objects). `sd` is checked again exactly as
 /// [`descriptor_info`] does before any pointer is passed. The stored
 /// "protected" bits are passed on as the protected or unprotected flags
-/// for the DACL and SACL (OPEN-WAPI-7: whether the result keeps them is
-/// checked on the Windows runner). The handle must carry the access each
-/// part needs (§20).
+/// for the DACL and SACL. The result is not necessarily the stored
+/// descriptor byte for byte: an unprotected DACL or SACL also receives
+/// the parent's inheritable entries (topic 23 §20; observed in CI run
+/// 40974183608). The handle must carry the access each part needs (§20).
+// POAM: unprotected descriptors are merged with the parent's inheritable
+// ACEs; equality with the stored descriptor (as DISM's apply showed,
+// OBS-038) is unverified for real images; MT-2 real-image apply compares;
+// verbatim write probe OPEN-WAPI-7 (`probe_set_kernel_object_security`).
 pub(crate) fn set_file_security(file: &File, sd: &[u8], info: u32) -> io::Result<()> {
     use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
     use windows_sys::Win32::Security::{
@@ -1505,6 +1510,45 @@ pub(crate) fn set_file_security(file: &File, sd: &[u8], info: u32) -> io::Result
         return Err(io::Error::from_raw_os_error(
             i32::try_from(rc).unwrap_or(i32::MAX),
         ));
+    }
+    Ok(())
+}
+
+/// CI probe only (feature `sink-testkit`, OPEN-WAPI-7): sets the parts
+/// `info` of `sd` on `file` with `SetKernelObjectSecurity`, passing the
+/// self-relative descriptor as given (no protected or unprotected flag is
+/// added). Topic 23 §20: its own page says it should not be used for
+/// file-system objects, while "File Security and Access Rights" allows it
+/// for a backup program on a handle opened with backup semantics, as the
+/// writer's metadata handles are. Product code never calls this. `sd` is
+/// checked exactly as [`descriptor_info`] does before the pointer is
+/// passed.
+// COMPLIANCE MAPPING:
+// - NIST 800-53: SA-11 (Developer Testing and Evaluation)
+// - SPEC: specs/standards/windows-storage-firmware-api.md §20 (OPEN-WAPI-7)
+#[cfg(feature = "sink-testkit")]
+pub(crate) fn probe_set_kernel_object_security(
+    file: &File,
+    sd: &[u8],
+    info: u32,
+) -> io::Result<()> {
+    use windows_sys::Win32::Security::SetKernelObjectSecurity;
+
+    let (mut buf, parts) = checked_descriptor(sd)?;
+    if info & !parts_info(&parts) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "requested parts not in the descriptor",
+        ));
+    }
+    // SAFETY: `file` is an open handle that outlives the call; the
+    // descriptor pointer is `buf`, a checked, valid self-relative
+    // descriptor (`checked_descriptor`) that stays live and is only read
+    // for the duration of the call. ACE bodies are left to Windows' own
+    // check, as in `set_file_security` (POAM SEC-004 residual).
+    let ok = unsafe { SetKernelObjectSecurity(file.as_raw_handle(), info, buf.as_mut_ptr()) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }

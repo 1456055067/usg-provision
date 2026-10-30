@@ -159,7 +159,10 @@ pub trait ApplySink {
     fn set_reparse(&mut self, p: &ImagePath, buf: &ReparseBuffer) -> SinkResult;
 
     /// Sets the stored security descriptor `sd` on `p` (the root
-    /// included), byte for byte as stored: PS is not normalised (M-14).
+    /// included). `sd` is passed byte for byte as stored: PS is not
+    /// normalised (M-14). What the target keeps is the sink's: the Windows
+    /// sink applies it with `SetSecurityInfo`, and an unprotected DACL or
+    /// SACL also receives the parent's inheritable entries (topic 23 §20).
     /// On a reparse point it is set on the link itself, never through it.
     ///
     /// # Errors

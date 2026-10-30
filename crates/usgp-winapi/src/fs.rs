@@ -34,7 +34,9 @@
 // - SPEC: specs/standards/reparse-and-security-descriptors.md §2-§9
 // - NIST 800-53: SI-10 (Information Input Validation) - checked
 //   components under one root; SI-7 - only verified image content reaches
-//   here; AC-3 - descriptors applied as stored; AC-6 - privileges enabled
+//   here; AC-3 - stored descriptors applied with
+//   SetSecurityInfo (an unprotected DACL or SACL also receives the parent's
+//   inheritable entries, topic 23 §20; POAM at `ffi::set_file_security`); AC-6 - privileges enabled
 //   only while used
 // - SPEC: specs/preinstall-env.md REQ-PE-017; specs/standards/wim.md §6
 // - DECISION: docs/decisions/0019-windows-api-binding.md
@@ -353,8 +355,10 @@ impl TreeWriter {
         Ok(())
     }
 
-    /// Sets the stored self-relative descriptor `sd`: owner, group, DACL
-    /// and SACL, each as present. A SACL needs `SeSecurityPrivilege`,
+    /// Sets the stored self-relative descriptor `sd` with `SetSecurityInfo`:
+    /// owner, group, DACL and SACL, each as present. An unprotected DACL or
+    /// SACL also receives the parent's inheritable entries (topic 23 §20),
+    /// so the result equals `sd` only when `sd` already carries them. A SACL needs `SeSecurityPrivilege`,
     /// enabled for this call only (topic 23 §23: enable, open with
     /// `ACCESS_SYSTEM_SECURITY`, set, disable); if the token does not hold
     /// it the call fails with [`WinApiError::PrivilegeNotHeld`]. A SACL is
@@ -463,6 +467,31 @@ impl TreeWriter {
             FILE_WRITE_ATTRIBUTES | windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES,
         )?;
         Ok(ffi::update_attributes(&f, |_| value))
+    }
+
+    /// CI probe only (feature `sink-testkit`, OPEN-WAPI-7): sets owner,
+    /// group and DACL of `sd` on `components` with `SetKernelObjectSecurity`
+    /// on the writer's backup-semantics metadata handle (topic 23 §20) and
+    /// returns the raw OS result. A descriptor with a SACL is refused.
+    /// Product code never calls this (it uses [`Self::set_security`]).
+    // COMPLIANCE MAPPING:
+    // - NIST 800-53: SA-11 (Developer Testing and Evaluation)
+    // - SPEC: specs/standards/windows-storage-firmware-api.md §20
+    //   (OPEN-WAPI-7 probe)
+    #[cfg(feature = "sink-testkit")]
+    pub fn probe_set_kernel_object_security(
+        &mut self,
+        components: &[&str],
+        sd: &[u8],
+    ) -> Result<io::Result<()>> {
+        let info = ffi::descriptor_info(sd).map_err(os("check security descriptor"))?;
+        if info & SACL_SECURITY_INFORMATION != 0 {
+            return Err(WinApiError::Refused {
+                reason: "probe does not set a SACL",
+            });
+        }
+        let f = self.open_meta(components, READ_CONTROL | WRITE_OWNER | WRITE_DAC)?;
+        Ok(ffi::probe_set_kernel_object_security(&f, sd, info))
     }
 
     /// Closes any open data handle.

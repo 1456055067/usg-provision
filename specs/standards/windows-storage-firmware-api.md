@@ -16,7 +16,8 @@ SR-3c (2026-10-28) added §20 to §25 and OPEN-WAPI-7 to 12 (AUDITED
 2026-10-29; the OPEN items stay open). REL-M3-WU15-003 (2026-10-29)
 added §28 and OPEN-WAPI-15 (AUDITED 2026-10-29; OPEN-WAPI-15 stays
 open). SR-8 (2026-10-29) added §29 and OPEN-WAPI-16 to 19 (AUDITED 2026-10-29;
-the OPEN items stay open).
+the OPEN items stay open). M4 SR-3 (2026-10-29) added §30, §31 and
+OPEN-WAPI-20 to 24 (AUDITED 2026-10-29; the OPEN items stay open).
 
 Sources: Microsoft Learn Win32 and driver reference pages, one page
 per function, structure or control code, named in each section below.
@@ -436,6 +437,25 @@ Microsoft facts, not product behaviour.
 - **OPEN-WAPI-19** (SR-8, AUDITED): `DeleteVolumeMountPoint` on a drive
   letter is not stated in so many words to leave the volume and its
   data untouched; §29 records it as a reading.
+- **OPEN-WAPI-20** (M4 SR-3): the numeric values of the `UF_`
+  flags used with level 1008 (`UF_SCRIPT`, `UF_ACCOUNTDISABLE` and the
+  rest). The `USER_INFO_1008` page names them but gives no numbers;
+  §30 records the ADSI equivalents as a reading only.
+- **OPEN-WAPI-21** (M4 SR-3): whether level 1008 replaces the
+  whole flag set or merges with it, so whether a caller must first read
+  the current flags and preserve them (§30).
+- **OPEN-WAPI-22** (M4 SR-3): numeric values not given on the
+  cited pages: `NERR_*` codes, `PWLEN`, `LM20_PWLEN`,
+  `POLICY_VIEW_LOCAL_INFORMATION`, `SECURITY_MAX_SID_SIZE`, the
+  `SID_NAME_USE` values, `ERROR_NONE_MAPPED`, `ERROR_NOT_LOCKED` (§30,
+  §31). Confirm from Microsoft's published API metadata or headers.
+- **OPEN-WAPI-23** (M4 SR-3): the account APIs in §30 act on the
+  account database of the **running** system. No cited page says how
+  to set a password or disable an account in an offline Windows image
+  from Windows PE (§30).
+- **OPEN-WAPI-24** (M4 SR-3): the per-version default number of
+  pages a process can lock, and the size of the "small overhead"
+  subtracted from the minimum working set, are not published (§31).
 
 ## 13. Volumes not backed by a disk (SR-3b item 3; AUDITED)
 
@@ -1280,3 +1300,172 @@ Policy" (dated 2017-05-02), "UEFI/GPT-based hard drive partitions"
   example of the argument for a letter shows no trailing backslash
   even though it says one is required; §15's rule (trailing backslash)
   stands.
+
+## 30. Local accounts and the built-in Administrator (M4 SR-3; AUDITED 2026-10-29)
+
+Pages: "NetUserSetInfo function", "USER_INFO_1003", "USER_INFO_1008"
+(lmaccess.h); "LookupAccountSidW function" (winbase.h); "LsaOpenPolicy
+function", "LsaQueryInformationPolicy function", "LsaFreeMemory
+function" (ntsecapi.h); "POLICY_ACCOUNT_DOMAIN_INFO" (lsalookup.h);
+"Policy Object Access Rights"; "Well-known SIDs"; "WELL_KNOWN_SID_TYPE"
+(winnt.h); "CreateWellKnownSid function" (securitybaseapi.h);
+"ADS_USER_FLAG_ENUM" (iads.h). All of these act on the **running**
+system's account database (**OPEN-WAPI-23**).
+
+### 30.1 `NetUserSetInfo` (Netapi32.dll)
+
+- Signature: `NET_API_STATUS NetUserSetInfo(LPCWSTR servername,
+  LPCWSTR username, DWORD level, LPBYTE buf, LPDWORD parm_err)`.
+  `servername` NULL means the local computer. `buf` points to the
+  structure that `level` selects. `parm_err` (may be NULL) receives,
+  on `ERROR_INVALID_PARAMETER`, which structure member was at fault
+  (`USER_PASSWORD_PARMNUM`, `USER_FLAGS_PARMNUM`, ...).
+- Success is `NERR_Success`. Named failures: `ERROR_ACCESS_DENIED`,
+  `ERROR_INVALID_PARAMETER`, `NERR_InvalidComputer`,
+  `NERR_NotPrimary`, `NERR_SpeGroupOp`, `NERR_LastAdmin` (would change
+  privilege or disable the last account with administrator privilege),
+  `NERR_BadPassword`, `NERR_PasswordTooShort` (the page says this also
+  covers too long, too recently used, too few distinct characters or
+  any other policy failure), `NERR_UserNotFound`. The return value is
+  the error itself; the page does not say to call `GetLastError`.
+- Who may call: on a workstation or member server, only Administrators
+  and Power Users. An administrator can set a password without knowing
+  the old one; the only check then is that the length fits the system
+  limits. **[reading]** Password-policy checks are reported through
+  `NERR_PasswordTooShort` anyway, so callers must treat it as "policy
+  rejected", not literally "too short".
+- **Level 1003** sets the password. `USER_INFO_1003` has one member,
+  `LPWSTR usri1003_password` (a pointer to a null-terminated UTF-16
+  string). Its length may not exceed `PWLEN` bytes; by convention
+  passwords are kept to `LM20_PWLEN` characters (values:
+  **OPEN-WAPI-22**). The page notes that the function itself does not
+  control how the password is protected when sent to a **remote**
+  server; with `servername` NULL nothing leaves the machine.
+  **[reading]** The password buffer is caller memory and stays there
+  after the call; wiping it is the caller's job.
+- **Level 1008** sets account flags. `USER_INFO_1008` has one member,
+  `DWORD usri1008_flags`. The page says `UF_SCRIPT` **must be set** in
+  the value. `UF_ACCOUNTDISABLE` disables the account. Other flags
+  listed: `UF_HOMEDIR_REQUIRED` (ignored), `UF_PASSWD_NOTREQD`,
+  `UF_PASSWD_CANT_CHANGE`, `UF_LOCKOUT` (can be cleared to unlock, not
+  set to lock), `UF_DONT_EXPIRE_PASSWD`,
+  `UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED`, `UF_NOT_DELEGATED`,
+  `UF_SMARTCARD_REQUIRED`, `UF_USE_DES_KEY_ONLY`,
+  `UF_DONT_REQUIRE_PREAUTH`, `UF_TRUSTED_FOR_DELEGATION`,
+  `UF_PASSWORD_EXPIRED`, `UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION`,
+  plus account-type values (`UF_NORMAL_ACCOUNT` and others) of which
+  only one may be set and which this call cannot change. The page
+  gives **no numeric values** (**OPEN-WAPI-20**). **[reading]** The
+  ADSI page says its `ADS_UF_*` flags correspond to the WinNT
+  provider's user-flags attribute and gives `ADS_UF_SCRIPT` = `0x1`,
+  `ADS_UF_ACCOUNTDISABLE` = `0x2`, `ADS_UF_NORMAL_ACCOUNT` = `0x200`;
+  that the `UF_` values are the same is likely but not stated.
+- Whether level 1008 overwrites all flags or merges is not stated
+  (**OPEN-WAPI-21**). **[reading]** Since `UF_SCRIPT` is required and
+  the account-type bits cannot change, the safe course is to read the
+  current flags first and write them back with only the wanted bit
+  changed.
+- Microsoft's own example for disabling an account describes the call
+  as using "level 0" in its prose but passes 1008 in the call; 1008 is
+  the documented level for flags.
+- Account names: at most 20 characters; may not end in a period; may
+  not contain `" / \ [ ] : | < > + = ; ? *`, commas, or characters
+  1 to 31.
+
+### 30.2 Finding the built-in Administrator by SID
+
+The built-in Administrator can be renamed, so it is found by SID, not
+by name.
+
+- **Account-domain SID.** `LsaOpenPolicy(PLSA_UNICODE_STRING
+  SystemName, PLSA_OBJECT_ATTRIBUTES ObjectAttributes, ACCESS_MASK
+  DesiredAccess, PLSA_HANDLE PolicyHandle)`: `SystemName` NULL for the
+  local system; the object-attributes structure is unused and must be
+  zeroed. The page says the process must run as administrator or the
+  call fails with access denied. Then `LsaQueryInformationPolicy(
+  LSA_HANDLE PolicyHandle, POLICY_INFORMATION_CLASS InformationClass,
+  PVOID *Buffer)` with `PolicyAccountDomainInformation`; the handle
+  needs `POLICY_VIEW_LOCAL_INFORMATION` (value: **OPEN-WAPI-22**). It
+  returns a `POLICY_ACCOUNT_DOMAIN_INFO { LSA_UNICODE_STRING
+  DomainName; PSID DomainSid; }`, the name and SID of the machine's
+  account domain. (`PolicyPrimaryDomainInformation` is the joined
+  domain, which is a different thing.) Free the buffer with
+  `LsaFreeMemory(PVOID)`; close the handle with `LsaClose`. These LSA
+  calls return `NTSTATUS` (`STATUS_SUCCESS` on success);
+  `LsaNtStatusToWinError` converts a failure to a Win32 error code.
+- **Forming the SID.** The "Well-known SIDs" page gives
+  `DOMAIN_USER_RID_ADMIN` = `0x000001F4` (500) as the administrative
+  user account in a domain, relative to that domain, and
+  `DOMAIN_USER_RID_GUEST` = `0x1F5` (501). The Administrator SID is the
+  account-domain SID with RID 500 appended as one more sub-authority.
+  Machine account domains use the `S-1-5-21-...` form
+  (`SECURITY_NT_AUTHORITY` = 5; `SECURITY_NT_NON_UNIQUE` = 21).
+  **[reading]** The page shows the 21 prefix but does not walk through
+  a local machine example.
+- **Alternative.** `CreateWellKnownSid(WELL_KNOWN_SID_TYPE type, PSID
+  DomainSid, PSID pSid, DWORD *cbSid)` with
+  `WinAccountAdministratorSid` (= 38). `DomainSid` NULL means "the
+  local computer". `*cbSid` is bytes available in, bytes used out.
+  Returns nonzero on success; zero and `GetLastError` on failure.
+  **[reading]** Passing the account-domain SID from above explicitly
+  avoids relying on what NULL resolves to on a domain-joined machine.
+  Do not confuse with `WinBuiltinAdministratorsSid` (= 26), the
+  Administrators **group** `S-1-5-32-544`.
+- **SID to name.** `LookupAccountSidW(LPCWSTR lpSystemName, PSID Sid,
+  LPWSTR Name, LPDWORD cchName, LPWSTR ReferencedDomainName, LPDWORD
+  cchReferencedDomainName, PSID_NAME_USE peUse)`. `lpSystemName` NULL
+  starts on the local system (and may fall back to trusted domain
+  controllers). Sizes are in characters; if a buffer is too small or
+  its size is zero, the call fails and writes back the size needed,
+  **including** the terminating null (**[reading]** the usual error is
+  `ERROR_INSUFFICIENT_BUFFER`; the page does not name it). Returns
+  nonzero on success, zero plus `GetLastError` on failure;
+  `ERROR_NONE_MAPPED` when no name exists (including after a network
+  time-out). On a workstation the domain returned for local accounts
+  is the computer name as of last start. `peUse` gets a `SID_NAME_USE`
+  value (values: **OPEN-WAPI-22**). The name obtained is what to pass
+  as `username` to `NetUserSetInfo`.
+
+## 31. Locking memory pages (M4 SR-3; AUDITED 2026-10-29)
+
+Pages: "VirtualLock function", "VirtualUnlock function",
+"SetProcessWorkingSetSize" (memoryapi.h, Kernel32.dll).
+
+- Signatures: `BOOL VirtualLock(LPVOID lpAddress, SIZE_T dwSize)` and
+  `BOOL VirtualUnlock(LPVOID lpAddress, SIZE_T dwSize)`. Nonzero on
+  success; zero and `GetLastError` on failure.
+- **Alignment.** Neither address nor size must be page-aligned. The
+  call affects every page holding at least one byte of
+  `[lpAddress, lpAddress + dwSize)`; a 2-byte range that crosses a page
+  boundary affects both pages. **[reading]** So locking a small secret
+  buffer also locks whatever else shares its pages, and unlocking it
+  unlocks those neighbours too.
+- **VirtualLock preconditions.** Every page in the range must be
+  committed; `PAGE_NOACCESS` memory cannot be locked.
+- **Effect.** Locked pages stay in physical memory until unlocked or
+  the process ends, and are guaranteed not to be written to the
+  pagefile while locked. Process exit unlocks automatically. There is
+  **no lock count**: one unlock undoes any number of locks.
+  **[reading]** This says nothing about hibernation or crash dumps;
+  locking prevents pagefile writes only.
+- **Limit.** Each Windows version limits how many pages a process may
+  lock, deliberately small. The maximum is the number of pages in the
+  process's minimum working set minus a small overhead (exact defaults
+  and overhead: **OPEN-WAPI-24**). To lock more, first raise the
+  working set with `SetProcessWorkingSetSize(HANDLE hProcess, SIZE_T
+  dwMinimumWorkingSetSize, SIZE_T dwMaximumWorkingSetSize)`: handle
+  needs `PROCESS_SET_QUOTA`; minimum must be above zero and not above
+  the maximum (below 20 pages is raised to 20; default 50 pages);
+  maximum at least 13 pages and below available pages minus 512
+  (default 345 pages). Raising either value above the current one
+  needs `SE_INC_WORKING_SET_NAME`, which the page says users generally
+  have. Both values `(SIZE_T)-1` empties the working set instead.
+  Requests are granted first-come first-served and can be refused.
+- **VirtualUnlock.** The range need not match an earlier lock, but
+  **every** page in it must be locked. If any is not, the call removes
+  those pages from the working set, sets `ERROR_NOT_LOCKED` and
+  returns FALSE. **[reading]** A caller unlocking exactly what it
+  locked should treat `ERROR_NOT_LOCKED` as a sign the lock had
+  silently failed or been undone, not as harmless.
+- Wiping the contents before unlock or free is not covered by these
+  pages; it is the caller's duty.

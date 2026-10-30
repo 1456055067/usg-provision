@@ -19,7 +19,7 @@
 
 use usgp_common::Sha256Digest;
 use usgp_proto::JobId;
-use usgp_proto::progress::{ProgressAckV1, ProgressV1};
+use usgp_proto::progress::{ProgressAckV1, ProgressV1, ProgressV2};
 
 /// Why a server request failed, as the engine needs to know it.
 ///
@@ -82,3 +82,21 @@ pub trait ServerLink {
     /// [`LinkError`].
     fn report(&mut self, job: JobId, report: &ProgressV1) -> Result<ProgressAckV1, LinkError>;
 }
+
+/// Progress schema 2 (M4 plan section 3.1): the WinPE agent sends steps 1
+/// to 6 with its session token, the post-setup runner steps 7 to 9 with
+/// its resume token. The implementation holds the token; it never reaches
+/// the engine.
+pub trait ProgressLinkV2 {
+    /// `POST /v1/device/jobs/{job}/progress` with a [`ProgressV2`] body.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError`].
+    fn report_v2(&mut self, job: JobId, report: &ProgressV2) -> Result<ProgressAckV1, LinkError>;
+}
+
+/// The WinPE link of a v2 job: chunk fetch and v2 progress.
+pub trait ServerLinkV2: ServerLink + ProgressLinkV2 {}
+
+impl<T: ServerLink + ProgressLinkV2 + ?Sized> ServerLinkV2 for T {}

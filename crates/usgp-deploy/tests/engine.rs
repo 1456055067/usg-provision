@@ -819,8 +819,19 @@ fn slow_boot_file_step_times_out() {
 fn wipe_authorisation_is_built_only_by_the_engine() {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
-    for entry in std::fs::read_dir(&src).unwrap() {
-        let p = entry.unwrap().path();
+    let mut dirs = vec![src];
+    let mut files = Vec::new();
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else {
+                files.push(p);
+            }
+        }
+    }
+    for p in files {
         let text = std::fs::read_to_string(&p).unwrap();
         let n = text
             .matches("WipeAuthorisation::from_verified_plan(")

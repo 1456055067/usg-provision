@@ -16,17 +16,21 @@ usgp-wincfg.workspace = true
 # usgp-crypto (decision 0001). Already in this crate's tree via usgp-image.
 usgp-crypto.workspace = true
 thiserror.workspace = true
-# Feature `sim` only: the simulated firmware-variable file is JSON.
-serde_json = { workspace = true, optional = true }
+# M4: job.json and tags.json (and, for feature `sim`, the simulated
+# firmware-variable file) are JSON.
+serde_json.workspace = true
+# M4: the job key and the generated password are zeroized (CLAUDE.md).
+zeroize.workspace = true
 
 [features]
 # Simulated platform (plan WU-8 `src/sim.rs`): regular files as disks, a
 # directory as the Windows volume and a JSON file as firmware variables.
 # For the agent's simulation tests only; never enabled by release builds.
-sim = ["dep:serde_json"]
+sim = []
 
 [dev-dependencies]
 usgp-image = { workspace = true, features = ["testkit"] }
+usgp-wincfg = { workspace = true, features = ["testkit"] }
 
 [lints]
 workspace = true

@@ -17,7 +17,7 @@ use std::fmt;
 
 use usgp_proto::ErrorCode;
 use usgp_proto::codes;
-use usgp_proto::progress::{FailureCategory, FailureV1, ProgressItemV1, Step};
+use usgp_proto::progress::{FailureCategory, FailureV1, FailureV2, ProgressItemV1, Step, StepV2};
 
 /// Reason codes this crate adds to the shared table in `usgp-proto`
 /// (syntax checked by a unit test; same rules as every other code).
@@ -55,6 +55,19 @@ pub mod code {
     /// The Windows volume's apply root is not a bare drive letter, or none
     /// is free (same text as `usgp-image`'s `ApplyRootError` code).
     pub const APPLY_ROOT_UNSUPPORTED: &str = "apply_root_unsupported";
+    /// M4: the driver listing could not be read or parsed (step 4).
+    pub const DRIVER_LIST_FAILED: &str = "driver_list_failed";
+    /// M4: a file could not be written to the Windows volume (step 5).
+    pub const CONFIG_WRITE_FAILED: &str = "config_write_failed";
+    /// M4: the answer file at the Panther path could not be deleted, or
+    /// is still there after deletion (step 7).
+    pub const ANSWER_FILE_NOT_REMOVED: &str = "answer_file_not_removed";
+    /// M4: the administrator password's memory could not be locked
+    /// (step 7; nothing was generated or sent).
+    pub const SECRET_MEMORY_LOCK_FAILED: &str = "secret_memory_lock_failed";
+    /// M4: the agent package could not be extracted or its `agent.json` is
+    /// missing or invalid (step 8).
+    pub const AGENT_PACKAGE_INVALID: &str = "agent_package_invalid";
 
     /// Every code above.
     pub const ALL: &[&str] = &[
@@ -73,6 +86,11 @@ pub mod code {
         SERVER_UNREACHABLE,
         SUCCESS_NOT_ACCEPTED,
         APPLY_ROOT_UNSUPPORTED,
+        DRIVER_LIST_FAILED,
+        CONFIG_WRITE_FAILED,
+        ANSWER_FILE_NOT_REMOVED,
+        SECRET_MEMORY_LOCK_FAILED,
+        AGENT_PACKAGE_INVALID,
     ];
 }
 
@@ -167,6 +185,97 @@ impl fmt::Display for JobFailure {
 
 impl std::error::Error for JobFailure {}
 
+/// A failed v2 job step (M4: steps 4 to 9), as shown at the device or
+/// recorded by the post-setup runner, and reported to the server. Same
+/// rules as [`JobFailure`]: fixed words and numbers, never a secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFailureV2 {
+    /// The step that failed.
+    pub step: StepV2,
+    /// Network, integrity, refusal, local or timeout.
+    pub category: FailureCategory,
+    /// Stable reason code, possibly with parameters
+    /// (`driver_not_staged:<archive>:<inf>`).
+    pub code: ErrorCode,
+    /// Attempts made (1 if the failure is not retried).
+    pub attempts: u32,
+    /// Fixed words and numbers for the person and the operator.
+    pub message: String,
+}
+
+impl JobFailureV2 {
+    /// A failure with one attempt.
+    pub(crate) fn new(
+        step: StepV2,
+        category: FailureCategory,
+        code: ErrorCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            step,
+            category,
+            code,
+            attempts: 1,
+            message: screen_text(&message.into()),
+        }
+    }
+
+    /// The wire form for the v2 progress report.
+    #[must_use]
+    pub fn to_wire(&self) -> FailureV2 {
+        FailureV2 {
+            step: self.step,
+            category: self.category,
+            code: self.code.clone(),
+            files: Vec::new(),
+            count: 0,
+            attempts: self
+                .attempts
+                .clamp(1, usgp_proto::limits::MAX_REPORTED_ATTEMPTS),
+        }
+    }
+}
+
+impl fmt::Display for JobFailureV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "step {} failed ({}, {}): {}",
+            self.step, self.category, self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for JobFailureV2 {}
+
+/// `base:<p1>:<p2>…` with each parameter reduced to the code alphabet
+/// (lower case; any other byte becomes `_`) and the whole kept within the
+/// code length limit; if even the base does not fit, the base alone.
+pub(crate) fn code_with(base: &ErrorCode, params: &[&str]) -> ErrorCode {
+    let mut text = base.as_str().to_owned();
+    for p in params {
+        let clean: String = p
+            .chars()
+            .map(|c| {
+                let c = c.to_ascii_lowercase();
+                if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        text.push(':');
+        text.push_str(if clean.is_empty() { "_" } else { &clean });
+    }
+    let max = usgp_proto::limits::MAX_ERROR_CODE_BYTES;
+    if text.len() > max {
+        // Only ASCII is pushed above, so any byte index is a boundary.
+        text.truncate(max);
+    }
+    ErrorCode::new(text).unwrap_or_else(|_| base.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +313,38 @@ mod tests {
         f.attempts = 0;
         assert!(f.to_wire().validate().is_ok());
         assert_eq!(f.to_wire().attempts, 1);
+    }
+
+    #[test]
+    fn parameterised_codes_are_valid_and_bounded() {
+        let c = code_with(
+            &codes::DRIVER_NOT_STAGED,
+            &["0b7c2f4e-9a1d-4c3b-8e6f-1a2b3c4d5e6f", "Net Card/E1000.INF"],
+        );
+        assert_eq!(
+            c.as_str(),
+            "driver_not_staged:0b7c2f4e-9a1d-4c3b-8e6f-1a2b3c4d5e6f:net_card_e1000.inf"
+        );
+        let long = "x".repeat(400);
+        let c = code_with(&codes::DRIVER_NOT_STAGED, &[&long]);
+        assert_eq!(c.as_str().len(), usgp_proto::limits::MAX_ERROR_CODE_BYTES);
+        assert_eq!(c.base(), "driver_not_staged");
+        assert_eq!(
+            code_with(&codes::ESCROW_REFUSED, &[""]).as_str(),
+            "escrow_refused:_"
+        );
+    }
+
+    #[test]
+    fn v2_wire_form_is_valid() {
+        let mut f = JobFailureV2::new(
+            StepV2::ADD_DRIVERS,
+            FailureCategory::Local,
+            codes::STAGING_NOT_REMOVED,
+            "x\u{1b}",
+        );
+        f.attempts = 0;
+        assert!(f.to_wire().validate().is_ok());
+        assert_eq!(f.message, "x?");
     }
 }

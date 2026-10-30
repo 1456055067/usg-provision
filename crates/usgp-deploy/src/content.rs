@@ -30,7 +30,7 @@ use usgp_common::Sha256Digest;
 use usgp_crypto::CryptoProvider;
 use usgp_image::wim::remote::{ChunkFetchError, ChunkSource};
 use usgp_proto::JobId;
-use usgp_proto::content_manifest::ContentManifestV1;
+use usgp_proto::content_manifest::{ContentManifestV1, ContentManifestV2, chunk_count};
 use usgp_proto::job_plan::{RetryPolicyV1, VerifiedJobPlan};
 
 use crate::clock::{Clock, TimeLimit, Watch, backoff};
@@ -103,12 +103,37 @@ pub(crate) trait FetchHook {
     fn fetched(&self, link: &mut dyn ServerLink);
 }
 
-/// Verified chunks of the plan's image (plan section 3.3).
+/// The signed manifest whose chunk digests are the reference: the image
+/// (v1) or a driver archive or agent package (v2; M4 plan WU-4a).
+#[derive(Clone, Copy)]
+enum ManifestRef<'a> {
+    V1(&'a ContentManifestV1),
+    V2(&'a ContentManifestV2),
+}
+
+impl ManifestRef<'_> {
+    fn size(self) -> u64 {
+        match self {
+            Self::V1(m) => m.size,
+            Self::V2(m) => m.size,
+        }
+    }
+
+    fn chunk(self, n: u64) -> Option<(u64, Sha256Digest)> {
+        match self {
+            Self::V1(m) => m.chunk(n).map(|(l, d)| (l, *d)),
+            Self::V2(m) => m.chunk(n).map(|(l, d)| (l, *d)),
+        }
+    }
+}
+
+/// Verified chunks of the plan's image (plan section 3.3), or of one
+/// driver archive or agent package (M4 plan section 1.4).
 pub struct VerifiedChunks<'a> {
     link: &'a mut dyn ServerLink,
     crypto: &'a dyn CryptoProvider,
     clock: &'a dyn Clock,
-    manifest: &'a ContentManifestV1,
+    manifest: ManifestRef<'a>,
     job: JobId,
     content: Sha256Digest,
     retry: RetryPolicyV1,
@@ -144,7 +169,7 @@ impl<'a> VerifiedChunks<'a> {
             link,
             crypto,
             clock,
-            manifest: plan.content_manifest(),
+            manifest: ManifestRef::V1(plan.content_manifest()),
             job: p.job_id,
             content: p.image.content_sha256,
             retry: p.retry,
@@ -155,6 +180,65 @@ impl<'a> VerifiedChunks<'a> {
             failure: None,
             fetched_bytes: 0,
         }
+    }
+
+    /// Chunks of one driver archive or agent package (`manifest`, already
+    /// verified as part of a v2 plan), fetched over `link` for `job` with
+    /// the plan's `retry` policy (M4 plan section 1.4: re-verified chunk
+    /// by chunk at the step that uses it).
+    pub fn for_archive(
+        link: &'a mut dyn ServerLink,
+        crypto: &'a dyn CryptoProvider,
+        clock: &'a dyn Clock,
+        job: JobId,
+        retry: RetryPolicyV1,
+        manifest: &'a ContentManifestV2,
+    ) -> Self {
+        Self {
+            link,
+            crypto,
+            clock,
+            manifest: ManifestRef::V2(manifest),
+            job,
+            content: manifest.sha256,
+            retry,
+            watch: None,
+            hook: None,
+            cache: [None, None],
+            next_slot: 0,
+            failure: None,
+            fetched_bytes: 0,
+        }
+    }
+
+    /// Fetches and verifies every chunk, in order, into one buffer, and
+    /// then checks the SHA-256 of the whole content against the manifest.
+    /// Content larger than `max_bytes` is refused before any fetch.
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkError`]; a whole-file digest mismatch is
+    /// [`ChunkErrorKind::Digest`] on the last chunk, and an oversized
+    /// content is [`ChunkErrorKind::Length`] on chunk 0.
+    pub fn read_all(&mut self, max_bytes: u64) -> Result<Vec<u8>, ChunkError> {
+        let size = self.manifest.size();
+        let Some(cap) = usize::try_from(size).ok().filter(|_| size <= max_bytes) else {
+            return Err(self.fail(ChunkErrorKind::Length, 0, 0));
+        };
+        let mut out = Vec::with_capacity(cap);
+        let n = chunk_count(size);
+        for i in 0..n {
+            let c = self.get(i)?;
+            out.extend_from_slice(&c);
+        }
+        let want = match self.manifest {
+            ManifestRef::V1(m) => m.sha256,
+            ManifestRef::V2(m) => m.sha256,
+        };
+        if self.crypto.sha256(&out) != want {
+            return Err(self.fail(ChunkErrorKind::Digest, n.saturating_sub(1), 1));
+        }
+        Ok(out)
     }
 
     /// Applies a step's time limits.
@@ -184,13 +268,13 @@ impl<'a> VerifiedChunks<'a> {
     /// The content's length in bytes.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.manifest.size
+        self.manifest.size()
     }
 
     /// `true` for empty content (never, for a valid manifest).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.manifest.size == 0
+        self.manifest.size() == 0
     }
 
     fn fail(&mut self, kind: ChunkErrorKind, chunk: u64, attempts: u32) -> ChunkError {
@@ -222,7 +306,7 @@ impl<'a> VerifiedChunks<'a> {
         if let Some(c) = self.cache.iter().flatten().find(|(k, _)| *k == n) {
             return Ok(Arc::clone(&c.1));
         }
-        let Some((len, digest)) = self.manifest.chunk(n).map(|(l, d)| (l, *d)) else {
+        let Some((len, digest)) = self.manifest.chunk(n) else {
             return Err(self.fail(ChunkErrorKind::NoDigest, n, 0));
         };
         let mut attempts: u32 = 0;
@@ -281,11 +365,11 @@ impl<'a> VerifiedChunks<'a> {
 
 impl ChunkSource for VerifiedChunks<'_> {
     fn content_len(&self) -> u64 {
-        self.manifest.size
+        self.manifest.size()
     }
 
     fn expected_sha256(&self, n: u64) -> Option<Sha256Digest> {
-        self.manifest.chunk(n).map(|(_, d)| *d)
+        self.manifest.chunk(n).map(|(_, d)| d)
     }
 
     fn fetch(&mut self, n: u64) -> Result<Arc<[u8]>, ChunkFetchError> {

@@ -40,6 +40,7 @@ use usgp_disk::uefi::BootVarName;
 use usgp_disk::{BlockDevice, DiskFacts};
 use usgp_image::apply::{ApplyRoot, ApplySink};
 use usgp_proto::disk::{FileSystem, PlanDiskV1};
+use usgp_wincfg::archive::ExtractSink;
 
 /// What went wrong in a platform operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,7 +285,143 @@ pub trait FirmwareVars {
     fn set(&mut self, name: &BootVarName, data: &[u8]) -> Result<(), FwError>;
 }
 
+// ---------------------------------------------------------------------------
+// M4: steps 4 to 6 on the applied Windows volume (M4 plan WU-7, §1.4, §1.2)
+// ---------------------------------------------------------------------------
+
+// COMPLIANCE MAPPING:
+// - NIST 800-53: CM-7 (Least Functionality) - every path the engine can
+//   name on the target is a closed set built from fixed text and our own
+//   integer indexes, never from archive or plan text; no `/ForceUnsigned`
+//   argument exists in the interface.
+// - NIST 800-53: AC-3, AC-6 - `job.key` is written with a protected DACL
+//   (SYSTEM only) by the platform.
+// - SPEC: specs/drivers.md#REQ-DRV-004, #REQ-DRV-007
+// - DECISION: docs/decisions/0024 item 4, 0025
+
+/// Name of the staging folder at the root of the Windows volume
+/// (`W:\$usgp-stage\`; M4 plan §1.4).
+pub const STAGE_ROOT: &str = "$usgp-stage";
+
+/// One driver archive's folder below the staging root:
+/// `$usgp-stage\drv\<i>`, where `i` is the archive's 0-based position in
+/// the plan. Built only from that integer (M4 plan §1.4: paths never come
+/// from archive names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StagePath {
+    index: u16,
+}
+
+impl StagePath {
+    /// The folder of the archive at plan position `index`.
+    #[must_use]
+    pub const fn driver(index: u16) -> Self {
+        Self { index }
+    }
+
+    /// The archive's plan position.
+    #[must_use]
+    pub const fn index(self) -> u16 {
+        self.index
+    }
+
+    /// The path relative to the Windows volume root, `\`-separated.
+    #[must_use]
+    pub fn relative(self) -> String {
+        format!("{STAGE_ROOT}\\drv\\{}", self.index)
+    }
+}
+
+/// A file in the post-setup folder `ProgramData\usgp\postsetup\` (M4
+/// plan §1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostSetupFile {
+    /// `usgp-agent.exe`, a copy of the running agent binary.
+    AgentExe,
+    /// `job.json` (`PostSetupConfigV1`, non-secret).
+    JobJson,
+    /// `job.key`, the job private key (PKCS#8; SYSTEM-only DACL).
+    JobKey,
+    /// `agent-package.zip`, the agent package as verified at step 5.
+    AgentPackage,
+}
+
+impl PostSetupFile {
+    /// The file name.
+    #[must_use]
+    pub const fn file_name(self) -> &'static str {
+        match self {
+            Self::AgentExe => "usgp-agent.exe",
+            Self::JobJson => "job.json",
+            Self::JobKey => "job.key",
+            Self::AgentPackage => "agent-package.zip",
+        }
+    }
+}
+
+/// Every file the engine writes on the applied Windows volume at step 5.
+/// A closed set: no other path can be named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetPath {
+    /// `Windows\Panther\unattend.xml` (`unattend.md` §2.1).
+    AnswerFile,
+    /// `Windows\Setup\Scripts\SetupComplete.cmd` (`unattend.md` §5).
+    SetupComplete,
+    /// A file in `ProgramData\usgp\postsetup\`.
+    PostSetup(PostSetupFile),
+}
+
+/// How a target file is protected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileProtection {
+    /// Inherited permissions.
+    Inherited,
+    /// A protected DACL granting SYSTEM full control and nothing else.
+    SystemOnly,
+}
+
+impl TargetPath {
+    /// The path relative to the Windows volume root, `\`-separated.
+    #[must_use]
+    pub fn relative(self) -> String {
+        match self {
+            Self::AnswerFile => "Windows\\Panther\\unattend.xml".to_owned(),
+            Self::SetupComplete => "Windows\\Setup\\Scripts\\SetupComplete.cmd".to_owned(),
+            Self::PostSetup(f) => format!("ProgramData\\usgp\\postsetup\\{}", f.file_name()),
+        }
+    }
+
+    /// The protection the platform must apply when it creates the file.
+    #[must_use]
+    pub const fn protection(self) -> FileProtection {
+        match self {
+            Self::PostSetup(PostSetupFile::JobKey) => FileProtection::SystemOnly,
+            _ => FileProtection::Inherited,
+        }
+    }
+}
+
+/// The result of an external tool (DISM) that ran to completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutcome {
+    /// The process exit code.
+    pub exit_code: i32,
+    /// The end of the tool's log (at most 2 KiB, printable ASCII only,
+    /// already redacted by the platform; M4 plan §1.4). Holds no secret.
+    pub log_tail: String,
+}
+
+/// The platform error every M4 method returns until an implementation
+/// provides it: the engine fails the step closed.
+const fn not_provided(what: &'static str) -> PlatformError {
+    PlatformError::new(PlatformErrorKind::Unsupported, what)
+}
+
 /// Everything platform-specific the engine uses.
+///
+/// The M4 methods (steps 4 and 5) have default bodies that refuse with
+/// [`PlatformErrorKind::Unsupported`], so an M3 platform keeps compiling
+/// and an M4 step on it fails closed.
 pub trait Platform {
     /// Opens the disk `want` names for writing and reads its facts. The
     /// implementation resolves `want.disk_token` to the device from its
@@ -304,4 +441,86 @@ pub trait Platform {
 
     /// Firmware variables.
     fn firmware(&mut self) -> &mut dyn FirmwareVars;
+
+    /// A sink that creates the extracted files of one archive in the
+    /// folder `dir` names below the staging root of the Windows volume.
+    /// The folder must not exist yet; the platform creates it and the
+    /// staging root. Paths given to the sink are validated relative paths
+    /// joined below `dir` only; reparse points are never created.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn stage_sink(&mut self, dir: &StagePath) -> Result<Box<dyn ExtractSink + '_>, PlatformError> {
+        let _ = dir;
+        Err(not_provided("driver staging"))
+    }
+
+    /// Adds the drivers in `dir` to the offline Windows volume:
+    /// `dism /English /Image:<W>:\ /Add-Driver /Driver:<W>:\<dir>\
+    /// /Recurse /LogPath:… /LogLevel:3`, as an argument vector without a
+    /// shell (M4 plan §1.4). `/ForceUnsigned` is never passed
+    /// (REQ-DRV-007).
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`] if the tool could not be run or timed out; a
+    /// non-zero exit is an `Ok` [`ToolOutcome`].
+    fn dism_add_driver(&mut self, dir: &StagePath) -> Result<ToolOutcome, PlatformError> {
+        let _ = dir;
+        Err(not_provided("driver add"))
+    }
+
+    /// The offline volume's driver listing:
+    /// `dism /English /Image:<W>:\ /Get-Drivers /Format:List` output
+    /// (at most 4 MiB), for `usgp_wincfg::dism::parse_driver_table`.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`], also for a non-zero exit.
+    fn dism_list_drivers(&mut self) -> Result<String, PlatformError> {
+        Err(not_provided("driver listing"))
+    }
+
+    /// Removes the staging root and everything below it, without
+    /// following reparse points (M4 plan §6.2). Succeeds if it is absent.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn remove_staging(&mut self) -> Result<(), PlatformError> {
+        Err(not_provided("staging removal"))
+    }
+
+    /// `true` if anything exists at the staging root's path.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn staging_exists(&mut self) -> Result<bool, PlatformError> {
+        Err(not_provided("staging check"))
+    }
+
+    /// Creates `p` on the Windows volume with `bytes`, creating its
+    /// folders, and applies [`TargetPath::protection`]. The file must not
+    /// exist: an existing file is refused with
+    /// `Io(io::ErrorKind::AlreadyExists)` and left unchanged (create-new).
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn write_protected_file(&mut self, p: &TargetPath, bytes: &[u8]) -> Result<(), PlatformError> {
+        let _ = (p, bytes);
+        Err(not_provided("target file write"))
+    }
+
+    /// The bytes of the running agent binary (copied to the post-setup
+    /// folder at step 5; M4 plan §1.2).
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformError`].
+    fn agent_binary(&mut self) -> Result<Vec<u8>, PlatformError> {
+        Err(not_provided("agent binary read"))
+    }
 }

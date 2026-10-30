@@ -634,12 +634,11 @@ impl WinVolumes {
             script_dir: &script_dir,
             tool_limit: self.budget.tool,
         };
-        // POAM: BOOT-004 - if Windows will not format a partition that
-        // already carries the recovery type and attributes, this fails
-        // closed (the job stops after the wipe). The fallback (write it as
-        // basic data, format, then rewrite the GPT entry with the recovery
-        // type, backup first, with read-back) waits for the CI evidence
-        // from `vhd_disk.rs` `boot004_recovery_typed_partition_formats`.
+        // BOOT-004: Windows formats a partition that already carries the
+        // recovery type and attributes (`vhd_disk.rs`
+        // `boot004_recovery_typed_partition_formats`, CI run 40980499705),
+        // so the recovery partition is formatted in place; a refusal still
+        // fails closed.
         format::format_at_letter(&target, &vol, letter, &env, random)
             .map_err(|e| format_err(&e, "format volume"))?;
         let locator = vol.as_str().to_owned();

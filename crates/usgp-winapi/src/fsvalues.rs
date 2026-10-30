@@ -143,7 +143,8 @@ pub fn attributes_to_send(
 // - SPEC: specs/standards/windows-storage-firmware-api.md §22 (topic 23;
 //   OPEN-WAPI-11: CI run 40962201434 showed a named-stream write set
 //   ARCHIVE on a directory stored with no settable bit; OPEN-WAPI-12:
-//   `NORMAL` on a directory is not relied on, so it cannot be cleared)
+//   `NORMAL` on a directory is undocumented and not relied on, although
+//   CI run 40974183608's probe saw it clear ARCHIVE; POAM-61)
 // POAM: directory ARCHIVE left set when the image stores no settable bits
 // and a named-stream write set it; OPEN-WAPI-12; harmless metadata
 // difference, content hash-verified

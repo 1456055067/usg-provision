@@ -22,7 +22,8 @@ M3 evidence status: the M3 relay code is tested in-process. In CI on
 and boot smoke S9 (a stopped device gets no answer from the relay and
 OVMF falls through to its disk; clearing the stop restores network boot)
 passed in run 40910029759 (commit fff029f) and again, with S1 to S10,
-in run 40928612312 (commit 21c1efb), with OVMF and a test payload, not
+in runs 40928612312 (commit 21c1efb) and 40980499705 (commit 7cd5ecf),
+with OVMF and a test payload, not
 Windows PE. Serving a real Windows PE, and how Microsoft's
 boot program handles window size and wraparound, are owner lab
 procedure MT-2, which is **NOT RUN**
@@ -728,6 +729,7 @@ pass the trust checks above, and a user-owned `$TMPDIR` would fail them
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | Evidence status: S1 to S10 passed again in CI run 40980499705. |
 | 2026-10-29 | Evidence status: S1 to S10 passed in CI run 40928612312. |
 | 2026-10-29 | M3 (WU-16; `m3/build` at 21c1efb). Title, scope and M3 evidence status (S1 to S8 again in CI 40876728637; S9 PASS in CI 40910029759 with OVMF and a test payload; MT-2 NOT RUN). Files table: feed material, client-key mode rule, the boot-policy cache (the relay's only written file). `[tftp]`: new defaults for `max_transfer_secs` (1800, up to 7200) and `max_file_size_bytes` (1 GiB), new `max_window_size` and `block_wrap`, and the OPEN-WPXE-2 / OPEN-WPXE-4 note. New `[server_feed]` reference, including that a `[pe_kit]` requires an enabled feed. New sections: Windows PE boot kit (`[pe_kit]`, kit checks, `boot.kit.incomplete`, unsigned manifest POAM-6) and Boot policy from the server (set-up, checks, fail-safe `awaiting` state, the cache and POAM-55, restore and raise-generation, stops combined with suppression, POAM-42). Event catalogue: M3 `relay.start` and `tftp.transfer.*` fields, `boot_policy.applied`, `.rejected`, `.fetch_failed`, `boot.device.stopped`, `boot.kit.incomplete`. Large-file note for a Windows PE `.wim`. |
 | 2026-10-27 | Evidence status: boot smoke S1 to S8 passed in CI run 40438138720; the Secure Boot note now cites S5 and states its limits. |

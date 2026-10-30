@@ -25,18 +25,21 @@ is NOT RUN, and so is M2's MT-1. CI on `m3/build`:
 - run 40910029759 (commit fff029f): S9 passed, GPT-OBS-001 was
   accepted, and boot smoke passed 11 of 11; `gates` and `pg-integration`
   timed out on a test hang that was fixed afterwards;
-- run 40928612312 (commit 21c1efb, the current commit): conclusion
+- run 40928612312 (commit 21c1efb): conclusion
   failure. `gates`, `pg-integration`, boot smoke S1 to S10, `fuzz-smoke`
   (24 targets) and `large-upload` passed. In `windows-agent` the FIPS
   probe and the raw-disk VHD test passed (GPT-OBS-001 accepted again),
   and the BOOT-004 VHD test failed: Windows refused (error 87) to assign
   a drive letter to the new Windows partition, before any format. The
   agent's own Windows letter step may fail the same way after the wipe;
-  this is an open defect pending the owner's decision (POAM-53).
+  this was fixed in fix round 4 (POAM-53, closed);
+- run 40980499705 (commit 7cd5ecf, after fix rounds 4 to 7): all 35
+  jobs passed, including `windows-agent` with every VHD and WinSink test.
 
 The M3 behaviour below is tested in-process (QA run on commit 647af22,
 macOS, functional evidence only) and by the review fix rounds' own
-tests, which passed in CI run 40928612312 but have no QA re-run. See
+tests, which passed in CI (runs 40928612312 and 40980499705) but have
+no QA re-run. See
 [TEST_EVIDENCE.md](../compliance/TEST_EVIDENCE.md).
 
 **M2 evidence status (read first).** The server's behaviour is tested
@@ -1556,6 +1559,7 @@ PE on the boot network; FIPS in Windows PE unconfirmed; MT-2 NOT RUN.
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | Evidence status: CI run 40980499705 (all 35 jobs green); POAM-53 closed. M3 still not met. |
 | 2026-10-29 | Evidence status: CI run 40928612312 recorded (failure in `windows-agent` only: BOOT-004 VHD test, error 87 before any format; open defect POAM-53; everything else named passed). M3 still not met. |
 | 2026-10-29 | M3 (WU-16; `m3/build` at 21c1efb). Title and M3 evidence status (M3 not met; MT-2 and MT-1 NOT RUN; CI runs 40818350636, 40876728637, 40910029759 as recorded; 40928612312 pending). New files and modes (device TLS key, plan, boot-policy and code HMAC keys); `usgp_admin` grants of migration 0004; keys for the device listener and their purposes; `keygen` purposes and `boot-service enrol`, `disable` and `raise-generation` commands; configuration reference for `[signing]` additions, `[device_api]` (every key, including `max_pending_sessions_per_boot_service`, `unauthorised_idle_timeout_s`, `session_opens_per_min`, `session_opens_per_boot_service_per_min`, `max_connections_per_boot_service`, `boot_service_refresh_s`), `[codes]` and `[jobs]`; example configuration extended (checked against `server-m3.toml`). New sections: Device listener (admission by served subnet and the 30 s refresh after enrolment, token bound to the source network, expiry and lapse, fail-closed audit, device routes), Device codes and approval, Boot services (relay enrolment, disable, no rotation, raise-generation), Jobs (states, server time limits, acknowledge, the operator fail route), Boot stops. M3 events, alerts, M3 reason codes, restore steps 7 and 8 (raise the generation; review lost stops), schema 4, device-listener network controls, M3 known gaps. |
 | 2026-10-28 | CI on commit 5ea03a1. Rewrote the evidence status: `pg-integration` PASS (`migrate_pg`, `repo_pg`, `audit_pg` 9 each, `e2e_pg` 1); `large-upload` PASS (peak 54 MiB); `fuzz-smoke` and `wim-samples` `verify` PASS with the S11/S12 rules; MT-1 NOT RUN; M2 met except exit 1a (MT-1, owner action), so not met. Audit-row protection now cites `audit_pg` and `repo_pg`, with what each tests. Limits note records both large-upload peaks. Known gaps: POAM-34 closed; `repo_pg` and `e2e_pg` removed from the NOT RUN list. |

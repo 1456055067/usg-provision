@@ -79,7 +79,9 @@ only, POAM-2), the review fix rounds' local runs (not QA-confirmed), and
 four CI runs. The CI results are recorded as the orchestrator stated
 them: run 40818350636 (647af22) before the reviews; 40876728637
 (349de13); 40910029759 (fff029f); and 40928612312 (21c1efb, the current
-head), conclusion failure in `windows-agent` only (POAM-53).
+head at the time), conclusion failure in `windows-agent` only (POAM-53,
+since closed). CI run 40980499705 (commit 7cd5ecf, after fix rounds 4
+to 7) then passed all 35 jobs.
 
 M3 exit criteria (roadmap M3):
 
@@ -90,8 +92,8 @@ M3 exit criteria (roadmap M3):
 | 3. No wipe without a durable `disk.wipe.authorised` record, tested by failing the audit write | PASS (QA M3, memory store): `api::device_session::wipe_record_failure_creates_no_job`, agent `sim_e2e::wipe_record_failure_starts_nothing`, `disk::wipe::refused_without_durable_record_nothing_written`, `deploy::engine::plan_without_a_durable_wipe_record_is_refused`. PostgreSQL: the deferred `job_wipe_authorised` trigger (`repo_pg::m3_wipe_guard`) PASS in CI 40818350636; the PostgreSQL audit-write fault (`repo_pg::m3_wipe_record_failure_creates_no_job`, QA-005) PASS in CI 40928612312 |
 | 4. A tampered chunk or plan signature fails the job before any disk write, with a persistent error at the device and in the job status | PASS (QA M3): `deploy::engine` tamper tests; agent `sim_e2e::tampered_chunk_fails_before_any_write`, `approval_path_with_a_wrong_plan_key_writes_nothing`; agent `qa_m3` plan payload, plan signature and chunk tests (exit 4, nothing written, same failure fields at the device and in the job). Real Windows: MT-2 L11 NOT RUN |
 
-M3 is **not met**: exit 1 is NOT RUN, and the current commit's CI run
-failed in `windows-agent` (BOOT-004 VHD test; POAM-53).
+M3 is **not met**: exit 1 is NOT RUN. CI on the current commit (run
+40980499705) is green.
 
 **Wipe guard and audit before the wipe (SI-17, AU-5; REQ-DISK-006;
 decision 0018 item 7).** The chain of evidence:
@@ -191,6 +193,7 @@ decision 0018 item 7).** The chain of evidence:
 | 2026-10-29 | M3 CI 40876728637 (349de13) | Workflow `ci` (boot smoke and `windows-agent`) | S10 (GPT-OBS-002) PASS; S1 to S8 PASS; the Windows VHD step and S9 failed. Other jobs are not recorded here |
 | 2026-10-29 | M3 CI 40910029759 (fff029f) | Workflow `ci` | S9 PASS; GPT-OBS-001 accepted (128 entries, first and last usable LBA 34 and 2097118, 512-byte blocks); boot smoke 11 of 11. `gates` and `pg-integration` timed out: four `run_scoped` tests in the agent's `qa_m3.rs` hung after an assertion failed (harness fixed in 21c1efb; the failure itself was the device listener refusing a boot service enrolled in the same second, fixed in the test harness). The fix-round notes record that `boot004_recovery_typed_partition_formats` failed on a drive-letter clash (fixed in 21c1efb) |
 | 2026-10-29 | M3 CI 40928612312 (21c1efb) | Workflow `ci` | Conclusion **failure**. PASS: `gates`, `pg-integration` (so the fix-round M3 tests, including the PostgreSQL QA-005 wipe-record fault test, now have CI evidence), boot smoke S1 to S10, `fuzz-smoke` for 24 targets, `large-upload`. `windows-agent`: FIPS probe PASS; `vhd_raw_io_update_and_volume_letters` PASS (GPT-OBS-001 accepted again; sentinel disk untouched); `boot004_recovery_typed_partition_formats` **FAIL**: the ESP got P:, then `SetVolumeMountPoint` returned error 87 for the Windows partition, before any format. The BOOT-004 recovery-format question has no result (NOT RUN). Likely cause, not confirmed: Windows automount had already given the new volume a letter; the agent's Windows letter path could fail the same way after the wipe. Open defect pending the owner's decision (fourth fix round or POAM; POAM-53) |
+| 2026-10-29 | M3 CI 40980499705 (7cd5ecf, after fix rounds 4 to 7) | Workflow `ci` | Conclusion **success**: all 35 jobs, including `windows-agent`, `gates`, `pg-integration`, boot smoke S1 to S10, `fuzz-smoke` (24 targets) and `large-upload`. `windows-agent`: `vhd_disk` (2) and `winsink` (5) PASS; sentinel disk untouched; `GPT-OBS-001 accepted`; `BOOT-004 recovery-format accepted: NTFS ... (type DE94BBA4-..., attributes 0x8000000000000001)`; `LETTER-OBS Windows letters before assign: [E]`; synthetic WIM apply with every descriptor equal to the stored SDDL; probes OPEN-WAPI-7 (`SetKernelObjectSecurity` verbatim, `SetSecurityInfo` merges), OPEN-WAPI-12 (NORMAL clears directory ARCHIVE, 0x30 to 0x10), OPEN-WAPI-9 (short name settable with 8.3 generation off). POAM-53 closed. M3 still not met (MT-2, MT-1 NOT RUN) |
 | 2026-10-29 | M3 fix rounds 1 to 3 (coders, local, macOS) | `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` (with and without `pg-integration`), `cargo test --workspace --no-fail-fast`, `scripts/check-names.sh`, `scripts/check-pure-rust.sh`, Windows-target clippy of `usgp-winapi` | PASS at round 3: 107 test binaries, no failure; names OK; pure-Rust OK. Not QA-confirmed; PostgreSQL tests compiled but not run locally |
 | 2026-10-29 | M3 fuzz (local, `--sanitizer none`) | `cargo fuzz run <target> … -max_total_time=60` for the 13 WU-14 targets, `agent_http_head`, `winapi_sd`, `winapi_reparse` | PASS, no crash (WU-14 and the release engineer; counts in `TEST_EVIDENCE.md`). No CI `fuzz-smoke` result for an M3 target is recorded |
 | 2026-10-29 | M3 owner lab | MT-2, L1 to L12 | NOT RUN (owner action with licensed media; POAM-59) |
@@ -200,6 +203,7 @@ decision 0018 item 7).** The chain of evidence:
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | Added CI run 40980499705 (7cd5ecf, all 35 jobs green, Windows VHD and WinSink results, probes); preamble and M3 status updated; POAM-53 closed. M3 not met. |
 | 2026-10-29 | CI run 40928612312 recorded as stated (conclusion failure: `windows-agent` BOOT-004 VHD test failed with error 87 before any format; everything else named passed). Exit 3: PostgreSQL QA-005 test now PASS in CI. Preamble and M3 status updated; M3 not met. |
 | 2026-10-29 | M3 (WU-17; `m3/build` at 21c1efb). Added the M3 preamble, the M3 exit-criteria table (exit 1 NOT RUN; exits 2, 3 and 4 PASS in QA M3 with their limits; M3 not met), the wipe-guard and audit-before-wipe evidence chain, and rows for the M3 QA gate run, CI runs 40818350636, 40876728637, 40910029759 (as recorded) and 40928612312 (pending), the fix rounds' local runs, local M3 fuzzing, MT-2 and MT-1 NOT RUN. |
 | 2026-10-28 | CI on commit 5ea03a1 (the committed S11/S12 change on top of the `newer_schema_refused` fix). Added rows for `ci` runs 40633650457 and 40633638960 (all jobs success; `gates` 1133, 2 and 228; `fips-linkage`; `pg-integration` PASS with `migrate_pg`, `repo_pg` and `audit_pg` 9 each and `e2e_pg` 1; `large-upload` PASS, peak RSS 54 MiB; eight `fuzz-smoke` results without ASan, with artifact digests; boot smoke) and `wim-samples` 40633638946 and 40633653170 (`verify` PASS with the S11/S12 rules, 5 `dism_samples`). Added the M2 exit criteria table: met except exit 1a (MT-1, owner action), so M2 is not met. MT-1 label corrected to exit 1a. Corrected the CI 40601242085 feature-gated total from 347 to 217. |

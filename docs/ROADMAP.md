@@ -136,8 +136,8 @@ start, a minimal authenticated operator API with audit arrives in M2.
   - Exits 2, 3 and 4 passed in the M3 QA run (commit 647af22) on the
     in-memory store and simulated platform; the PostgreSQL wipe-record
     fault test and the review fix rounds' tests passed in CI run
-    40928612312, which failed only on the Windows BOOT-004 VHD test, an
-    open defect pending the owner's decision (POAM-53).
+    40928612312. After fix rounds 4 to 7, CI run 40980499705 (commit
+    7cd5ecf) passed all 35 jobs, including the Windows VHD tests.
   - M2's MT-1 is also still NOT RUN.
   - Decisions: 0018 (session, boot content and install defaults), 0019
     (Windows API binding), 0020 (agent trust model), 0021 (minimal relay
@@ -313,5 +313,6 @@ while the check is open (POAM-1).
 
 | Date | Change |
 |------|--------|
+| 2026-10-29 | M3 status: CI run 40980499705 green (all 35 jobs); M3 still not met. |
 | 2026-10-29 | M3 status recorded with CI run 40928612312 (failure in the Windows BOOT-004 VHD test only). |
 | 2026-10-29 | M3 status (built, not met; MT-2 and MT-1 NOT RUN; CI parts and runs named), the decisions taken, the relay enrolment brought forward from M5 (decision 0021) and what M5 still owes, the M4 constraint that no secret goes to a session authorised only by a code or an approval, and the answers to D-2 to D-5. |

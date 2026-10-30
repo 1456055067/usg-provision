@@ -634,7 +634,8 @@ jobs:
           if (-not $wapi.Count) { Write-Output '::error::winsink printed no OPEN-WAPI-7 line'; exit 1 }
           if (-not $still) { Write-Output '::error::the sentinel VHD was detached during the run; the untouched check is void'; exit 1 }
           if ($before -ne $after) { Write-Output "::error::the sentinel disk changed during the VHD tests (REQ-DISK-015): $before -> $after"; exit 1 }
-          Write-Output 'VHD tests: 4 passed; sentinel disk unchanged'
+          $listed = @($env:VHD_TESTS -split '\s+' | Where-Object { $_ }).Count
+          Write-Output "VHD tests: $listed listed tests passed; sentinel disk unchanged"
       - name: Release agent artifact, exe and FIPS DLL as a hashed pair (REL-M3-W0-002)
         # The agent ships as two files that must stay together: the .exe and
         # the AWS-LC FIPS module DLL it imports at load time. Built alone
